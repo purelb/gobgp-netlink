@@ -530,3 +530,57 @@ jobs:
             -v $(pwd)/test:/test \
             gobgp \
             -c "/test/scenario_test/netlink_test.sh"
+
+  # Summary job for branch protection - reports single "ci" status
+  ci:
+    name: ci
+    runs-on: ubuntu-22.04
+    if: always()
+    needs:
+      - unit
+      - protobuf-check
+      - golangci
+      - embedded
+      - lintdoc
+      - build
+      - router
+      - evpn
+      - flowspec
+      - global-policy
+      - graceful-restart
+      - ibgp
+      - rr
+      - as2
+      - ipv4-v6
+      - malformed
+      - rs-policy-grpc
+      - rs-policy
+      - softreset
+      - rs1
+      - rs2
+      - llgr
+      - vrf-neighbor1
+      - vrf-neighbor2
+      - rtc
+      - unnumbered
+      - aspath
+      - addpath
+      - malformed-handling
+      - confederation
+      - zebra
+      - zebra-nht
+      - zapi-v3
+      - zapi-v3-multipath
+      - mup
+      - netlink
+    steps:
+      - name: Check all jobs passed
+        run: |
+          results="${{ needs.unit.result }} ${{ needs.protobuf-check.result }} ${{ needs.golangci.result }} ${{ needs.embedded.result }} ${{ needs.lintdoc.result }} ${{ needs.build.result }} ${{ needs.router.result }} ${{ needs.evpn.result }} ${{ needs.flowspec.result }} ${{ needs.global-policy.result }} ${{ needs.graceful-restart.result }} ${{ needs.ibgp.result }} ${{ needs.rr.result }} ${{ needs.as2.result }} ${{ needs.ipv4-v6.result }} ${{ needs.malformed.result }} ${{ needs.rs-policy-grpc.result }} ${{ needs.rs-policy.result }} ${{ needs.softreset.result }} ${{ needs.rs1.result }} ${{ needs.rs2.result }} ${{ needs.llgr.result }} ${{ needs.vrf-neighbor1.result }} ${{ needs.vrf-neighbor2.result }} ${{ needs.rtc.result }} ${{ needs.unnumbered.result }} ${{ needs.aspath.result }} ${{ needs.addpath.result }} ${{ needs.malformed-handling.result }} ${{ needs.confederation.result }} ${{ needs.zebra.result }} ${{ needs.zebra-nht.result }} ${{ needs.zapi-v3.result }} ${{ needs.zapi-v3-multipath.result }} ${{ needs.mup.result }} ${{ needs.netlink.result }}"
+          for result in $results; do
+            if [[ "$result" != "success" ]]; then
+              echo "One or more jobs failed"
+              exit 1
+            fi
+          done
+          echo "All jobs passed"
