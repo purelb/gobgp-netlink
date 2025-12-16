@@ -17,6 +17,60 @@ gobgp has the following subcommands.
 - [monitor](#5-monitor-subcommand)
 - [mrt](#6-mrt-subcommand)
 
+## Global Options
+
+The gobgp client supports the following global options that apply to all subcommands:
+
+| short | long | description | default |
+|-------|------|-------------|---------|
+| -u | --host | gobgpd API server host | 127.0.0.1 |
+| -p | --port | gobgpd API server port | 50051 |
+| | --target | alternative to host/port for UDS (e.g., `unix:///var/run/gobgp.sock`) | |
+| -j | --json | output in JSON format | false |
+| -d | --debug | enable debug output | false |
+| -q | --quiet | suppress output | false |
+| | --tls | enable TLS connection | false |
+| | --tls-client-cert-file | path to TLS client certificate | |
+| | --tls-client-key-file | path to TLS client key | |
+| | --tls-ca-file | path to TLS CA certificate | |
+
+### Environment Variables
+
+All global options can also be configured via environment variables with the `GOBGP_` prefix. Environment variables use uppercase names with hyphens replaced by underscores.
+
+| Environment Variable | Equivalent Flag |
+|---------------------|-----------------|
+| `GOBGP_HOST` | `--host` |
+| `GOBGP_PORT` | `--port` |
+| `GOBGP_TARGET` | `--target` |
+| `GOBGP_JSON` | `--json` |
+| `GOBGP_DEBUG` | `--debug` |
+| `GOBGP_QUIET` | `--quiet` |
+| `GOBGP_TLS` | `--tls` |
+| `GOBGP_TLS_CLIENT_CERT_FILE` | `--tls-client-cert-file` |
+| `GOBGP_TLS_CLIENT_KEY_FILE` | `--tls-client-key-file` |
+| `GOBGP_TLS_CA_FILE` | `--tls-ca-file` |
+
+**Example:**
+
+```shell
+# Using command-line flags
+% gobgp --host 192.168.1.1 --port 50051 neighbor
+
+# Using environment variables
+% export GOBGP_HOST=192.168.1.1
+% export GOBGP_PORT=50051
+% gobgp neighbor
+
+# Environment variables with TLS
+% export GOBGP_HOST=192.168.1.1
+% export GOBGP_TLS=true
+% export GOBGP_TLS_CA_FILE=/etc/ssl/certs/ca.pem
+% gobgp neighbor
+```
+
+**Precedence:** Command-line flags take precedence over environment variables.
+
 ## 1. global subcommand
 
 ### 1.1 Global Configuration
