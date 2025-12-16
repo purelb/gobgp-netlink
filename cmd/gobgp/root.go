@@ -21,9 +21,11 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
+	"strings"
 
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var globalOpts struct {
@@ -54,6 +56,19 @@ func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use: "gobgp",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// Read values from viper (which merges flags + env vars)
+			globalOpts.Host = viper.GetString("host")
+			globalOpts.Port = viper.GetInt("port")
+			globalOpts.Target = viper.GetString("target")
+			globalOpts.Debug = viper.GetBool("debug")
+			globalOpts.Quiet = viper.GetBool("quiet")
+			globalOpts.Json = viper.GetBool("json")
+			globalOpts.TLS = viper.GetBool("tls")
+			globalOpts.ClientCertFile = viper.GetString("tls-client-cert-file")
+			globalOpts.ClientKeyFile = viper.GetString("tls-client-key-file")
+			globalOpts.CaFile = viper.GetString("tls-ca-file")
+			globalOpts.PprofPort = viper.GetInt("pprof-port")
+
 			if globalOpts.PprofPort > 0 {
 				go func() {
 					address := "localhost:" + strconv.Itoa(globalOpts.PprofPort)
@@ -102,6 +117,12 @@ func newRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().StringVarP(&globalOpts.ClientCertFile, "tls-client-cert-file", "", "", "Optional file path to TLS client certificate")
 	rootCmd.PersistentFlags().StringVarP(&globalOpts.ClientKeyFile, "tls-client-key-file", "", "", "Optional file path to TLS client key")
 	rootCmd.PersistentFlags().StringVarP(&globalOpts.CaFile, "tls-ca-file", "", "", "The file containing the CA root cert file")
+
+	// Bind environment variables (prefix: GOBGP_)
+	viper.SetEnvPrefix("GOBGP")
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	viper.AutomaticEnv()
+	viper.BindPFlags(rootCmd.PersistentFlags())
 
 	globalCmd := newGlobalCmd()
 	neighborCmd := newNeighborCmd()
