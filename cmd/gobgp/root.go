@@ -122,7 +122,7 @@ func newRootCmd() *cobra.Command {
 	viper.SetEnvPrefix("GOBGP")
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	viper.AutomaticEnv()
-	viper.BindPFlags(rootCmd.PersistentFlags())
+	_ = viper.BindPFlags(rootCmd.PersistentFlags())
 
 	globalCmd := newGlobalCmd()
 	neighborCmd := newNeighborCmd()
