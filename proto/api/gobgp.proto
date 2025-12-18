@@ -99,7 +99,8 @@ service GoBgpService {
   rpc EnableZebra(EnableZebraRequest) returns (EnableZebraResponse);
 
   rpc GetNetlink(GetNetlinkRequest) returns (GetNetlinkResponse);
-  rpc EnableNetlink(EnableNetlinkRequest) returns (EnableNetlinkResponse);
+  rpc EnableNetlinkImport(EnableNetlinkImportRequest) returns (EnableNetlinkImportResponse);
+  rpc EnableNetlinkExport(EnableNetlinkExportRequest) returns (EnableNetlinkExportResponse);
   rpc GetNetlinkImportStats(GetNetlinkImportStatsRequest) returns (GetNetlinkImportStatsResponse);
   rpc ListNetlinkExport(ListNetlinkExportRequest) returns (stream ListNetlinkExportResponse);
   rpc GetNetlinkExportStats(GetNetlinkExportStatsRequest) returns (GetNetlinkExportStatsResponse);
@@ -589,15 +590,33 @@ message EnableZebraRequest {
 
 message EnableZebraResponse {}
 
-message EnableNetlinkRequest {
-  string vrf = 1;
-  repeated string interfaces = 2;
-  string community = 3;
-  repeated string community_list = 4;
-  repeated string large_community_list = 5;
+// EnableNetlinkImport configures netlink route import (Linux kernel -> BGP)
+message EnableNetlinkImportRequest {
+  string vrf = 1; // VRF name (empty for default)
+  repeated string interfaces = 2; // Interface list to import routes from
 }
 
-message EnableNetlinkResponse {}
+message EnableNetlinkImportResponse {}
+
+// NetlinkExportRule defines a rule for matching routes to export
+message NetlinkExportRuleConfig {
+  string name = 1; // Rule name (optional)
+  repeated string community_list = 2; // Standard communities to match
+  repeated string large_community_list = 3; // Large communities to match
+  string vrf = 4; // Target Linux VRF name
+  int32 table_id = 5; // Target Linux routing table ID
+  uint32 metric = 6; // Route metric
+  bool validate_nexthop = 7; // Whether to validate nexthop reachability
+}
+
+// EnableNetlinkExport configures netlink route export (BGP -> Linux kernel)
+message EnableNetlinkExportRequest {
+  uint32 dampening_interval = 1; // Update dampening interval in milliseconds
+  int32 route_protocol = 2; // RTPROT_* value (default: 186 for BGP)
+  repeated NetlinkExportRuleConfig rules = 3; // Export rules
+}
+
+message EnableNetlinkExportResponse {}
 
 message ListNetlinkExportRequest {
   string vrf = 1; // Filter by VRF name (empty = all VRFs)

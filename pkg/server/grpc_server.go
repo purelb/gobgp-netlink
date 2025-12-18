@@ -816,6 +816,14 @@ func (s *server) GetNetlink(ctx context.Context, r *api.GetNetlinkRequest) (*api
 	return s.bgpServer.GetNetlink(ctx, r)
 }
 
+func (s *server) EnableNetlinkImport(ctx context.Context, r *api.EnableNetlinkImportRequest) (*api.EnableNetlinkImportResponse, error) {
+	return &api.EnableNetlinkImportResponse{}, s.bgpServer.EnableNetlinkImport(ctx, r)
+}
+
+func (s *server) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlinkExportRequest) (*api.EnableNetlinkExportResponse, error) {
+	return &api.EnableNetlinkExportResponse{}, s.bgpServer.EnableNetlinkExport(ctx, r)
+}
+
 func (s *server) GetNetlinkImportStats(ctx context.Context, r *api.GetNetlinkImportStatsRequest) (*api.GetNetlinkImportStatsResponse, error) {
 	return s.bgpServer.GetNetlinkImportStats(ctx, r)
 }

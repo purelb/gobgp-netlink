@@ -72,3 +72,117 @@ func TestEnableNetlink(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, s.bgpConfig.Netlink.Export.Enabled)
 }
+
+func TestEnableNetlinkImportGRPC(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+
+	err := s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{
+			Asn:        1,
+			RouterId:   "1.1.1.1",
+			ListenPort: -1,
+		},
+	})
+	assert.NoError(t, err)
+
+	// Test nil request
+	err = s.EnableNetlinkImport(context.Background(), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nil request")
+
+	// Test enabling import via gRPC
+	err = s.EnableNetlinkImport(context.Background(), &api.EnableNetlinkImportRequest{
+		Vrf:        "testvrf",
+		Interfaces: []string{"eth0", "eth1"},
+	})
+	assert.NoError(t, err)
+
+	// Verify config was updated
+	assert.True(t, s.bgpConfig.Netlink.Import.Enabled)
+	assert.Equal(t, "testvrf", s.bgpConfig.Netlink.Import.Vrf)
+	assert.Equal(t, []string{"eth0", "eth1"}, s.bgpConfig.Netlink.Import.InterfaceList)
+}
+
+func TestEnableNetlinkExportGRPC(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+
+	err := s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{
+			Asn:        1,
+			RouterId:   "1.1.1.1",
+			ListenPort: -1,
+		},
+	})
+	assert.NoError(t, err)
+
+	// Test nil request
+	err = s.EnableNetlinkExport(context.Background(), nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nil request")
+
+	// Test enabling export via gRPC with rules
+	err = s.EnableNetlinkExport(context.Background(), &api.EnableNetlinkExportRequest{
+		DampeningInterval: 500,
+		RouteProtocol:     186,
+		Rules: []*api.NetlinkExportRuleConfig{
+			{
+				Name:          "rule1",
+				CommunityList: []string{"65000:100"},
+				Vrf:           "exportvrf",
+				TableId:       100,
+				Metric:        10,
+			},
+			{
+				Name:               "rule2",
+				LargeCommunityList: []string{"65000:1:1"},
+				TableId:            200,
+				ValidateNexthop:    true,
+			},
+		},
+	})
+	assert.NoError(t, err)
+
+	// Verify config was updated
+	assert.True(t, s.bgpConfig.Netlink.Export.Enabled)
+	assert.Equal(t, uint32(500), s.bgpConfig.Netlink.Export.DampeningInterval)
+	assert.Equal(t, 186, s.bgpConfig.Netlink.Export.RouteProtocol)
+	assert.Len(t, s.bgpConfig.Netlink.Export.Rules, 2)
+
+	// Verify first rule
+	assert.Equal(t, "rule1", s.bgpConfig.Netlink.Export.Rules[0].Name)
+	assert.Equal(t, []string{"65000:100"}, s.bgpConfig.Netlink.Export.Rules[0].CommunityList)
+	assert.Equal(t, "exportvrf", s.bgpConfig.Netlink.Export.Rules[0].Vrf)
+	assert.Equal(t, 100, s.bgpConfig.Netlink.Export.Rules[0].TableId)
+	assert.Equal(t, uint32(10), s.bgpConfig.Netlink.Export.Rules[0].Metric)
+
+	// Verify second rule
+	assert.Equal(t, "rule2", s.bgpConfig.Netlink.Export.Rules[1].Name)
+	assert.Equal(t, []string{"65000:1:1"}, s.bgpConfig.Netlink.Export.Rules[1].LargeCommunityList)
+	assert.Equal(t, 200, s.bgpConfig.Netlink.Export.Rules[1].TableId)
+}
+
+func TestEnableNetlinkExportDefaultRouteProtocol(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+
+	err := s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{
+			Asn:        1,
+			RouterId:   "1.1.1.1",
+			ListenPort: -1,
+		},
+	})
+	assert.NoError(t, err)
+
+	// Test that route_protocol=0 doesn't override existing config
+	s.bgpConfig.Netlink.Export.RouteProtocol = 200 // Set existing value
+	err = s.EnableNetlinkExport(context.Background(), &api.EnableNetlinkExportRequest{
+		RouteProtocol: 0, // Zero should not override
+	})
+	assert.NoError(t, err)
+
+	// RouteProtocol should remain unchanged when 0 is passed
+	assert.Equal(t, 200, s.bgpConfig.Netlink.Export.RouteProtocol)
+}
