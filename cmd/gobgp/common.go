@@ -311,9 +311,11 @@ func newConn() (*grpc.ClientConn, error) {
 	if target == "" {
 		target = net.JoinHostPort(globalOpts.Host, strconv.Itoa(globalOpts.Port))
 	} else if strings.HasPrefix(target, "unix://") {
-		target = target[len("unix://"):]
+		// Use passthrough resolver so gRPC doesn't try to resolve the unix path
+		target = "passthrough:///" + target
 		dialer := func(ctx context.Context, addr string) (net.Conn, error) {
-			return net.Dial("unix", addr)
+			// Strip the unix:// prefix for the actual dial
+			return net.Dial("unix", strings.TrimPrefix(addr, "unix://"))
 		}
 		grpcOpts = append(grpcOpts, grpc.WithContextDialer(dialer))
 	}
