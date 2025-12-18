@@ -1987,6 +1987,71 @@ func (s *BgpServer) StartNetlink(ctx context.Context) error {
 	return nil
 }
 
+// EnableNetlinkImport enables netlink route import (Linux kernel -> BGP) via gRPC
+func (s *BgpServer) EnableNetlinkImport(ctx context.Context, r *api.EnableNetlinkImportRequest) error {
+	if r == nil {
+		return fmt.Errorf("nil request")
+	}
+	return s.mgmtOperation(func() error {
+		// Update config
+		s.bgpConfig.Netlink.Import.Enabled = true
+		s.bgpConfig.Netlink.Import.Vrf = r.Vrf
+		s.bgpConfig.Netlink.Import.InterfaceList = r.Interfaces
+
+		s.logger.Info("Enabling netlink import via gRPC",
+			slog.String("Topic", "netlink"),
+			slog.String("Vrf", r.Vrf),
+			slog.Any("Interfaces", r.Interfaces))
+
+		// Start/restart netlink with new config
+		return s.StartNetlink(ctx)
+	}, false)
+}
+
+// EnableNetlinkExport enables netlink route export (BGP -> Linux kernel) via gRPC
+func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlinkExportRequest) error {
+	if r == nil {
+		return fmt.Errorf("nil request")
+	}
+	return s.mgmtOperation(func() error {
+		// Update config
+		s.bgpConfig.Netlink.Export.Enabled = true
+		s.bgpConfig.Netlink.Export.DampeningInterval = r.DampeningInterval
+		if r.RouteProtocol != 0 {
+			s.bgpConfig.Netlink.Export.RouteProtocol = int(r.RouteProtocol)
+		}
+
+		// Convert rules from API to config format
+		rules := make([]oc.NetlinkExportRule, 0, len(r.Rules))
+		for _, ruleProto := range r.Rules {
+			validateNexthop := true // default to true
+			rule := oc.NetlinkExportRule{
+				Name:               ruleProto.Name,
+				CommunityList:      ruleProto.CommunityList,
+				LargeCommunityList: ruleProto.LargeCommunityList,
+				Vrf:                ruleProto.Vrf,
+				TableId:            int(ruleProto.TableId),
+				Metric:             ruleProto.Metric,
+				ValidateNexthop:    &validateNexthop,
+			}
+			if !ruleProto.ValidateNexthop {
+				validateNexthop = false
+			}
+			rules = append(rules, rule)
+		}
+		s.bgpConfig.Netlink.Export.Rules = rules
+
+		s.logger.Info("Enabling netlink export via gRPC",
+			slog.String("Topic", "netlink"),
+			slog.Uint64("DampeningInterval", uint64(r.DampeningInterval)),
+			slog.Int("RouteProtocol", int(r.RouteProtocol)),
+			slog.Int("RuleCount", len(rules)))
+
+		// Start/restart netlink with new config
+		return s.StartNetlink(ctx)
+	}, false)
+}
+
 func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkExportRequest, fn func(*api.ListNetlinkExportResponse)) error {
 	if s.netlinkExportClient == nil {
 		return fmt.Errorf("netlink export not enabled")
