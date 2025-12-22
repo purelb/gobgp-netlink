@@ -2052,6 +2052,158 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 	}, false)
 }
 
+// DisableNetlinkImport disables netlink route import via gRPC
+func (s *BgpServer) DisableNetlinkImport(ctx context.Context, r *api.DisableNetlinkImportRequest) error {
+	if r == nil {
+		return fmt.Errorf("nil request")
+	}
+	return s.mgmtOperation(func() error {
+		if s.netlinkClient == nil {
+			return fmt.Errorf("netlink import not enabled")
+		}
+		// keep_routes=false (default) means withdraw routes
+		// keep_routes=true means don't withdraw
+		withdrawRoutes := !r.KeepRoutes
+		s.netlinkClient.stop(withdrawRoutes)
+		s.bgpConfig.Netlink.Import.Enabled = false
+		s.netlinkClient = nil
+		s.logger.Info("Disabled netlink import via gRPC",
+			slog.String("Topic", "netlink"),
+			slog.Bool("WithdrawRoutes", withdrawRoutes))
+		return nil
+	}, false)
+}
+
+// DisableNetlinkExport disables netlink route export via gRPC
+func (s *BgpServer) DisableNetlinkExport(ctx context.Context, r *api.DisableNetlinkExportRequest) error {
+	if r == nil {
+		return fmt.Errorf("nil request")
+	}
+	return s.mgmtOperation(func() error {
+		if s.netlinkExportClient == nil {
+			return fmt.Errorf("netlink export not enabled")
+		}
+		// keep_routes=false (default) means flush routes
+		// keep_routes=true means don't flush
+		flushRoutes := !r.KeepRoutes
+		_ = s.netlinkExportClient.stop(flushRoutes)
+		s.bgpConfig.Netlink.Export.Enabled = false
+		s.netlinkExportClient = nil
+		s.logger.Info("Disabled netlink export via gRPC",
+			slog.String("Topic", "netlink"),
+			slog.Bool("FlushRoutes", flushRoutes))
+		return nil
+	}, false)
+}
+
+// EnableVrfNetlinkImport enables netlink import for a specific VRF
+// The VRF must already exist (created via AddVrf)
+func (s *BgpServer) EnableVrfNetlinkImport(ctx context.Context, r *api.EnableVrfNetlinkImportRequest) error {
+	if r == nil || r.Vrf == "" {
+		return fmt.Errorf("nil request or empty VRF name")
+	}
+	return s.mgmtOperation(func() error {
+		// Find existing VRF config entry - VRF must exist
+		for i := range s.bgpConfig.Vrfs {
+			if s.bgpConfig.Vrfs[i].Config.Name == r.Vrf {
+				s.bgpConfig.Vrfs[i].NetlinkImport.Enabled = true
+				s.bgpConfig.Vrfs[i].NetlinkImport.InterfaceList = r.Interfaces
+				if s.netlinkClient != nil {
+					s.netlinkClient.rescan()
+				}
+				s.logger.Info("Enabled VRF netlink import via gRPC",
+					slog.String("Topic", "netlink"),
+					slog.String("VRF", r.Vrf),
+					slog.Any("Interfaces", r.Interfaces))
+				return nil
+			}
+		}
+		return fmt.Errorf("VRF %s not found - create it first via AddVrf", r.Vrf)
+	}, false)
+}
+
+// DisableVrfNetlinkImport disables netlink import for a specific VRF
+func (s *BgpServer) DisableVrfNetlinkImport(ctx context.Context, r *api.DisableVrfNetlinkImportRequest) error {
+	if r == nil || r.Vrf == "" {
+		return fmt.Errorf("nil request or empty VRF name")
+	}
+	return s.mgmtOperation(func() error {
+		for i := range s.bgpConfig.Vrfs {
+			if s.bgpConfig.Vrfs[i].Config.Name == r.Vrf {
+				s.bgpConfig.Vrfs[i].NetlinkImport.Enabled = false
+				// keep_routes=false (default) means withdraw
+				if !r.KeepRoutes && s.netlinkClient != nil {
+					s.netlinkClient.withdrawVrf(r.Vrf)
+				}
+				s.logger.Info("Disabled VRF netlink import via gRPC",
+					slog.String("Topic", "netlink"),
+					slog.String("VRF", r.Vrf),
+					slog.Bool("WithdrawRoutes", !r.KeepRoutes))
+				return nil
+			}
+		}
+		return fmt.Errorf("VRF %s not found", r.Vrf)
+	}, false)
+}
+
+// EnableVrfNetlinkExport enables netlink export for a specific VRF
+// The VRF must already exist (created via AddVrf)
+func (s *BgpServer) EnableVrfNetlinkExport(ctx context.Context, r *api.EnableVrfNetlinkExportRequest) error {
+	if r == nil || r.Vrf == "" {
+		return fmt.Errorf("nil request or empty VRF name")
+	}
+	return s.mgmtOperation(func() error {
+		for i := range s.bgpConfig.Vrfs {
+			if s.bgpConfig.Vrfs[i].Config.Name == r.Vrf {
+				vrfConfig := &s.bgpConfig.Vrfs[i]
+				vrfConfig.NetlinkExport.Enabled = true
+				if r.Config != nil {
+					vrfConfig.NetlinkExport.LinuxVrf = r.Config.LinuxVrf
+					vrfConfig.NetlinkExport.LinuxTableId = int(r.Config.LinuxTableId)
+					vrfConfig.NetlinkExport.Metric = r.Config.Metric
+					// skip_nexthop_validation=false (default) means validate
+					validateNexthop := !r.Config.SkipNexthopValidation
+					vrfConfig.NetlinkExport.ValidateNexthop = &validateNexthop
+					vrfConfig.NetlinkExport.CommunityList = r.Config.CommunityList
+					vrfConfig.NetlinkExport.LargeCommunityList = r.Config.LargeCommunityList
+				}
+				if s.netlinkExportClient != nil {
+					_ = s.netlinkExportClient.buildVrfMappings()
+				}
+				s.logger.Info("Enabled VRF netlink export via gRPC",
+					slog.String("Topic", "netlink"),
+					slog.String("VRF", r.Vrf))
+				return nil
+			}
+		}
+		return fmt.Errorf("VRF %s not found - create it first via AddVrf", r.Vrf)
+	}, false)
+}
+
+// DisableVrfNetlinkExport disables netlink export for a specific VRF
+func (s *BgpServer) DisableVrfNetlinkExport(ctx context.Context, r *api.DisableVrfNetlinkExportRequest) error {
+	if r == nil || r.Vrf == "" {
+		return fmt.Errorf("nil request or empty VRF name")
+	}
+	return s.mgmtOperation(func() error {
+		for i := range s.bgpConfig.Vrfs {
+			if s.bgpConfig.Vrfs[i].Config.Name == r.Vrf {
+				s.bgpConfig.Vrfs[i].NetlinkExport.Enabled = false
+				// keep_routes=false (default) means flush
+				if !r.KeepRoutes && s.netlinkExportClient != nil {
+					_ = s.netlinkExportClient.flushVrf(r.Vrf)
+				}
+				s.logger.Info("Disabled VRF netlink export via gRPC",
+					slog.String("Topic", "netlink"),
+					slog.String("VRF", r.Vrf),
+					slog.Bool("FlushRoutes", !r.KeepRoutes))
+				return nil
+			}
+		}
+		return fmt.Errorf("VRF %s not found", r.Vrf)
+	}, false)
+}
+
 func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkExportRequest, fn func(*api.ListNetlinkExportResponse)) error {
 	if s.netlinkExportClient == nil {
 		return fmt.Errorf("netlink export not enabled")

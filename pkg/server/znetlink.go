@@ -44,9 +44,11 @@ type netlinkClient struct {
 	client *netlink.NetlinkClient
 	server *BgpServer
 	dead   chan struct{}
+	done   chan struct{} // signals loop has exited
 	// advertisedPaths tracks paths per VRF (vrf name -> prefix -> path)
 	// empty string key is used for global table
 	advertisedPaths map[string]map[string]*table.Path
+	pathsMu         sync.RWMutex // protects advertisedPaths
 	stats           netlinkImportStats
 	statsMu         sync.RWMutex
 }
@@ -61,6 +63,7 @@ func newNetlinkClient(s *BgpServer) (*netlinkClient, error) {
 		client:          n,
 		server:          s,
 		dead:            make(chan struct{}),
+		done:            make(chan struct{}),
 		advertisedPaths: make(map[string]map[string]*table.Path),
 	}
 	w.runImport()
@@ -133,10 +136,13 @@ func (n *netlinkClient) runImport() {
 }
 
 func (n *netlinkClient) importForVrf(vrfName string, interfaces []string) {
+	n.pathsMu.Lock()
 	// Initialize VRF tracking if needed
 	if n.advertisedPaths[vrfName] == nil {
 		n.advertisedPaths[vrfName] = make(map[string]*table.Path)
 	}
+	previousPaths := n.advertisedPaths[vrfName]
+	n.pathsMu.Unlock()
 
 	n.server.logger.Debug("Starting VRF import scan",
 		slog.String("Topic", "netlink"),
@@ -176,12 +182,12 @@ func (n *netlinkClient) importForVrf(vrfName string, interfaces []string) {
 		slog.String("Topic", "netlink"),
 		slog.String("VRF", vrfName),
 		slog.Int("CurrentPaths", len(currentPaths)),
-		slog.Int("AdvertisedPaths", len(n.advertisedPaths[vrfName])))
+		slog.Int("AdvertisedPaths", len(previousPaths)))
 
 	// Find new paths to add
 	newPathList := make([]*table.Path, 0)
 	for key, path := range currentPaths {
-		if _, ok := n.advertisedPaths[vrfName][key]; !ok {
+		if _, ok := previousPaths[key]; !ok {
 			newPathList = append(newPathList, path)
 			n.server.logger.Debug("New route to import",
 				slog.String("Topic", "netlink"),
@@ -193,7 +199,7 @@ func (n *netlinkClient) importForVrf(vrfName string, interfaces []string) {
 
 	// Find old paths to withdraw
 	withdrawnPathList := make([]*table.Path, 0)
-	for key, path := range n.advertisedPaths[vrfName] {
+	for key, path := range previousPaths {
 		if _, ok := currentPaths[key]; !ok {
 			n.server.logger.Debug("Withdrawing route from netlink",
 				slog.String("Topic", "netlink"),
@@ -204,7 +210,9 @@ func (n *netlinkClient) importForVrf(vrfName string, interfaces []string) {
 	}
 
 	// Update advertised paths for this VRF
+	n.pathsMu.Lock()
 	n.advertisedPaths[vrfName] = currentPaths
+	n.pathsMu.Unlock()
 
 	// Propagate changes
 	if len(newPathList) > 0 {
@@ -262,6 +270,7 @@ func (n *netlinkClient) rescan() {
 
 func (n *netlinkClient) loop() {
 	n.server.logger.Debug("starting netlink client loop", slog.String("Topic", "netlink"))
+	defer close(n.done) // signal loop has exited
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -317,4 +326,56 @@ func (n *netlinkClient) getStats() netlinkImportStats {
 	n.statsMu.RLock()
 	defer n.statsMu.RUnlock()
 	return n.stats
+}
+
+// stop shuts down the netlink import client
+// If withdrawRoutes is true (keep_routes=false), withdraw all imported routes from RIB
+func (n *netlinkClient) stop(withdrawRoutes bool) {
+	// Signal loop to exit
+	close(n.dead)
+
+	// Wait for loop goroutine to exit before accessing advertisedPaths
+	<-n.done
+
+	if withdrawRoutes {
+		n.pathsMu.Lock()
+		for vrfName, vrfPaths := range n.advertisedPaths {
+			withdrawList := make([]*table.Path, 0, len(vrfPaths))
+			for _, path := range vrfPaths {
+				withdrawList = append(withdrawList, path.Clone(true))
+			}
+			if len(withdrawList) > 0 {
+				if err := n.server.addPathList(vrfName, withdrawList); err != nil {
+					n.server.logger.Error("failed to withdraw paths during stop",
+						slog.String("Topic", "netlink"),
+						slog.String("VRF", vrfName),
+						slog.Any("Error", err))
+				}
+			}
+		}
+		n.advertisedPaths = make(map[string]map[string]*table.Path)
+		n.pathsMu.Unlock()
+	}
+}
+
+// withdrawVrf withdraws all imported routes for a specific VRF
+func (n *netlinkClient) withdrawVrf(vrfName string) {
+	n.pathsMu.Lock()
+	defer n.pathsMu.Unlock()
+
+	if vrfPaths, ok := n.advertisedPaths[vrfName]; ok {
+		withdrawList := make([]*table.Path, 0, len(vrfPaths))
+		for _, path := range vrfPaths {
+			withdrawList = append(withdrawList, path.Clone(true))
+		}
+		if len(withdrawList) > 0 {
+			if err := n.server.addPathList(vrfName, withdrawList); err != nil {
+				n.server.logger.Error("failed to withdraw VRF paths",
+					slog.String("Topic", "netlink"),
+					slog.String("VRF", vrfName),
+					slog.Any("Error", err))
+			}
+		}
+		delete(n.advertisedPaths, vrfName)
+	}
 }

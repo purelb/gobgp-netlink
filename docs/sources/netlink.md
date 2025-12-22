@@ -788,16 +788,105 @@ Export Statistics:
 gobgp netlink export flush
 ```
 
+## Runtime Configuration Commands
+
+These commands allow you to enable/disable netlink features at runtime via gRPC, without modifying the config file.
+
+### Enable Import
+
+```bash
+# Enable global import
+gobgp netlink enable-import --interfaces eth0,eth1
+
+# Enable import with target VRF
+gobgp netlink enable-import --vrf customer-a --interfaces eth2,eth3
+```
+
+### Disable Import
+
+```bash
+# Disable import and withdraw all imported routes (default)
+gobgp netlink disable-import
+
+# Disable import but keep routes in RIB
+gobgp netlink disable-import --keep-routes
+```
+
+### Enable Export
+
+```bash
+# Enable global export with defaults
+gobgp netlink enable-export
+
+# Enable with custom settings
+gobgp netlink enable-export --dampening-interval 200 --route-protocol 186
+```
+
+### Disable Export
+
+```bash
+# Disable export and flush all exported routes from kernel (default)
+gobgp netlink disable-export
+
+# Disable export but keep routes in kernel
+gobgp netlink disable-export --keep-routes
+```
+
+### Per-VRF Import
+
+```bash
+# Enable import for a specific VRF (VRF must already exist via AddVrf)
+gobgp netlink vrf-enable-import customer-a --interfaces eth2,eth3
+
+# Disable VRF import and withdraw routes (default)
+gobgp netlink vrf-disable-import customer-a
+
+# Disable VRF import but keep routes
+gobgp netlink vrf-disable-import customer-a --keep-routes
+```
+
+### Per-VRF Export
+
+```bash
+# Enable export for a specific VRF (VRF must already exist via AddVrf)
+gobgp netlink vrf-enable-export customer-a
+
+# Enable with full options
+gobgp netlink vrf-enable-export customer-a \
+  --linux-vrf linux-customer-a \
+  --table-id 100 \
+  --metric 20 \
+  --communities 65000:100,65000:101 \
+  --large-communities 65000:1:100
+
+# Skip nexthop validation
+gobgp netlink vrf-enable-export customer-a --skip-nexthop-validation
+
+# Disable VRF export and flush routes (default)
+gobgp netlink vrf-disable-export customer-a
+
+# Disable VRF export but keep routes in kernel
+gobgp netlink vrf-disable-export customer-a --keep-routes
+```
+
 ## Command Structure
 
 ```
-gobgp netlink              # Status overview
-├── import                 # Import configuration
-│   └── stats              # Import statistics
-└── export                 # Exported routes
-    ├── rules              # Export rules configuration
-    ├── stats              # Export statistics
-    └── flush              # Remove all exported routes
+gobgp netlink                    # Status overview
+├── import                       # Import configuration
+│   └── stats                    # Import statistics
+├── export                       # Exported routes
+│   ├── rules                    # Export rules configuration
+│   ├── stats                    # Export statistics
+│   └── flush                    # Remove all exported routes
+├── enable-import                # Enable global import (runtime)
+├── disable-import               # Disable global import (runtime)
+├── enable-export                # Enable global export (runtime)
+├── disable-export               # Disable global export (runtime)
+├── vrf-enable-import <vrf>      # Enable per-VRF import (runtime)
+├── vrf-disable-import <vrf>     # Disable per-VRF import (runtime)
+├── vrf-enable-export <vrf>      # Enable per-VRF export (runtime)
+└── vrf-disable-export <vrf>     # Disable per-VRF export (runtime)
 ```
 
 ---
@@ -844,6 +933,75 @@ message GetNetlinkImportStatsResponse {
   int64 last_withdraw_time = 5;
   int64 last_error_time = 6;
   string last_error_msg = 7;
+}
+```
+
+### EnableNetlinkImport
+
+Enable netlink route import at runtime.
+
+**RPC Definition:**
+```protobuf
+rpc EnableNetlinkImport(EnableNetlinkImportRequest) returns (EnableNetlinkImportResponse);
+```
+
+**Request Message:**
+```protobuf
+message EnableNetlinkImportRequest {
+  string vrf = 1;                 // VRF name (empty for default/global)
+  repeated string interfaces = 2; // Interface list to import routes from
+}
+```
+
+### DisableNetlinkImport
+
+Disable netlink route import at runtime.
+
+**RPC Definition:**
+```protobuf
+rpc DisableNetlinkImport(DisableNetlinkImportRequest) returns (DisableNetlinkImportResponse);
+```
+
+**Request Message:**
+```protobuf
+message DisableNetlinkImportRequest {
+  bool keep_routes = 1; // If true, keep imported routes in RIB (default: false = withdraw routes)
+}
+```
+
+**Note:** By default (`keep_routes=false`), all imported routes are withdrawn from the RIB when import is disabled.
+
+### EnableVrfNetlinkImport
+
+Enable netlink import for a specific VRF. The VRF must already exist (created via AddVrf).
+
+**RPC Definition:**
+```protobuf
+rpc EnableVrfNetlinkImport(EnableVrfNetlinkImportRequest) returns (EnableVrfNetlinkImportResponse);
+```
+
+**Request Message:**
+```protobuf
+message EnableVrfNetlinkImportRequest {
+  string vrf = 1;                 // GoBGP VRF name (required, must exist via AddVrf)
+  repeated string interfaces = 2; // Interface list to import routes from
+}
+```
+
+### DisableVrfNetlinkImport
+
+Disable netlink import for a specific VRF.
+
+**RPC Definition:**
+```protobuf
+rpc DisableVrfNetlinkImport(DisableVrfNetlinkImportRequest) returns (DisableVrfNetlinkImportResponse);
+```
+
+**Request Message:**
+```protobuf
+message DisableVrfNetlinkImportRequest {
+  string vrf = 1;       // VRF name (required)
+  bool keep_routes = 2; // If true, keep imported routes (default: false = withdraw)
 }
 ```
 
@@ -922,6 +1080,85 @@ Remove all exported routes.
 **RPC Definition:**
 ```protobuf
 rpc FlushNetlinkExport(FlushNetlinkExportRequest) returns (FlushNetlinkExportResponse);
+```
+
+### EnableNetlinkExport
+
+Enable netlink route export at runtime.
+
+**RPC Definition:**
+```protobuf
+rpc EnableNetlinkExport(EnableNetlinkExportRequest) returns (EnableNetlinkExportResponse);
+```
+
+**Request Message:**
+```protobuf
+message EnableNetlinkExportRequest {
+  uint32 dampening_interval = 1;          // Update dampening interval in milliseconds
+  int32 route_protocol = 2;               // RTPROT_* value (default: 186 for BGP)
+  repeated NetlinkExportRuleConfig rules = 3; // Export rules
+}
+```
+
+### DisableNetlinkExport
+
+Disable netlink route export at runtime.
+
+**RPC Definition:**
+```protobuf
+rpc DisableNetlinkExport(DisableNetlinkExportRequest) returns (DisableNetlinkExportResponse);
+```
+
+**Request Message:**
+```protobuf
+message DisableNetlinkExportRequest {
+  bool keep_routes = 1; // If true, keep exported routes in Linux kernel (default: false = flush routes)
+}
+```
+
+**Note:** By default (`keep_routes=false`), all exported routes are removed from the Linux kernel when export is disabled.
+
+### EnableVrfNetlinkExport
+
+Enable netlink export for a specific VRF. The VRF must already exist (created via AddVrf).
+
+**RPC Definition:**
+```protobuf
+rpc EnableVrfNetlinkExport(EnableVrfNetlinkExportRequest) returns (EnableVrfNetlinkExportResponse);
+```
+
+**Request Message:**
+```protobuf
+message EnableVrfNetlinkExportRequest {
+  string vrf = 1;                    // GoBGP VRF name (required, must exist via AddVrf)
+  VrfNetlinkExportConfig config = 2; // Export configuration
+}
+
+message VrfNetlinkExportConfig {
+  string linux_vrf = 1;                     // Target Linux VRF name (default: same as GoBGP VRF)
+  int32 linux_table_id = 2;                 // Target Linux table ID (0 = auto-lookup)
+  uint32 metric = 3;                        // Route metric
+  bool skip_nexthop_validation = 4;         // If true, skip nexthop validation (default: false = validate)
+  repeated string community_list = 5;       // Communities to filter (empty = export all)
+  repeated string large_community_list = 6; // Large communities to filter
+}
+```
+
+### DisableVrfNetlinkExport
+
+Disable netlink export for a specific VRF.
+
+**RPC Definition:**
+```protobuf
+rpc DisableVrfNetlinkExport(DisableVrfNetlinkExportRequest) returns (DisableVrfNetlinkExportResponse);
+```
+
+**Request Message:**
+```protobuf
+message DisableVrfNetlinkExportRequest {
+  string vrf = 1;       // VRF name (required)
+  bool keep_routes = 2; // If true, keep exported routes (default: false = flush)
+}
 ```
 
 ---

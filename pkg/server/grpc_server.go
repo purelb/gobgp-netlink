@@ -824,6 +824,30 @@ func (s *server) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlinkEx
 	return &api.EnableNetlinkExportResponse{}, s.bgpServer.EnableNetlinkExport(ctx, r)
 }
 
+func (s *server) DisableNetlinkImport(ctx context.Context, r *api.DisableNetlinkImportRequest) (*api.DisableNetlinkImportResponse, error) {
+	return &api.DisableNetlinkImportResponse{}, s.bgpServer.DisableNetlinkImport(ctx, r)
+}
+
+func (s *server) DisableNetlinkExport(ctx context.Context, r *api.DisableNetlinkExportRequest) (*api.DisableNetlinkExportResponse, error) {
+	return &api.DisableNetlinkExportResponse{}, s.bgpServer.DisableNetlinkExport(ctx, r)
+}
+
+func (s *server) EnableVrfNetlinkImport(ctx context.Context, r *api.EnableVrfNetlinkImportRequest) (*api.EnableVrfNetlinkImportResponse, error) {
+	return &api.EnableVrfNetlinkImportResponse{}, s.bgpServer.EnableVrfNetlinkImport(ctx, r)
+}
+
+func (s *server) DisableVrfNetlinkImport(ctx context.Context, r *api.DisableVrfNetlinkImportRequest) (*api.DisableVrfNetlinkImportResponse, error) {
+	return &api.DisableVrfNetlinkImportResponse{}, s.bgpServer.DisableVrfNetlinkImport(ctx, r)
+}
+
+func (s *server) EnableVrfNetlinkExport(ctx context.Context, r *api.EnableVrfNetlinkExportRequest) (*api.EnableVrfNetlinkExportResponse, error) {
+	return &api.EnableVrfNetlinkExportResponse{}, s.bgpServer.EnableVrfNetlinkExport(ctx, r)
+}
+
+func (s *server) DisableVrfNetlinkExport(ctx context.Context, r *api.DisableVrfNetlinkExportRequest) (*api.DisableVrfNetlinkExportResponse, error) {
+	return &api.DisableVrfNetlinkExportResponse{}, s.bgpServer.DisableVrfNetlinkExport(ctx, r)
+}
+
 func (s *server) GetNetlinkImportStats(ctx context.Context, r *api.GetNetlinkImportStatsRequest) (*api.GetNetlinkImportStatsResponse, error) {
 	return s.bgpServer.GetNetlinkImportStats(ctx, r)
 }
