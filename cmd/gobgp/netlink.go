@@ -379,6 +379,8 @@ func newNetlinkCmd() *cobra.Command {
 	enableImportCmd := &cobra.Command{
 		Use:   "enable-import",
 		Short: "Enable netlink route import",
+		Long: `Enable netlink route import using interfaces from configuration.
+Optionally override with --interfaces flag.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			vrfName, _ := cmd.Flags().GetString("vrf")
 			interfacesStr, _ := cmd.Flags().GetString("interfaces")
@@ -390,9 +392,7 @@ func newNetlinkCmd() *cobra.Command {
 					}
 				}
 			}
-			if len(interfaces) == 0 {
-				exitWithError(fmt.Errorf("at least one interface is required"))
-			}
+			// interfaces can be empty - server will use config
 			_, err := client.EnableNetlinkImport(context.Background(), &api.EnableNetlinkImportRequest{
 				Vrf:        vrfName,
 				Interfaces: interfaces,
@@ -404,8 +404,7 @@ func newNetlinkCmd() *cobra.Command {
 		},
 	}
 	enableImportCmd.Flags().String("vrf", "", "target VRF name (empty for global)")
-	enableImportCmd.Flags().String("interfaces", "", "comma-separated list of interfaces (required)")
-	_ = enableImportCmd.MarkFlagRequired("interfaces")
+	enableImportCmd.Flags().String("interfaces", "", "comma-separated list of interfaces (optional, uses config if not specified)")
 	netlinkCmd.AddCommand(enableImportCmd)
 
 	// Global disable-import command

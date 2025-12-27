@@ -1993,15 +1993,26 @@ func (s *BgpServer) EnableNetlinkImport(ctx context.Context, r *api.EnableNetlin
 		return fmt.Errorf("nil request")
 	}
 	return s.mgmtOperation(func() error {
-		// Update config
+		// Update config only if values are provided in the request
+		// Otherwise use existing config values
+		if len(r.Interfaces) > 0 {
+			s.bgpConfig.Netlink.Import.InterfaceList = r.Interfaces
+		}
+		if r.Vrf != "" {
+			s.bgpConfig.Netlink.Import.Vrf = r.Vrf
+		}
+
+		// Validate that we have interfaces (either from request or existing config)
+		if len(s.bgpConfig.Netlink.Import.InterfaceList) == 0 {
+			return fmt.Errorf("no interfaces configured for netlink import")
+		}
+
 		s.bgpConfig.Netlink.Import.Enabled = true
-		s.bgpConfig.Netlink.Import.Vrf = r.Vrf
-		s.bgpConfig.Netlink.Import.InterfaceList = r.Interfaces
 
 		s.logger.Info("Enabling netlink import via gRPC",
 			slog.String("Topic", "netlink"),
-			slog.String("Vrf", r.Vrf),
-			slog.Any("Interfaces", r.Interfaces))
+			slog.String("Vrf", s.bgpConfig.Netlink.Import.Vrf),
+			slog.Any("Interfaces", s.bgpConfig.Netlink.Import.InterfaceList))
 
 		// Start/restart netlink with new config
 		return s.StartNetlink(ctx)
@@ -2014,38 +2025,44 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 		return fmt.Errorf("nil request")
 	}
 	return s.mgmtOperation(func() error {
-		// Update config
-		s.bgpConfig.Netlink.Export.Enabled = true
-		s.bgpConfig.Netlink.Export.DampeningInterval = r.DampeningInterval
+		// Update config only if values are provided in the request
+		// Otherwise use existing config values
+		if r.DampeningInterval != 0 {
+			s.bgpConfig.Netlink.Export.DampeningInterval = r.DampeningInterval
+		}
 		if r.RouteProtocol != 0 {
 			s.bgpConfig.Netlink.Export.RouteProtocol = int(r.RouteProtocol)
 		}
 
-		// Convert rules from API to config format
-		rules := make([]oc.NetlinkExportRule, 0, len(r.Rules))
-		for _, ruleProto := range r.Rules {
-			validateNexthop := true // default to true
-			rule := oc.NetlinkExportRule{
-				Name:               ruleProto.Name,
-				CommunityList:      ruleProto.CommunityList,
-				LargeCommunityList: ruleProto.LargeCommunityList,
-				Vrf:                ruleProto.Vrf,
-				TableId:            int(ruleProto.TableId),
-				Metric:             ruleProto.Metric,
-				ValidateNexthop:    &validateNexthop,
+		// Only update rules if provided in the request
+		if len(r.Rules) > 0 {
+			rules := make([]oc.NetlinkExportRule, 0, len(r.Rules))
+			for _, ruleProto := range r.Rules {
+				validateNexthop := true // default to true
+				rule := oc.NetlinkExportRule{
+					Name:               ruleProto.Name,
+					CommunityList:      ruleProto.CommunityList,
+					LargeCommunityList: ruleProto.LargeCommunityList,
+					Vrf:                ruleProto.Vrf,
+					TableId:            int(ruleProto.TableId),
+					Metric:             ruleProto.Metric,
+					ValidateNexthop:    &validateNexthop,
+				}
+				if !ruleProto.ValidateNexthop {
+					validateNexthop = false
+				}
+				rules = append(rules, rule)
 			}
-			if !ruleProto.ValidateNexthop {
-				validateNexthop = false
-			}
-			rules = append(rules, rule)
+			s.bgpConfig.Netlink.Export.Rules = rules
 		}
-		s.bgpConfig.Netlink.Export.Rules = rules
+
+		s.bgpConfig.Netlink.Export.Enabled = true
 
 		s.logger.Info("Enabling netlink export via gRPC",
 			slog.String("Topic", "netlink"),
-			slog.Uint64("DampeningInterval", uint64(r.DampeningInterval)),
-			slog.Int("RouteProtocol", int(r.RouteProtocol)),
-			slog.Int("RuleCount", len(rules)))
+			slog.Uint64("DampeningInterval", uint64(s.bgpConfig.Netlink.Export.DampeningInterval)),
+			slog.Int("RouteProtocol", s.bgpConfig.Netlink.Export.RouteProtocol),
+			slog.Int("RuleCount", len(s.bgpConfig.Netlink.Export.Rules)))
 
 		// Start/restart netlink with new config
 		return s.StartNetlink(ctx)
