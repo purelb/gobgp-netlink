@@ -100,7 +100,13 @@ service GoBgpService {
 
   rpc GetNetlink(GetNetlinkRequest) returns (GetNetlinkResponse);
   rpc EnableNetlinkImport(EnableNetlinkImportRequest) returns (EnableNetlinkImportResponse);
+  rpc DisableNetlinkImport(DisableNetlinkImportRequest) returns (DisableNetlinkImportResponse);
   rpc EnableNetlinkExport(EnableNetlinkExportRequest) returns (EnableNetlinkExportResponse);
+  rpc DisableNetlinkExport(DisableNetlinkExportRequest) returns (DisableNetlinkExportResponse);
+  rpc EnableVrfNetlinkImport(EnableVrfNetlinkImportRequest) returns (EnableVrfNetlinkImportResponse);
+  rpc DisableVrfNetlinkImport(DisableVrfNetlinkImportRequest) returns (DisableVrfNetlinkImportResponse);
+  rpc EnableVrfNetlinkExport(EnableVrfNetlinkExportRequest) returns (EnableVrfNetlinkExportResponse);
+  rpc DisableVrfNetlinkExport(DisableVrfNetlinkExportRequest) returns (DisableVrfNetlinkExportResponse);
   rpc GetNetlinkImportStats(GetNetlinkImportStatsRequest) returns (GetNetlinkImportStatsResponse);
   rpc ListNetlinkExport(ListNetlinkExportRequest) returns (stream ListNetlinkExportResponse);
   rpc GetNetlinkExportStats(GetNetlinkExportStatsRequest) returns (GetNetlinkExportStatsResponse);
@@ -617,6 +623,56 @@ message EnableNetlinkExportRequest {
 }
 
 message EnableNetlinkExportResponse {}
+
+// DisableNetlinkImport disables netlink route import
+message DisableNetlinkImportRequest {
+  bool keep_routes = 1; // If true, keep imported routes in RIB (default: false = withdraw routes)
+}
+message DisableNetlinkImportResponse {}
+
+// DisableNetlinkExport disables netlink route export
+message DisableNetlinkExportRequest {
+  bool keep_routes = 1; // If true, keep exported routes in Linux kernel (default: false = flush routes)
+}
+message DisableNetlinkExportResponse {}
+
+// EnableVrfNetlinkImport enables netlink import for a specific VRF
+message EnableVrfNetlinkImportRequest {
+  string vrf = 1; // GoBGP VRF name (required, must exist via AddVrf)
+  repeated string interfaces = 2; // Interface list to import routes from
+}
+message EnableVrfNetlinkImportResponse {}
+
+// DisableVrfNetlinkImport disables netlink import for a specific VRF
+message DisableVrfNetlinkImportRequest {
+  string vrf = 1; // VRF name (required)
+  bool keep_routes = 2; // If true, keep imported routes (default: false = withdraw)
+}
+message DisableVrfNetlinkImportResponse {}
+
+// VrfNetlinkExportConfig contains per-VRF export configuration
+message VrfNetlinkExportConfig {
+  string linux_vrf = 1; // Target Linux VRF name (default: same as GoBGP VRF)
+  int32 linux_table_id = 2; // Target Linux table ID (0 = auto-lookup)
+  uint32 metric = 3; // Route metric
+  bool skip_nexthop_validation = 4; // If true, skip nexthop validation (default: false = validate)
+  repeated string community_list = 5; // Communities to filter (empty = export all)
+  repeated string large_community_list = 6; // Large communities to filter
+}
+
+// EnableVrfNetlinkExport enables netlink export for a specific VRF
+message EnableVrfNetlinkExportRequest {
+  string vrf = 1; // GoBGP VRF name (required, must exist via AddVrf)
+  VrfNetlinkExportConfig config = 2; // Export configuration
+}
+message EnableVrfNetlinkExportResponse {}
+
+// DisableVrfNetlinkExport disables netlink export for a specific VRF
+message DisableVrfNetlinkExportRequest {
+  string vrf = 1; // VRF name (required)
+  bool keep_routes = 2; // If true, keep exported routes (default: false = flush)
+}
+message DisableVrfNetlinkExportResponse {}
 
 message ListNetlinkExportRequest {
   string vrf = 1; // Filter by VRF name (empty = all VRFs)

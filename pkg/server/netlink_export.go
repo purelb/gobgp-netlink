@@ -114,7 +114,8 @@ type netlinkExportClient struct {
 	routeProtocol int
 
 	// Shutdown
-	stopCh chan struct{}
+	stopCh  chan struct{}
+	stopped bool // protects against double stop()
 }
 
 // newNetlinkExportClient creates a new netlink export client
@@ -1170,5 +1171,67 @@ func (e *netlinkExportClient) flush() error {
 		slog.String("Topic", "netlink"),
 		slog.Int("Count", len(routesToDelete)))
 
+	return nil
+}
+
+// stop shuts down the netlink export client
+// If flushRoutes is true (keep_routes=false), remove all exported routes from Linux kernel
+func (e *netlinkExportClient) stop(flushRoutes bool) error {
+	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		return nil // Already stopped
+	}
+	e.stopped = true
+	e.mu.Unlock()
+
+	// Flush routes first while client is still valid
+	if flushRoutes {
+		_ = e.flush()
+	}
+
+	// Signal shutdown
+	close(e.stopCh)
+
+	// Cancel pending dampened updates with proper locking
+	e.dampenMu.Lock()
+	for _, entry := range e.pendingUpdates {
+		entry.timer.Stop()
+	}
+	e.pendingUpdates = make(map[string]*dampenEntry)
+	e.dampenMu.Unlock()
+
+	// Close netlink handle
+	if e.client != nil {
+		e.client.Close()
+	}
+
+	return nil
+}
+
+// flushVrf removes all exported routes for a specific VRF
+func (e *netlinkExportClient) flushVrf(vrfName string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var errs []error
+	if vrfRoutes, ok := e.exported[vrfName]; ok {
+		for prefix, info := range vrfRoutes {
+			if err := e.client.RouteDel(info.Route); err != nil {
+				errs = append(errs, fmt.Errorf("failed to delete %s: %w", prefix, err))
+				e.logger.Warn("Failed to delete route during VRF flush",
+					slog.String("Topic", "netlink"),
+					slog.String("VRF", vrfName),
+					slog.String("Prefix", prefix),
+					slog.Any("Error", err))
+			}
+		}
+		delete(e.exported, vrfName)
+	}
+	delete(e.vrfRules, vrfName)
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors during flush: %v", errs)
+	}
 	return nil
 }

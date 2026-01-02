@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -373,6 +374,213 @@ func newNetlinkCmd() *cobra.Command {
 	exportCmd.AddCommand(exportFlushCmd)
 
 	netlinkCmd.AddCommand(exportCmd)
+
+	// Global enable-import command
+	enableImportCmd := &cobra.Command{
+		Use:   "enable-import",
+		Short: "Enable netlink route import",
+		Long: `Enable netlink route import using interfaces from configuration.
+Optionally override with --interfaces flag.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			vrfName, _ := cmd.Flags().GetString("vrf")
+			interfacesStr, _ := cmd.Flags().GetString("interfaces")
+			var interfaces []string
+			if interfacesStr != "" {
+				for _, iface := range strings.Split(interfacesStr, ",") {
+					if trimmed := strings.TrimSpace(iface); trimmed != "" {
+						interfaces = append(interfaces, trimmed)
+					}
+				}
+			}
+			// interfaces can be empty - server will use config
+			_, err := client.EnableNetlinkImport(context.Background(), &api.EnableNetlinkImportRequest{
+				Vrf:        vrfName,
+				Interfaces: interfaces,
+			})
+			if err != nil {
+				exitWithError(err)
+			}
+			fmt.Println("Netlink import enabled")
+		},
+	}
+	enableImportCmd.Flags().String("vrf", "", "target VRF name (empty for global)")
+	enableImportCmd.Flags().String("interfaces", "", "comma-separated list of interfaces (optional, uses config if not specified)")
+	netlinkCmd.AddCommand(enableImportCmd)
+
+	// Global disable-import command
+	disableImportCmd := &cobra.Command{
+		Use:   "disable-import",
+		Short: "Disable netlink route import",
+		Run: func(cmd *cobra.Command, args []string) {
+			keepRoutes, _ := cmd.Flags().GetBool("keep-routes")
+			_, err := client.DisableNetlinkImport(context.Background(), &api.DisableNetlinkImportRequest{
+				KeepRoutes: keepRoutes,
+			})
+			if err != nil {
+				exitWithError(err)
+			}
+			fmt.Println("Netlink import disabled")
+		},
+	}
+	disableImportCmd.Flags().Bool("keep-routes", false, "keep imported routes in RIB (default: withdraw)")
+	netlinkCmd.AddCommand(disableImportCmd)
+
+	// Global enable-export command
+	enableExportCmd := &cobra.Command{
+		Use:   "enable-export",
+		Short: "Enable netlink route export",
+		Run: func(cmd *cobra.Command, args []string) {
+			dampeningInterval, _ := cmd.Flags().GetUint32("dampening-interval")
+			routeProtocol, _ := cmd.Flags().GetInt32("route-protocol")
+			_, err := client.EnableNetlinkExport(context.Background(), &api.EnableNetlinkExportRequest{
+				DampeningInterval: dampeningInterval,
+				RouteProtocol:     routeProtocol,
+			})
+			if err != nil {
+				exitWithError(err)
+			}
+			fmt.Println("Netlink export enabled")
+		},
+	}
+	enableExportCmd.Flags().Uint32("dampening-interval", 100, "update dampening interval in ms")
+	enableExportCmd.Flags().Int32("route-protocol", 186, "Linux route protocol (default: 186 for BGP)")
+	netlinkCmd.AddCommand(enableExportCmd)
+
+	// Global disable-export command
+	disableExportCmd := &cobra.Command{
+		Use:   "disable-export",
+		Short: "Disable netlink route export",
+		Run: func(cmd *cobra.Command, args []string) {
+			keepRoutes, _ := cmd.Flags().GetBool("keep-routes")
+			_, err := client.DisableNetlinkExport(context.Background(), &api.DisableNetlinkExportRequest{
+				KeepRoutes: keepRoutes,
+			})
+			if err != nil {
+				exitWithError(err)
+			}
+			fmt.Println("Netlink export disabled")
+		},
+	}
+	disableExportCmd.Flags().Bool("keep-routes", false, "keep exported routes in Linux kernel (default: flush)")
+	netlinkCmd.AddCommand(disableExportCmd)
+
+	// Per-VRF enable-import command
+	vrfEnableImportCmd := &cobra.Command{
+		Use:   "vrf-enable-import <vrf-name>",
+		Short: "Enable netlink import for a VRF",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			vrfName := args[0]
+			interfacesStr, _ := cmd.Flags().GetString("interfaces")
+			var interfaces []string
+			for _, iface := range strings.Split(interfacesStr, ",") {
+				if trimmed := strings.TrimSpace(iface); trimmed != "" {
+					interfaces = append(interfaces, trimmed)
+				}
+			}
+			if len(interfaces) == 0 {
+				exitWithError(fmt.Errorf("at least one interface is required"))
+			}
+			_, err := client.EnableVrfNetlinkImport(context.Background(), &api.EnableVrfNetlinkImportRequest{
+				Vrf:        vrfName,
+				Interfaces: interfaces,
+			})
+			if err != nil {
+				exitWithError(err)
+			}
+			fmt.Printf("VRF %s netlink import enabled\n", vrfName)
+		},
+	}
+	vrfEnableImportCmd.Flags().String("interfaces", "", "comma-separated list of interfaces (required)")
+	_ = vrfEnableImportCmd.MarkFlagRequired("interfaces")
+	netlinkCmd.AddCommand(vrfEnableImportCmd)
+
+	// Per-VRF disable-import command
+	vrfDisableImportCmd := &cobra.Command{
+		Use:   "vrf-disable-import <vrf-name>",
+		Short: "Disable netlink import for a VRF",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			vrfName := args[0]
+			keepRoutes, _ := cmd.Flags().GetBool("keep-routes")
+			_, err := client.DisableVrfNetlinkImport(context.Background(), &api.DisableVrfNetlinkImportRequest{
+				Vrf:        vrfName,
+				KeepRoutes: keepRoutes,
+			})
+			if err != nil {
+				exitWithError(err)
+			}
+			fmt.Printf("VRF %s netlink import disabled\n", vrfName)
+		},
+	}
+	vrfDisableImportCmd.Flags().Bool("keep-routes", false, "keep imported routes (default: withdraw)")
+	netlinkCmd.AddCommand(vrfDisableImportCmd)
+
+	// Per-VRF enable-export command
+	vrfEnableExportCmd := &cobra.Command{
+		Use:   "vrf-enable-export <vrf-name>",
+		Short: "Enable netlink export for a VRF",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			vrfName := args[0]
+			linuxVrf, _ := cmd.Flags().GetString("linux-vrf")
+			tableId, _ := cmd.Flags().GetInt32("table-id")
+			metric, _ := cmd.Flags().GetUint32("metric")
+			skipNexthopValidation, _ := cmd.Flags().GetBool("skip-nexthop-validation")
+			communitiesStr, _ := cmd.Flags().GetString("communities")
+			largeCommunitiesStr, _ := cmd.Flags().GetString("large-communities")
+
+			config := &api.VrfNetlinkExportConfig{
+				LinuxVrf:              linuxVrf,
+				LinuxTableId:          tableId,
+				Metric:                metric,
+				SkipNexthopValidation: skipNexthopValidation,
+			}
+			if communitiesStr != "" {
+				config.CommunityList = strings.Split(communitiesStr, ",")
+			}
+			if largeCommunitiesStr != "" {
+				config.LargeCommunityList = strings.Split(largeCommunitiesStr, ",")
+			}
+
+			_, err := client.EnableVrfNetlinkExport(context.Background(), &api.EnableVrfNetlinkExportRequest{
+				Vrf:    vrfName,
+				Config: config,
+			})
+			if err != nil {
+				exitWithError(err)
+			}
+			fmt.Printf("VRF %s netlink export enabled\n", vrfName)
+		},
+	}
+	vrfEnableExportCmd.Flags().String("linux-vrf", "", "target Linux VRF name (default: same as GoBGP VRF)")
+	vrfEnableExportCmd.Flags().Int32("table-id", 0, "Linux routing table ID (0 = auto-lookup)")
+	vrfEnableExportCmd.Flags().Uint32("metric", 0, "route metric")
+	vrfEnableExportCmd.Flags().Bool("skip-nexthop-validation", false, "skip nexthop validation")
+	vrfEnableExportCmd.Flags().String("communities", "", "comma-separated communities to filter")
+	vrfEnableExportCmd.Flags().String("large-communities", "", "comma-separated large communities to filter")
+	netlinkCmd.AddCommand(vrfEnableExportCmd)
+
+	// Per-VRF disable-export command
+	vrfDisableExportCmd := &cobra.Command{
+		Use:   "vrf-disable-export <vrf-name>",
+		Short: "Disable netlink export for a VRF",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			vrfName := args[0]
+			keepRoutes, _ := cmd.Flags().GetBool("keep-routes")
+			_, err := client.DisableVrfNetlinkExport(context.Background(), &api.DisableVrfNetlinkExportRequest{
+				Vrf:        vrfName,
+				KeepRoutes: keepRoutes,
+			})
+			if err != nil {
+				exitWithError(err)
+			}
+			fmt.Printf("VRF %s netlink export disabled\n", vrfName)
+		},
+	}
+	vrfDisableExportCmd.Flags().Bool("keep-routes", false, "keep exported routes (default: flush)")
+	netlinkCmd.AddCommand(vrfDisableExportCmd)
 
 	return netlinkCmd
 }
