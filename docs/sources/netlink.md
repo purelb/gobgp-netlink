@@ -795,7 +795,10 @@ These commands allow you to enable/disable netlink features at runtime via gRPC,
 ### Enable Import
 
 ```bash
-# Enable global import
+# Enable global import using interfaces from config file
+gobgp netlink enable-import
+
+# Enable import with explicit interfaces (overrides config)
 gobgp netlink enable-import --interfaces eth0,eth1
 
 # Enable import with target VRF
@@ -949,9 +952,11 @@ rpc EnableNetlinkImport(EnableNetlinkImportRequest) returns (EnableNetlinkImport
 ```protobuf
 message EnableNetlinkImportRequest {
   string vrf = 1;                 // VRF name (empty for default/global)
-  repeated string interfaces = 2; // Interface list to import routes from
+  repeated string interfaces = 2; // Interface list (optional - uses config if empty)
 }
 ```
+
+**Note:** If `interfaces` is not provided, the server uses the interfaces from the existing configuration. If no interfaces are configured, an error is returned.
 
 ### DisableNetlinkImport
 
@@ -1094,11 +1099,13 @@ rpc EnableNetlinkExport(EnableNetlinkExportRequest) returns (EnableNetlinkExport
 **Request Message:**
 ```protobuf
 message EnableNetlinkExportRequest {
-  uint32 dampening_interval = 1;          // Update dampening interval in milliseconds
-  int32 route_protocol = 2;               // RTPROT_* value (default: 186 for BGP)
-  repeated NetlinkExportRuleConfig rules = 3; // Export rules
+  uint32 dampening_interval = 1;          // Dampening interval in ms (optional - uses config if 0)
+  int32 route_protocol = 2;               // RTPROT_* value (optional - uses config if 0)
+  repeated NetlinkExportRuleConfig rules = 3; // Export rules (optional - uses config if empty)
 }
 ```
+
+**Note:** All parameters are optional. If not provided, the server uses the existing configuration values. This allows enabling export with just `gobgp netlink enable-export` using the config file settings.
 
 ### DisableNetlinkExport
 
