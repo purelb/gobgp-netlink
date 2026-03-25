@@ -27,7 +27,7 @@ const (
 	FORK_NAME  string = "PureLB-fork"
 	FORK_MAJOR uint   = 1
 	FORK_MINOR uint   = 1
-	FORK_PATCH uint   = 1
+	FORK_PATCH uint   = 2
 )
 
 var (

@@ -22,7 +22,7 @@ import (
 
 var (
 	// Version is the semantic version
-	Version = "01.01.00"
+	Version = "01.01.02"
 
 	// Commit is the git commit hash (set by build flags)
 	Commit = "unknown"
