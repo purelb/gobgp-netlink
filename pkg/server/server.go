@@ -3745,15 +3745,6 @@ func (s *BgpServer) addPeerGroup(c *oc.PeerGroup) error {
 }
 
 func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
-	addr, err := c.ExtractNeighborAddress()
-	if err != nil {
-		return err
-	}
-
-	if _, y := s.neighborMap[netip.MustParseAddr(addr)]; y {
-		return fmt.Errorf("can't overwrite the existing peer: %s", addr)
-	}
-
 	var pgConf *oc.PeerGroup
 	if c.Config.PeerGroup != "" {
 		pg, ok := s.peerGroupMap[c.Config.PeerGroup]
@@ -3765,6 +3756,15 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 
 	if err := oc.SetDefaultNeighborConfigValues(c, pgConf, &s.bgpConfig.Global); err != nil {
 		return err
+	}
+
+	addr, err := c.ExtractNeighborAddress()
+	if err != nil {
+		return err
+	}
+
+	if _, y := s.neighborMap[netip.MustParseAddr(addr)]; y {
+		return fmt.Errorf("can't overwrite the existing peer: %s", addr)
 	}
 
 	if vrf := c.Config.Vrf; vrf != "" {
@@ -3908,16 +3908,20 @@ func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNoti
 
 	addr, err := c.ExtractNeighborAddress()
 	if err != nil {
-		return err
-	}
-
-	if intf := c.Config.NeighborInterface; intf != "" {
-		var err error
-		addr, err = oc.GetIPv6LinkLocalNeighborAddress(intf)
+		if intf := c.Config.NeighborInterface; intf != "" {
+			for k, peer := range s.neighborMap {
+				if peer.fsm.pConf.Config.NeighborInterface == intf {
+					addr = k.String()
+					err = nil
+					break
+				}
+			}
+		}
 		if err != nil {
 			return err
 		}
 	}
+
 	n, y := s.neighborMap[netip.MustParseAddr(addr)]
 	if !y {
 		return fmt.Errorf("can't delete a peer configuration for %s", addr)
@@ -3963,9 +3967,11 @@ func (s *BgpServer) DeletePeer(ctx context.Context, r *api.DeletePeerRequest) er
 	}
 	return s.mgmtOperation(func() error {
 		c := &oc.Neighbor{Config: oc.NeighborConfig{
-			NeighborAddress:   netip.MustParseAddr(r.Address),
 			NeighborInterface: r.Interface,
 		}}
+		if addr, err := netip.ParseAddr(r.Address); err == nil {
+			c.Config.NeighborAddress = addr
+		}
 		return s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, true)
 	}, true)
 }
