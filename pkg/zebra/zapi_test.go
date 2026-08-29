@@ -78,6 +78,20 @@ func Test_Header(t *testing.T) {
 		h3 := &Header{}
 		err = h3.decodeFromBytes(buf)
 		assert.NotEqual(nil, err, "err should be nil")
+
+		// on-wire Len smaller than the header size must be rejected,
+		// otherwise ReceiveSingleMsg computes int(h.Len-HeaderSize) in
+		// uint16 and wraps to a ~64KiB body read instead of a short one.
+		buf = make([]byte, HeaderSize(v))
+		binary.BigEndian.PutUint16(buf[0:], HeaderSize(v)-1) // Len < header size
+		buf[2] = headerMarker
+		if v >= 4 {
+			buf[2] = frrHeaderMarker
+		}
+		buf[3] = v
+		h4 := &Header{}
+		err = h4.decodeFromBytes(buf)
+		assert.Error(err)
 	}
 }
 
@@ -176,7 +190,6 @@ func Test_interfaceAddressUpdateBody(t *testing.T) {
 
 		// af invalid
 		buf[5] = 0x4
-		pos++
 		b = &interfaceAddressUpdateBody{}
 		err = b.decodeFromBytes(buf, v, software)
 		assert.NotNil(err)
@@ -206,7 +219,6 @@ func Test_routerIDUpdateBody(t *testing.T) {
 
 		// af invalid
 		buf[0] = 0x4
-		pos++
 		b = &routerIDUpdateBody{}
 		err = b.decodeFromBytes(buf, v, software)
 		assert.NotNil(err)
@@ -1047,7 +1059,6 @@ func Test_NexthopUpdateBody(t *testing.T) {
 		pos += 8
 		if v == 5 { // frr7.3&7.4 (latest software of zapi v6) depends on nexthop flag
 			bufIn[pos] = byte(0) // label num
-			pos++
 		}
 
 		// Test decodeFromBytes()
@@ -1068,6 +1079,54 @@ func Test_NexthopUpdateBody(t *testing.T) {
 		assert.Equal(1, len(b.Nexthops))
 		assert.Equal(nexthop, b.Nexthops[0])
 	}
+}
+
+func Test_NexthopUpdateBodyRejectsOversizedLabelNum(t *testing.T) {
+	assert := assert.New(t)
+
+	// zapi6 / frr7.2: MessageLabel is set for the whole body, so each nexthop
+	// carries a label_num followed by that many labels.
+	version := uint8(6)
+	software := NewSoftware(version, "frr7.2")
+
+	appendNexthop := func(buf []byte, gate []byte, ifindex uint32, labelNum uint8, labels []uint32) []byte {
+		buf = append(buf, 0x00, 0x00, 0x00, 0x00) // vrf_id
+		buf = append(buf, byte(nexthopTypeIPv4IFIndex))
+		buf = append(buf, gate...)
+		idx := make([]byte, 4)
+		binary.BigEndian.PutUint32(idx, ifindex)
+		buf = append(buf, idx...)
+		buf = append(buf, labelNum)
+		for _, l := range labels {
+			lb := make([]byte, 4)
+			binary.LittleEndian.PutUint32(lb, l)
+			buf = append(buf, lb...)
+		}
+		return buf
+	}
+
+	// nexthop[0] declares 20 labels (> maxMplsLabel). A well-formed nexthop[1]
+	// follows at the position a conformant reader lands on.
+	labels := make([]uint32, maxMplsLabel+4)
+	for i := range labels {
+		labels[i] = uint32(1000 + i)
+	}
+
+	buf := []byte{0x00, 0x02, 0x20, 0xc0, 0xa8, 0x01, 0x01} // family, prefixlen, prefix
+	buf = append(buf, 0x00, 0x00, 0x00)                     // type, instance
+	buf = append(buf, 0x00)                                 // distance
+	metric := make([]byte, 4)
+	binary.BigEndian.PutUint32(metric, 1)
+	buf = append(buf, metric...)
+	buf = append(buf, 0x02) // number of nexthops
+	buf = appendNexthop(buf, []byte{0xc0, 0xa8, 0x00, 0x01}, 2, uint8(len(labels)), labels)
+	buf = appendNexthop(buf, []byte{0x0a, 0x00, 0x00, 0x09}, 9, 0, nil)
+
+	b := &NexthopUpdateBody{}
+	err := b.decodeFromBytes(buf, version, software)
+	// Before the fix the oversized count was clamped and decoding succeeded,
+	// framing nexthop[1] from nexthop[0]'s trailing label octets.
+	assert.Error(err)
 }
 
 func Test_GetLabelChunkBody(t *testing.T) {
@@ -1126,6 +1185,9 @@ func FuzzZapi(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		for v := MinZapiVer; v <= MaxZapiVer; v++ {
 			ZAPIHeaderSize := int(HeaderSize(v))
+			if len(data) < ZAPIHeaderSize {
+				continue
+			}
 
 			hd := &Header{}
 			err := hd.decodeFromBytes(data[:ZAPIHeaderSize])
