@@ -1509,7 +1509,14 @@ func (e *netlinkExportClient) getVrfRules() map[string]*vrfExportConfig {
 
 // flush removes all exported routes
 func (e *netlinkExportClient) flush() error {
+	// A caller can hold a reference taken before DisableNetlinkExport ran, and
+	// stop() closes the netlink handle. Check and snapshot in one critical
+	// section so the client cannot be stopped between the two.
 	e.mu.RLock()
+	if e.stopped {
+		e.mu.RUnlock()
+		return fmt.Errorf("netlink export client is stopped")
+	}
 	routesToDelete := make([]*go_netlink.Route, 0)
 	for _, vrfRoutes := range e.exported {
 		for _, entries := range vrfRoutes {

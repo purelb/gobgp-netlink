@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -694,4 +695,117 @@ func TestOnlinkIsIndependentOfValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- best-path export and concurrent RPC safety ---
+
+// TestExportUsesBestPathNotReceivedPath is the route black-hole.
+//
+// Export was driven from whatever update arrived rather than from the best path.
+// With two peers advertising a prefix, a withdrawal from the non-best peer
+// deleted the kernel route while the other path was still best, and nothing
+// restored it until the next configuration change.
+func TestExportUsesBestPathNotReceivedPath(t *testing.T) {
+	s := newVrfTestServer(t)
+
+	f := newFakeNetlink()
+	e, err := newNetlinkExportClientWithHandle(s, logger, f, RTPROT_BGP, 0)
+	assert.NoError(t, err)
+	e.rules = []*exportRule{{Name: "global", TableId: 0, Metric: 20}}
+
+	s.shared.mu.Lock()
+	s.netlinkExportClient = e
+	s.shared.mu.Unlock()
+
+	prefix := "10.55.0.0/24"
+	add := func(peerAddr, nexthop string) *table.Path {
+		nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(prefix))
+		assert.NoError(t, err)
+		nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr(nexthop))
+		assert.NoError(t, err)
+		src := &table.PeerInfo{
+			AS:      65002,
+			ID:      netip.MustParseAddr(peerAddr),
+			Address: netip.MustParseAddr(peerAddr),
+		}
+		p := table.NewPath(bgp.RF_IPv4_UC, src, bgp.PathNLRI{NLRI: nlri}, false,
+			[]bgp.PathAttributeInterface{
+				bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), nh,
+			}, time.Now(), false)
+		assert.NotNil(t, p)
+		return p
+	}
+
+	best := add("10.0.0.1", "192.168.1.1")
+	other := add("10.0.0.2", "192.168.1.2")
+
+	s.shared.mu.Lock()
+	s.propagateUpdate(nil, []*table.Path{best})
+	s.propagateUpdate(nil, []*table.Path{other})
+	s.shared.mu.Unlock()
+
+	// Export is dampened, so the kernel write lands on a timer rather than
+	// inline.
+	assert.Eventually(t, func() bool { return f.hasRoute(0, prefix) },
+		5*time.Second, 5*time.Millisecond, "the prefix should be exported")
+
+	// Withdraw the non-best path. The prefix is still reachable via the other
+	// peer, so the kernel route must stay.
+	s.shared.mu.Lock()
+	s.propagateUpdate(nil, []*table.Path{other.Clone(true)})
+	s.shared.mu.Unlock()
+
+	// Give the dampening timer time to deliver a deletion if one is coming;
+	// the point of the test is that none is.
+	assert.Never(t, func() bool { return !f.hasRoute(0, prefix) },
+		time.Second, 10*time.Millisecond,
+		"withdrawing a non-best path must not delete a still-best route")
+}
+
+// TestReadOnlyRPCsSurviveConcurrentDisable is the TOCTOU.
+//
+// These RPCs nil-checked s.netlinkExportClient and then dereferenced it, while
+// DisableNetlinkExport nils it on the Serve goroutine. A controller polling them
+// could crash the daemon.
+func TestReadOnlyRPCsSurviveConcurrentDisable(t *testing.T) {
+	s := newVrfTestServer(t)
+	ctx := context.Background()
+
+	assert.NoError(t, s.EnableNetlinkExport(ctx, &api.EnableNetlinkExportRequest{
+		Rules: []*api.NetlinkExportRuleConfig{{Name: "r", TableId: 0}},
+	}))
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Poll the read-only endpoints the way a controller does.
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = s.GetNetlink(ctx, &api.GetNetlinkRequest{})
+				_, _ = s.GetNetlinkExportStats(ctx, &api.GetNetlinkExportStatsRequest{})
+				_, _ = s.ListNetlinkExportRules(ctx, &api.ListNetlinkExportRulesRequest{})
+				_ = s.ListNetlinkExport(ctx, &api.ListNetlinkExportRequest{},
+					func(*api.ListNetlinkExportResponse) {})
+			}
+		}()
+	}
+
+	// Flip export off and on underneath them.
+	for range 20 {
+		_ = s.DisableNetlinkExport(ctx, &api.DisableNetlinkExportRequest{})
+		_ = s.EnableNetlinkExport(ctx, &api.EnableNetlinkExportRequest{
+			Rules: []*api.NetlinkExportRuleConfig{{Name: "r", TableId: 0}},
+		})
+	}
+
+	close(stop)
+	wg.Wait()
 }

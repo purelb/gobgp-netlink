@@ -49,6 +49,33 @@ type NetlinkStatsSnapshot struct {
 	ExportCleanupSkipped uint64
 }
 
+// netlinkExportClientRef returns the current export client, or nil.
+//
+// The read-only netlink RPCs go through this. They used to nil-check the field
+// and then dereference it, while DisableNetlinkExport nils it on the Serve
+// goroutine - a TOCTOU crash reachable from any client polling these endpoints.
+//
+// Taking a local reference rather than wrapping the whole RPC in mgmtOperation
+// is deliberate: ListNetlinkExport invokes a streaming callback per route, and
+// FlushNetlinkExport issues one netlink delete per exported route. Serialising
+// either against BGP processing would let a slow client stall every session on
+// the node.
+//
+// Callers MUST NOT hold shared.mu.
+func (s *BgpServer) netlinkExportClientRef() *netlinkExportClient {
+	s.shared.mu.Lock()
+	defer s.shared.mu.Unlock()
+	return s.netlinkExportClient
+}
+
+// netlinkClientRef returns the current import client, or nil.
+// Callers MUST NOT hold shared.mu.
+func (s *BgpServer) netlinkClientRef() *netlinkClient {
+	s.shared.mu.Lock()
+	defer s.shared.mu.Unlock()
+	return s.netlinkClient
+}
+
 // NetlinkStats returns a snapshot of the netlink import and export counters.
 //
 // It takes shared.mu directly rather than going through mgmtOperation. The

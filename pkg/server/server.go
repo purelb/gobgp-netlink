@@ -1215,9 +1215,32 @@ func (s *BgpServer) propagateUpdate(peer *peer, pathList []*table.Path) {
 		if dsts := rib.Update(path); len(dsts) > 0 {
 			s.propagateUpdateToNeighbors(rib, peer, path, dsts, true)
 
-			// Export to Linux routing table if export is enabled
-			if s.netlinkExportClient != nil {
-				s.netlinkExportClient.scheduleUpdate(path)
+			// Export to the kernel from the best path, not the received one.
+			//
+			// Passing `path` here programmed the FIB from whatever update just
+			// arrived. With two peers advertising a prefix, a withdrawal from the
+			// non-best peer deleted the kernel route while the other path was
+			// still best, and nothing put it back until the next configuration
+			// change - a route black-hole reachable with two peers and one
+			// withdrawal.
+			//
+			// Route-server clients are excluded: their paths live in rsRib, and
+			// asking for changes against the global RIB's view of them is
+			// meaningless. propagateUpdateToNeighbors makes the same distinction.
+			if s.netlinkExportClient != nil && !rs {
+				bestList, _, _ := dstsToPaths(table.GLOBAL_RIB_NAME, 0, dsts)
+				for _, best := range bestList {
+					// A nil best means the best path did not change, so there is
+					// nothing to program. It does NOT mean "withdrawn": a real
+					// withdrawal arrives as a non-nil path with IsWithdraw set.
+					// Treating nil as a withdrawal would delete the kernel route
+					// on every duplicate update, which is worse than the bug
+					// being fixed here.
+					if best == nil {
+						continue
+					}
+					s.netlinkExportClient.scheduleUpdate(best)
+				}
 			}
 		}
 	}
@@ -2345,11 +2368,12 @@ func (s *BgpServer) DisableVrfNetlinkExport(ctx context.Context, r *api.DisableV
 }
 
 func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkExportRequest, fn func(*api.ListNetlinkExportResponse)) error {
-	if s.netlinkExportClient == nil {
+	e := s.netlinkExportClientRef()
+	if e == nil {
 		return fmt.Errorf("netlink export not enabled")
 	}
 
-	exported := s.netlinkExportClient.listExported()
+	exported := e.listExported()
 
 	for vrfName, vrfRoutes := range exported {
 		// Filter by VRF if requested
@@ -2382,11 +2406,12 @@ func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkE
 }
 
 func (s *BgpServer) GetNetlinkExportStats(ctx context.Context, req *api.GetNetlinkExportStatsRequest) (*api.GetNetlinkExportStatsResponse, error) {
-	if s.netlinkExportClient == nil {
+	e := s.netlinkExportClientRef()
+	if e == nil {
 		return nil, fmt.Errorf("netlink export not enabled")
 	}
 
-	stats := s.netlinkExportClient.getStats()
+	stats := e.getStats()
 
 	return &api.GetNetlinkExportStatsResponse{
 		Exported:                  stats.Exported,
@@ -2403,11 +2428,12 @@ func (s *BgpServer) GetNetlinkExportStats(ctx context.Context, req *api.GetNetli
 }
 
 func (s *BgpServer) FlushNetlinkExport(ctx context.Context, req *api.FlushNetlinkExportRequest) (*api.FlushNetlinkExportResponse, error) {
-	if s.netlinkExportClient == nil {
+	e := s.netlinkExportClientRef()
+	if e == nil {
 		return nil, fmt.Errorf("netlink export not enabled")
 	}
 
-	err := s.netlinkExportClient.flush()
+	err := e.flush()
 	if err != nil {
 		return nil, fmt.Errorf("failed to flush netlink export: %w", err)
 	}
@@ -2416,11 +2442,12 @@ func (s *BgpServer) FlushNetlinkExport(ctx context.Context, req *api.FlushNetlin
 }
 
 func (s *BgpServer) ListNetlinkExportRules(ctx context.Context, req *api.ListNetlinkExportRulesRequest) (*api.ListNetlinkExportRulesResponse, error) {
-	if s.netlinkExportClient == nil {
+	e := s.netlinkExportClientRef()
+	if e == nil {
 		return nil, fmt.Errorf("netlink export not enabled")
 	}
 
-	rules := s.netlinkExportClient.getRules()
+	rules := e.getRules()
 	apiRules := make([]*api.ListNetlinkExportRulesResponse_ExportRule, 0, len(rules))
 
 	for _, rule := range rules {
@@ -2449,7 +2476,7 @@ func (s *BgpServer) ListNetlinkExportRules(ctx context.Context, req *api.ListNet
 	}
 
 	// Get VRF export rules
-	vrfRules := s.netlinkExportClient.getVrfRules()
+	vrfRules := e.getVrfRules()
 	apiVrfRules := make([]*api.ListNetlinkExportRulesResponse_VrfExportRule, 0, len(vrfRules))
 
 	for _, vrfRule := range vrfRules {
@@ -2534,6 +2561,17 @@ func (s *BgpServer) DeleteBmp(ctx context.Context, r *api.DeleteBmpRequest) erro
 }
 
 func (s *BgpServer) GetNetlink(ctx context.Context, in *api.GetNetlinkRequest) (*api.GetNetlinkResponse, error) {
+	// This reads server configuration rather than a client pointer, so it needs
+	// the lock for the whole read, not just to take a reference.
+	//
+	// It ranges bgpConfig.Vrfs, which AddVrf now appends to, and reads slices
+	// that the per-VRF RPCs replace. Unsynchronised, that is a torn read of
+	// InterfaceList at best and a racing slice grow at worst - on the endpoint a
+	// controller polls on every reconcile, more often than all the others
+	// combined.
+	s.shared.mu.Lock()
+	defer s.shared.mu.Unlock()
+
 	// Collect VRF import configurations
 	vrfImports := make([]*api.NetlinkVrfImport, 0)
 	for i := range s.bgpConfig.Vrfs {
@@ -2541,7 +2579,7 @@ func (s *BgpServer) GetNetlink(ctx context.Context, in *api.GetNetlinkRequest) (
 		if vrf.NetlinkImport.Enabled {
 			vrfImports = append(vrfImports, &api.NetlinkVrfImport{
 				VrfName:    vrf.Config.Name,
-				Interfaces: vrf.NetlinkImport.InterfaceList,
+				Interfaces: slices.Clone(vrf.NetlinkImport.InterfaceList),
 			})
 		}
 	}
@@ -2550,17 +2588,18 @@ func (s *BgpServer) GetNetlink(ctx context.Context, in *api.GetNetlinkRequest) (
 		ImportEnabled: s.bgpConfig.Netlink.Import.Enabled,
 		ExportEnabled: s.bgpConfig.Netlink.Export.Enabled,
 		Vrf:           s.bgpConfig.Netlink.Import.Vrf,
-		Interfaces:    s.bgpConfig.Netlink.Import.InterfaceList,
+		Interfaces:    slices.Clone(s.bgpConfig.Netlink.Import.InterfaceList),
 		VrfImports:    vrfImports,
 	}, nil
 }
 
 func (s *BgpServer) GetNetlinkImportStats(ctx context.Context, req *api.GetNetlinkImportStatsRequest) (*api.GetNetlinkImportStatsResponse, error) {
-	if s.netlinkClient == nil {
+	n := s.netlinkClientRef()
+	if n == nil {
 		return nil, fmt.Errorf("netlink import not enabled")
 	}
 
-	stats := s.netlinkClient.getStats()
+	stats := n.getStats()
 
 	return &api.GetNetlinkImportStatsResponse{
 		Imported:         stats.Imported,
