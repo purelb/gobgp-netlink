@@ -3253,3 +3253,57 @@ func TestEBGPRouteStuck(test *testing.T) {
 		assertPathCount(collect, peers[2], 1)
 	}, 20*time.Second, 1*time.Millisecond)
 }
+
+// TestUpdatePeerTimersNoPanic is a regression test for a deterministic nil
+// dereference in updateNeighbor.
+//
+// The timers branch logged slog.String("Err", err.Error()) where err is the
+// named return and is provably nil at that point. slog.String evaluates its
+// argument eagerly, so ANY UpdatePeer that changed hold-time or keepalive
+// panicked the daemon. NeedsResendOpenMessage excludes Timers, so a pure timer
+// change reaches this branch rather than the earlier delete/add path.
+func TestUpdatePeerTimersNoPanic(t *testing.T) {
+	assert := assert.New(t)
+	s := NewBgpServer()
+	go s.Serve()
+	err := s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{
+			Asn:        1,
+			RouterId:   "1.1.1.1",
+			ListenPort: -1,
+		},
+	})
+	assert.NoError(err)
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
+
+	peer := &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "10.90.0.1",
+			PeerAsn:         2,
+		},
+		Timers: &api.Timers{
+			Config: &api.TimersConfig{
+				HoldTime:          90,
+				KeepaliveInterval: 30,
+			},
+		},
+	}
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: peer}))
+
+	// Change only the timers. Before the fix this panicked inside the
+	// mgmtOperation, taking the Serve goroutine and the process with it.
+	peer.Timers.Config.HoldTime = 180
+	peer.Timers.Config.KeepaliveInterval = 60
+	_, err = s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: peer})
+	assert.NoError(err)
+
+	// The new values must actually have been applied.
+	var got *api.Peer
+	assert.NoError(s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(p *api.Peer) {
+		got = p
+	}))
+	if assert.NotNil(got) && assert.NotNil(got.Timers) && assert.NotNil(got.Timers.Config) {
+		assert.Equal(uint64(180), got.Timers.Config.HoldTime)
+		assert.Equal(uint64(60), got.Timers.Config.KeepaliveInterval)
+	}
+}

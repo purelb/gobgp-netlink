@@ -69,11 +69,12 @@ type nopTimingHook struct{}
 func (n nopTimingHook) Observe(op FSMOperation, tOp, tWait time.Duration) {}
 
 type options struct {
-	grpcAddress string
-	grpcOption  []grpc.ServerOption
-	logger      *slog.Logger
-	logLevelVar *slog.LevelVar
-	timingHook  FSMTimingHook
+	grpcAddress       string
+	grpcOption        []grpc.ServerOption
+	logger            *slog.Logger
+	logLevelVar       *slog.LevelVar
+	timingHook        FSMTimingHook
+	staleRouteCleanup bool
 }
 
 type ServerOption func(*options)
@@ -100,6 +101,20 @@ func LoggerOption(logger *slog.Logger, levelVar *slog.LevelVar) ServerOption {
 func TimingHookOption(hook FSMTimingHook) ServerOption {
 	return func(o *options) {
 		o.timingHook = hook
+	}
+}
+
+// StaleRouteCleanupOption enables the startup sweep that removes kernel routes
+// left behind by a previous run of this daemon.
+//
+// It is opt-in because the sweep issues host-wide RouteDel calls filtered only by
+// route protocol, and protocol 186 (RTPROT_BGP) is shared with FRR and other BGP
+// daemons. Only a real gobgpd process should ask for it; an embedded or
+// in-process BgpServer (notably the unit tests) must not delete routes belonging
+// to whatever else is running on the machine.
+func StaleRouteCleanupOption(enabled bool) ServerOption {
+	return func(o *options) {
+		o.staleRouteCleanup = enabled
 	}
 }
 
@@ -143,6 +158,9 @@ type BgpServer struct {
 	// netlink integration
 	netlinkClient       *netlinkClient
 	netlinkExportClient *netlinkExportClient
+	// staleRouteCleanup gates the destructive startup route sweep; see
+	// StaleRouteCleanupOption.
+	staleRouteCleanup bool
 }
 
 func NewBgpServer(opt ...ServerOption) *BgpServer {
@@ -162,19 +180,20 @@ func NewBgpServer(opt ...ServerOption) *BgpServer {
 	shared := newSharedData()
 
 	s := &BgpServer{
-		shared:       shared,
-		neighborMap:  make(map[netip.Addr]*peer),
-		peerGroupMap: make(map[string]*peerGroup),
-		policy:       table.NewRoutingPolicy(logger),
-		mgmtCh:       make(chan *mgmtOp, 1),
-		watcherMap:   make(map[watchEventType][]*watcher),
-		uuidMap:      make(map[string]uuid.UUID),
-		roaManager:   newROAManager(roaTable, logger),
-		roaTable:     roaTable,
-		logger:       logger,
-		logLevelVar:  lvl,
-		timingHook:   opts.timingHook,
-		shutdownWG:   &sync.WaitGroup{},
+		shared:            shared,
+		neighborMap:       make(map[netip.Addr]*peer),
+		peerGroupMap:      make(map[string]*peerGroup),
+		policy:            table.NewRoutingPolicy(logger),
+		mgmtCh:            make(chan *mgmtOp, 1),
+		watcherMap:        make(map[watchEventType][]*watcher),
+		uuidMap:           make(map[string]uuid.UUID),
+		roaManager:        newROAManager(roaTable, logger),
+		roaTable:          roaTable,
+		logger:            logger,
+		logLevelVar:       lvl,
+		timingHook:        opts.timingHook,
+		staleRouteCleanup: opts.staleRouteCleanup,
+		shutdownWG:        &sync.WaitGroup{},
 	}
 	s.bmpManager = newBmpClientManager(s)
 	s.mrtManager = newMrtManager(s)
@@ -1196,9 +1215,32 @@ func (s *BgpServer) propagateUpdate(peer *peer, pathList []*table.Path) {
 		if dsts := rib.Update(path); len(dsts) > 0 {
 			s.propagateUpdateToNeighbors(rib, peer, path, dsts, true)
 
-			// Export to Linux routing table if export is enabled
-			if s.netlinkExportClient != nil {
-				s.netlinkExportClient.scheduleUpdate(path)
+			// Export to the kernel from the best path, not the received one.
+			//
+			// Passing `path` here programmed the FIB from whatever update just
+			// arrived. With two peers advertising a prefix, a withdrawal from the
+			// non-best peer deleted the kernel route while the other path was
+			// still best, and nothing put it back until the next configuration
+			// change - a route black-hole reachable with two peers and one
+			// withdrawal.
+			//
+			// Route-server clients are excluded: their paths live in rsRib, and
+			// asking for changes against the global RIB's view of them is
+			// meaningless. propagateUpdateToNeighbors makes the same distinction.
+			if s.netlinkExportClient != nil && !rs {
+				bestList, _, _ := dstsToPaths(table.GLOBAL_RIB_NAME, 0, dsts)
+				for _, best := range bestList {
+					// A nil best means the best path did not change, so there is
+					// nothing to program. It does NOT mean "withdrawn": a real
+					// withdrawal arrives as a non-nil path with IsWithdraw set.
+					// Treating nil as a withdrawal would delete the kernel route
+					// on every duplicate update, which is worse than the bug
+					// being fixed here.
+					if best == nil {
+						continue
+					}
+					s.netlinkExportClient.scheduleUpdate(best)
+				}
 			}
 		}
 	}
@@ -1548,6 +1590,15 @@ func (s *BgpServer) handleFSMMessage(peer *peer, e *fsmMsg) {
 						slog.String("Interface", interfaceName))
 				}
 			}
+
+			// Record the session's interface on the PeerInfo.
+			//
+			// Paths learned from this peer carry it as their source, and a route
+			// whose nexthop is an IPv6 link-local address cannot be programmed
+			// into the FIB without an output interface: the kernel rejects a
+			// link-local gateway with no RTA_OIF. This is the only place the
+			// interface is known, so netlink export reads it from here.
+			peer.peerInfo.NetlinkIfName = interfaceName
 
 			// Populate IPv4 nexthop
 			if localAddr.Is4() {
@@ -1909,9 +1960,68 @@ func (s *BgpServer) parseExportRule(ruleConfig *oc.NetlinkExportRule) (*exportRu
 	return rule, nil
 }
 
+// netlinkImportEnabled reports whether any netlink import is configured, either
+// globally or on an individual VRF. The import client runs a 5s scan loop, so it
+// must not be created for deployments that never asked for import.
+func (s *BgpServer) netlinkImportEnabled() bool {
+	if s.bgpConfig.Netlink.Import.Enabled {
+		return true
+	}
+	for i := range s.bgpConfig.Vrfs {
+		if s.bgpConfig.Vrfs[i].NetlinkImport.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// StartNetlink applies the current netlink configuration.
+//
+// It acquires the server lock, so it must NOT be called from inside a
+// mgmtOperation; internal callers that already hold the lock use startNetlink
+// instead. mgmtOperation is not reentrant - it posts to a size-1 channel and
+// waits for a reply only the Serve goroutine can send - so calling this with the
+// lock held deadlocks the daemon.
 func (s *BgpServer) StartNetlink(ctx context.Context) error {
+	return s.mgmtOperation(func() error {
+		return s.startNetlink(ctx)
+	}, false)
+}
+
+// StartNetlinkWithConfig assigns netlink configuration and applies it as one
+// atomic operation.
+//
+// The config goroutine used to write bgpConfig.Netlink and bgpConfig.Vrfs
+// directly and then call StartNetlink, leaving the writes unsynchronised against
+// the import scan and buildVrfMappings, which read exactly those fields. Passing
+// the config in closes that window. A nil section is left unchanged, which is
+// what UpdateConfig needs when only the netlink block changed.
+func (s *BgpServer) StartNetlinkWithConfig(ctx context.Context, netlinkConf *oc.Netlink, vrfs []oc.Vrf) error {
+	return s.mgmtOperation(func() error {
+		if netlinkConf != nil {
+			s.bgpConfig.Netlink = *netlinkConf
+		}
+		if vrfs != nil {
+			s.bgpConfig.Vrfs = vrfs
+		}
+		return s.startNetlink(ctx)
+	}, false)
+}
+
+// startNetlink is the unlocked body. Caller MUST hold shared.mu.
+func (s *BgpServer) startNetlink(ctx context.Context) error {
 	s.logger.Debug("start netlink", slog.Any("start config", s.bgpConfig.Netlink))
-	if s.netlinkClient == nil {
+	// Only create the import client when import is actually configured. It starts
+	// a 5s ticker that scans interfaces and mutates the RIB; creating it
+	// unconditionally ran that loop on every gobgpd, including export-only and
+	// netlink-free deployments.
+	if s.netlinkClient != nil && !s.netlinkImportEnabled() {
+		// Import was turned off. Without this the scan goroutine kept running
+		// against configuration that no longer asks for it.
+		s.netlinkClient.stopLocked(true)
+		s.netlinkClient = nil
+	}
+	if s.netlinkClient == nil && s.netlinkImportEnabled() {
 		n, err := newNetlinkClient(s)
 		if err != nil {
 			return err
@@ -1965,6 +2075,24 @@ func (s *BgpServer) StartNetlink(ctx context.Context) error {
 				slog.Any("Error", err))
 		}
 
+		// Sweep routes left behind by a previous run. Three constraints:
+		//
+		//  - It runs at most once per client. On every StartNetlink it would
+		//    delete this daemon's own routes while e.exported still lists them,
+		//    after which the idempotency check in exportRoute returns early and
+		//    never reprograms them.
+		//  - It must run AFTER setRules/buildVrfMappings, because the set of
+		//    tables it is allowed to touch is derived from the configured rules.
+		//  - It is opt-in. The sweep filters on route protocol, and 186 is shared
+		//    with FRR, so an in-process BgpServer must not run it.
+		if s.staleRouteCleanup {
+			if err := s.netlinkExportClient.cleanupStaleRoutesOnce(); err != nil {
+				s.logger.Warn("Failed to cleanup stale routes at startup",
+					slog.String("Topic", "netlink"),
+					slog.Any("Error", err))
+			}
+		}
+
 		// Re-evaluate all existing RIB routes with the new rules
 		// This ensures routes are exported/withdrawn based on the updated configuration
 		if s.globalRib != nil {
@@ -2015,7 +2143,7 @@ func (s *BgpServer) EnableNetlinkImport(ctx context.Context, r *api.EnableNetlin
 			slog.Any("Interfaces", s.bgpConfig.Netlink.Import.InterfaceList))
 
 		// Start/restart netlink with new config
-		return s.StartNetlink(ctx)
+		return s.startNetlink(ctx)
 	}, false)
 }
 
@@ -2031,6 +2159,12 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 			s.bgpConfig.Netlink.Export.DampeningInterval = r.DampeningInterval
 		}
 		if r.RouteProtocol != 0 {
+			// Reject rather than clamp on the API: an explicit caller asking for a
+			// protocol we will not honour should be told, not silently overridden.
+			// The field is int32, so negatives are reachable from the wire.
+			if err := validateRouteProtocol(int(r.RouteProtocol)); err != nil {
+				return err
+			}
 			s.bgpConfig.Netlink.Export.RouteProtocol = int(r.RouteProtocol)
 		}
 
@@ -2065,7 +2199,7 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 			slog.Int("RuleCount", len(s.bgpConfig.Netlink.Export.Rules)))
 
 		// Start/restart netlink with new config
-		return s.StartNetlink(ctx)
+		return s.startNetlink(ctx)
 	}, false)
 }
 
@@ -2081,7 +2215,7 @@ func (s *BgpServer) DisableNetlinkImport(ctx context.Context, r *api.DisableNetl
 		// keep_routes=false (default) means withdraw routes
 		// keep_routes=true means don't withdraw
 		withdrawRoutes := !r.KeepRoutes
-		s.netlinkClient.stop(withdrawRoutes)
+		s.netlinkClient.stopLocked(withdrawRoutes)
 		s.bgpConfig.Netlink.Import.Enabled = false
 		s.netlinkClient = nil
 		s.logger.Info("Disabled netlink import via gRPC",
@@ -2120,22 +2254,31 @@ func (s *BgpServer) EnableVrfNetlinkImport(ctx context.Context, r *api.EnableVrf
 		return fmt.Errorf("nil request or empty VRF name")
 	}
 	return s.mgmtOperation(func() error {
-		// Find existing VRF config entry - VRF must exist
-		for i := range s.bgpConfig.Vrfs {
-			if s.bgpConfig.Vrfs[i].Config.Name == r.Vrf {
-				s.bgpConfig.Vrfs[i].NetlinkImport.Enabled = true
-				s.bgpConfig.Vrfs[i].NetlinkImport.InterfaceList = r.Interfaces
-				if s.netlinkClient != nil {
-					s.netlinkClient.rescan()
-				}
-				s.logger.Info("Enabled VRF netlink import via gRPC",
-					slog.String("Topic", "netlink"),
-					slog.String("VRF", r.Vrf),
-					slog.Any("Interfaces", r.Interfaces))
-				return nil
-			}
+		vrfConfig := s.vrfConfigFor(r.Vrf)
+		if vrfConfig == nil {
+			return fmt.Errorf("VRF %s not found - create it first via AddVrf", r.Vrf)
 		}
-		return fmt.Errorf("VRF %s not found - create it first via AddVrf", r.Vrf)
+		vrfConfig.NetlinkImport.Enabled = true
+		vrfConfig.NetlinkImport.InterfaceList = r.Interfaces
+
+		// The import client is only created when import is enabled, so it may
+		// not exist yet if this is the first import of any kind. Create it here
+		// rather than silently deferring the scan to whenever StartNetlink next
+		// runs.
+		if s.netlinkClient == nil {
+			n, err := newNetlinkClient(s)
+			if err != nil {
+				return err
+			}
+			s.netlinkClient = n
+		} else {
+			s.netlinkClient.rescan()
+		}
+		s.logger.Info("Enabled VRF netlink import via gRPC",
+			slog.String("Topic", "netlink"),
+			slog.String("VRF", r.Vrf),
+			slog.Any("Interfaces", r.Interfaces))
+		return nil
 	}, false)
 }
 
@@ -2145,21 +2288,20 @@ func (s *BgpServer) DisableVrfNetlinkImport(ctx context.Context, r *api.DisableV
 		return fmt.Errorf("nil request or empty VRF name")
 	}
 	return s.mgmtOperation(func() error {
-		for i := range s.bgpConfig.Vrfs {
-			if s.bgpConfig.Vrfs[i].Config.Name == r.Vrf {
-				s.bgpConfig.Vrfs[i].NetlinkImport.Enabled = false
-				// keep_routes=false (default) means withdraw
-				if !r.KeepRoutes && s.netlinkClient != nil {
-					s.netlinkClient.withdrawVrf(r.Vrf)
-				}
-				s.logger.Info("Disabled VRF netlink import via gRPC",
-					slog.String("Topic", "netlink"),
-					slog.String("VRF", r.Vrf),
-					slog.Bool("WithdrawRoutes", !r.KeepRoutes))
-				return nil
-			}
+		vrfConfig := s.vrfConfigFor(r.Vrf)
+		if vrfConfig == nil {
+			return fmt.Errorf("VRF %s not found", r.Vrf)
 		}
-		return fmt.Errorf("VRF %s not found", r.Vrf)
+		vrfConfig.NetlinkImport.Enabled = false
+		// keep_routes=false (default) means withdraw
+		if !r.KeepRoutes && s.netlinkClient != nil {
+			s.netlinkClient.withdrawVrfLocked(r.Vrf)
+		}
+		s.logger.Info("Disabled VRF netlink import via gRPC",
+			slog.String("Topic", "netlink"),
+			slog.String("VRF", r.Vrf),
+			slog.Bool("WithdrawRoutes", !r.KeepRoutes))
+		return nil
 	}, false)
 }
 
@@ -2170,30 +2312,30 @@ func (s *BgpServer) EnableVrfNetlinkExport(ctx context.Context, r *api.EnableVrf
 		return fmt.Errorf("nil request or empty VRF name")
 	}
 	return s.mgmtOperation(func() error {
-		for i := range s.bgpConfig.Vrfs {
-			if s.bgpConfig.Vrfs[i].Config.Name == r.Vrf {
-				vrfConfig := &s.bgpConfig.Vrfs[i]
-				vrfConfig.NetlinkExport.Enabled = true
-				if r.Config != nil {
-					vrfConfig.NetlinkExport.LinuxVrf = r.Config.LinuxVrf
-					vrfConfig.NetlinkExport.LinuxTableId = int(r.Config.LinuxTableId)
-					vrfConfig.NetlinkExport.Metric = r.Config.Metric
-					// skip_nexthop_validation=false (default) means validate
-					validateNexthop := !r.Config.SkipNexthopValidation
-					vrfConfig.NetlinkExport.ValidateNexthop = &validateNexthop
-					vrfConfig.NetlinkExport.CommunityList = r.Config.CommunityList
-					vrfConfig.NetlinkExport.LargeCommunityList = r.Config.LargeCommunityList
-				}
-				if s.netlinkExportClient != nil {
-					_ = s.netlinkExportClient.buildVrfMappings()
-				}
-				s.logger.Info("Enabled VRF netlink export via gRPC",
-					slog.String("Topic", "netlink"),
-					slog.String("VRF", r.Vrf))
-				return nil
+		vrfConfig := s.vrfConfigFor(r.Vrf)
+		if vrfConfig == nil {
+			return fmt.Errorf("VRF %s not found - create it first via AddVrf", r.Vrf)
+		}
+		vrfConfig.NetlinkExport.Enabled = true
+		if r.Config != nil {
+			vrfConfig.NetlinkExport.LinuxVrf = r.Config.LinuxVrf
+			vrfConfig.NetlinkExport.LinuxTableId = int(r.Config.LinuxTableId)
+			vrfConfig.NetlinkExport.Metric = r.Config.Metric
+			// skip_nexthop_validation=false (default) means validate
+			validateNexthop := !r.Config.SkipNexthopValidation
+			vrfConfig.NetlinkExport.ValidateNexthop = &validateNexthop
+			vrfConfig.NetlinkExport.CommunityList = r.Config.CommunityList
+			vrfConfig.NetlinkExport.LargeCommunityList = r.Config.LargeCommunityList
+		}
+		if s.netlinkExportClient != nil {
+			if err := s.netlinkExportClient.buildVrfMappings(); err != nil {
+				return err
 			}
 		}
-		return fmt.Errorf("VRF %s not found - create it first via AddVrf", r.Vrf)
+		s.logger.Info("Enabled VRF netlink export via gRPC",
+			slog.String("Topic", "netlink"),
+			slog.String("VRF", r.Vrf))
+		return nil
 	}, false)
 }
 
@@ -2203,30 +2345,35 @@ func (s *BgpServer) DisableVrfNetlinkExport(ctx context.Context, r *api.DisableV
 		return fmt.Errorf("nil request or empty VRF name")
 	}
 	return s.mgmtOperation(func() error {
-		for i := range s.bgpConfig.Vrfs {
-			if s.bgpConfig.Vrfs[i].Config.Name == r.Vrf {
-				s.bgpConfig.Vrfs[i].NetlinkExport.Enabled = false
-				// keep_routes=false (default) means flush
-				if !r.KeepRoutes && s.netlinkExportClient != nil {
-					_ = s.netlinkExportClient.flushVrf(r.Vrf)
-				}
-				s.logger.Info("Disabled VRF netlink export via gRPC",
+		vrfConfig := s.vrfConfigFor(r.Vrf)
+		if vrfConfig == nil {
+			return fmt.Errorf("VRF %s not found", r.Vrf)
+		}
+		vrfConfig.NetlinkExport.Enabled = false
+		// keep_routes=false (default) means flush
+		if !r.KeepRoutes && s.netlinkExportClient != nil {
+			if err := s.netlinkExportClient.flushVrf(r.Vrf); err != nil {
+				s.logger.Warn("Failed to flush VRF netlink export",
 					slog.String("Topic", "netlink"),
 					slog.String("VRF", r.Vrf),
-					slog.Bool("FlushRoutes", !r.KeepRoutes))
-				return nil
+					slog.Any("Error", err))
 			}
 		}
-		return fmt.Errorf("VRF %s not found", r.Vrf)
+		s.logger.Info("Disabled VRF netlink export via gRPC",
+			slog.String("Topic", "netlink"),
+			slog.String("VRF", r.Vrf),
+			slog.Bool("FlushRoutes", !r.KeepRoutes))
+		return nil
 	}, false)
 }
 
 func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkExportRequest, fn func(*api.ListNetlinkExportResponse)) error {
-	if s.netlinkExportClient == nil {
+	e := s.netlinkExportClientRef()
+	if e == nil {
 		return fmt.Errorf("netlink export not enabled")
 	}
 
-	exported := s.netlinkExportClient.listExported()
+	exported := e.listExported()
 
 	for vrfName, vrfRoutes := range exported {
 		// Filter by VRF if requested
@@ -2234,18 +2381,24 @@ func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkE
 			continue
 		}
 
-		for prefix, info := range vrfRoutes {
-			route := &api.ListNetlinkExportResponse_ExportedRoute{
-				Prefix:     prefix,
-				Nexthop:    info.Route.Gw.String(),
-				Vrf:        vrfName,
-				TableId:    int32(info.Route.Table),
-				Metric:     uint32(info.Route.Priority),
-				RuleName:   info.RuleName,
-				ExportedAt: info.ExportedAt.Unix(),
+		// One response per installed route. A prefix can carry more than one
+		// when several rules export it to different tables; previously only the
+		// last rule's entry survived in tracking, so the others were invisible
+		// here as well as unreclaimable.
+		for prefix, entries := range vrfRoutes {
+			for _, info := range entries {
+				fn(&api.ListNetlinkExportResponse{
+					Route: &api.ListNetlinkExportResponse_ExportedRoute{
+						Prefix:     prefix,
+						Nexthop:    info.Route.Gw.String(),
+						Vrf:        vrfName,
+						TableId:    int32(info.Route.Table),
+						Metric:     uint32(info.Route.Priority),
+						RuleName:   info.RuleName,
+						ExportedAt: info.ExportedAt.Unix(),
+					},
+				})
 			}
-
-			fn(&api.ListNetlinkExportResponse{Route: route})
 		}
 	}
 
@@ -2253,11 +2406,12 @@ func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkE
 }
 
 func (s *BgpServer) GetNetlinkExportStats(ctx context.Context, req *api.GetNetlinkExportStatsRequest) (*api.GetNetlinkExportStatsResponse, error) {
-	if s.netlinkExportClient == nil {
+	e := s.netlinkExportClientRef()
+	if e == nil {
 		return nil, fmt.Errorf("netlink export not enabled")
 	}
 
-	stats := s.netlinkExportClient.getStats()
+	stats := e.getStats()
 
 	return &api.GetNetlinkExportStatsResponse{
 		Exported:                  stats.Exported,
@@ -2274,11 +2428,12 @@ func (s *BgpServer) GetNetlinkExportStats(ctx context.Context, req *api.GetNetli
 }
 
 func (s *BgpServer) FlushNetlinkExport(ctx context.Context, req *api.FlushNetlinkExportRequest) (*api.FlushNetlinkExportResponse, error) {
-	if s.netlinkExportClient == nil {
+	e := s.netlinkExportClientRef()
+	if e == nil {
 		return nil, fmt.Errorf("netlink export not enabled")
 	}
 
-	err := s.netlinkExportClient.flush()
+	err := e.flush()
 	if err != nil {
 		return nil, fmt.Errorf("failed to flush netlink export: %w", err)
 	}
@@ -2287,11 +2442,12 @@ func (s *BgpServer) FlushNetlinkExport(ctx context.Context, req *api.FlushNetlin
 }
 
 func (s *BgpServer) ListNetlinkExportRules(ctx context.Context, req *api.ListNetlinkExportRulesRequest) (*api.ListNetlinkExportRulesResponse, error) {
-	if s.netlinkExportClient == nil {
+	e := s.netlinkExportClientRef()
+	if e == nil {
 		return nil, fmt.Errorf("netlink export not enabled")
 	}
 
-	rules := s.netlinkExportClient.getRules()
+	rules := e.getRules()
 	apiRules := make([]*api.ListNetlinkExportRulesResponse_ExportRule, 0, len(rules))
 
 	for _, rule := range rules {
@@ -2320,7 +2476,7 @@ func (s *BgpServer) ListNetlinkExportRules(ctx context.Context, req *api.ListNet
 	}
 
 	// Get VRF export rules
-	vrfRules := s.netlinkExportClient.getVrfRules()
+	vrfRules := e.getVrfRules()
 	apiVrfRules := make([]*api.ListNetlinkExportRulesResponse_VrfExportRule, 0, len(vrfRules))
 
 	for _, vrfRule := range vrfRules {
@@ -2405,6 +2561,17 @@ func (s *BgpServer) DeleteBmp(ctx context.Context, r *api.DeleteBmpRequest) erro
 }
 
 func (s *BgpServer) GetNetlink(ctx context.Context, in *api.GetNetlinkRequest) (*api.GetNetlinkResponse, error) {
+	// This reads server configuration rather than a client pointer, so it needs
+	// the lock for the whole read, not just to take a reference.
+	//
+	// It ranges bgpConfig.Vrfs, which AddVrf now appends to, and reads slices
+	// that the per-VRF RPCs replace. Unsynchronised, that is a torn read of
+	// InterfaceList at best and a racing slice grow at worst - on the endpoint a
+	// controller polls on every reconcile, more often than all the others
+	// combined.
+	s.shared.mu.Lock()
+	defer s.shared.mu.Unlock()
+
 	// Collect VRF import configurations
 	vrfImports := make([]*api.NetlinkVrfImport, 0)
 	for i := range s.bgpConfig.Vrfs {
@@ -2412,7 +2579,7 @@ func (s *BgpServer) GetNetlink(ctx context.Context, in *api.GetNetlinkRequest) (
 		if vrf.NetlinkImport.Enabled {
 			vrfImports = append(vrfImports, &api.NetlinkVrfImport{
 				VrfName:    vrf.Config.Name,
-				Interfaces: vrf.NetlinkImport.InterfaceList,
+				Interfaces: slices.Clone(vrf.NetlinkImport.InterfaceList),
 			})
 		}
 	}
@@ -2421,17 +2588,18 @@ func (s *BgpServer) GetNetlink(ctx context.Context, in *api.GetNetlinkRequest) (
 		ImportEnabled: s.bgpConfig.Netlink.Import.Enabled,
 		ExportEnabled: s.bgpConfig.Netlink.Export.Enabled,
 		Vrf:           s.bgpConfig.Netlink.Import.Vrf,
-		Interfaces:    s.bgpConfig.Netlink.Import.InterfaceList,
+		Interfaces:    slices.Clone(s.bgpConfig.Netlink.Import.InterfaceList),
 		VrfImports:    vrfImports,
 	}, nil
 }
 
 func (s *BgpServer) GetNetlinkImportStats(ctx context.Context, req *api.GetNetlinkImportStatsRequest) (*api.GetNetlinkImportStatsResponse, error) {
-	if s.netlinkClient == nil {
+	n := s.netlinkClientRef()
+	if n == nil {
 		return nil, fmt.Errorf("netlink import not enabled")
 	}
 
-	stats := s.netlinkClient.getStats()
+	stats := n.getStats()
 
 	return &api.GetNetlinkImportStatsResponse{
 		Imported:         stats.Imported,
@@ -2482,6 +2650,24 @@ func (s *BgpServer) StopBgp(ctx context.Context, r *api.StopBgpRequest) error {
 	}
 	err := s.mgmtOperation(func() error {
 		defer s.runningCancel()
+
+		// Stop netlink first, and inside this closure so shared.mu is held.
+		//
+		// It cannot go after mgmtOperation returns: runningCancel above fires on
+		// exit, Serve() then returns, and nothing drains mgmtCh again. Work done
+		// out there holds no lock, so withdrawing routes would mutate the RIB
+		// unsynchronised - the exact defect the import locking work removes.
+		//
+		// Without this the scan goroutine outlives the server entirely, ticking
+		// against a torn-down RIB.
+		if s.netlinkClient != nil {
+			s.netlinkClient.stopLocked(false)
+			s.netlinkClient = nil
+		}
+		if s.netlinkExportClient != nil {
+			_ = s.netlinkExportClient.stop(false)
+			s.netlinkExportClient = nil
+		}
 
 		for address, neighbor := range s.neighborMap {
 			c := &oc.Neighbor{Config: oc.NeighborConfig{
@@ -2711,10 +2897,6 @@ func (s *BgpServer) fixupApiPath(vrfId string, pathList []*table.Path) error {
 
 func pathTokey(path *table.Path) string {
 	return fmt.Sprintf("%d:%s", path.RemoteID(), path.GetPrefix())
-}
-
-func apiutilPathTokey(path *apiutil.Path) string {
-	return fmt.Sprintf("%d:%s", path.RemoteID, path.Nlri.String())
 }
 
 func (s *BgpServer) addPathList(vrfId string, pathList []*table.Path) error {
@@ -3025,6 +3207,76 @@ func (s *BgpServer) ListVrf(ctx context.Context, r *api.ListVrfRequest, fn func(
 	return nil
 }
 
+// ensureVrfConfig makes sure a VRF has an entry in bgpConfig.Vrfs, creating one
+// if it was added over gRPC rather than read from a config file.
+//
+// The RD is not optional here: buildVrfMappings resolves an incoming VPN path's
+// RD to a VRF name through it, so an entry without one leaves export dead even
+// though the VRF is otherwise configured.
+//
+// Caller MUST hold shared.mu.
+func (s *BgpServer) ensureVrfConfig(name string, id uint32, rd bgp.RouteDistinguisherInterface) {
+	for i := range s.bgpConfig.Vrfs {
+		if s.bgpConfig.Vrfs[i].Config.Name == name {
+			// Already known. Fill in an RD only if the existing entry lacks one,
+			// so a config file's settings are never overwritten.
+			if s.bgpConfig.Vrfs[i].Config.Rd == "" && rd != nil {
+				s.bgpConfig.Vrfs[i].Config.Rd = rd.String()
+			}
+			return
+		}
+	}
+
+	vrf := oc.Vrf{}
+	vrf.Config.Name = name
+	vrf.Config.Id = id
+	if rd != nil {
+		vrf.Config.Rd = rd.String()
+	}
+	s.bgpConfig.Vrfs = append(s.bgpConfig.Vrfs, vrf)
+
+	s.logger.Debug("Created VRF config entry for API-created VRF",
+		slog.String("Topic", "netlink"),
+		slog.String("VRF", name),
+		slog.String("RD", vrf.Config.Rd))
+}
+
+// vrfConfigFor returns the mutable config entry for an existing VRF, creating
+// one on demand for a VRF that lives only in the RIB.
+//
+// Returns nil if the VRF does not exist at all, which is the only case the
+// per-VRF RPCs should reject. They used to reject every gRPC-created VRF,
+// because they searched a slice that only a config file ever populated.
+//
+// Caller MUST hold shared.mu.
+func (s *BgpServer) vrfConfigFor(name string) *oc.Vrf {
+	for i := range s.bgpConfig.Vrfs {
+		if s.bgpConfig.Vrfs[i].Config.Name == name {
+			return &s.bgpConfig.Vrfs[i]
+		}
+	}
+	if s.globalRib == nil {
+		return nil
+	}
+	vrf, ok := s.globalRib.Vrfs[name]
+	if !ok {
+		return nil
+	}
+	s.ensureVrfConfig(name, vrf.Id, vrf.Rd)
+	return &s.bgpConfig.Vrfs[len(s.bgpConfig.Vrfs)-1]
+}
+
+// removeVrfConfig drops a VRF's entry from bgpConfig.Vrfs.
+// Caller MUST hold shared.mu.
+func (s *BgpServer) removeVrfConfig(name string) {
+	for i := range s.bgpConfig.Vrfs {
+		if s.bgpConfig.Vrfs[i].Config.Name == name {
+			s.bgpConfig.Vrfs = append(s.bgpConfig.Vrfs[:i], s.bgpConfig.Vrfs[i+1:]...)
+			return
+		}
+	}
+}
+
 func (s *BgpServer) AddVrf(ctx context.Context, r *api.AddVrfRequest) error {
 	if r == nil || r.Vrf == nil {
 		return fmt.Errorf("nil request")
@@ -3063,6 +3315,17 @@ func (s *BgpServer) AddVrf(ctx context.Context, r *api.AddVrfRequest) error {
 				}
 			}
 		}
+
+		// Give the VRF a bgpConfig entry.
+		//
+		// AddVrf previously wrote only globalRib.Vrfs, and nothing but the config
+		// file ever wrote bgpConfig.Vrfs. Everything netlink keys off the latter:
+		// buildVrfMappings builds rdToVrf from it, the import scan gates on it,
+		// and the four per-VRF RPCs look their VRF up in it and write settings
+		// back into it. A VRF created over gRPC therefore existed for routing but
+		// not for netlink, which is why per-VRF import and export never ran for a
+		// controller-managed deployment.
+		s.ensureVrfConfig(name, id, rd)
 
 		// Trigger netlink import rescan for newly added VRF
 		if s.netlinkClient != nil {
@@ -3109,6 +3372,28 @@ func (s *BgpServer) DeleteVrf(ctx context.Context, r *api.DeleteVrfRequest) erro
 		}
 		if len(pathList) > 0 {
 			s.propagateUpdate(nil, pathList)
+		}
+
+		// Drop the config entry and any kernel routes exported for this VRF,
+		// then rebuild the RD mapping so a later VRF reusing the RD is not
+		// resolved to the deleted one.
+		s.removeVrfConfig(name)
+		if s.netlinkClient != nil {
+			s.netlinkClient.withdrawVrfLocked(name)
+		}
+		if s.netlinkExportClient != nil {
+			if err := s.netlinkExportClient.flushVrf(name); err != nil {
+				s.logger.Warn("Failed to flush VRF netlink export on delete",
+					slog.String("Topic", "netlink"),
+					slog.String("VRF", name),
+					slog.Any("Error", err))
+			}
+			if err := s.netlinkExportClient.buildVrfMappings(); err != nil {
+				s.logger.Warn("Failed to rebuild VRF export mappings after VRF delete",
+					slog.String("Topic", "netlink"),
+					slog.String("VRF", name),
+					slog.Any("Error", err))
+			}
 		}
 		return nil
 	}, true)
@@ -4075,7 +4360,9 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 		if err != nil {
 			return false, fmt.Errorf("failed to set peer policy: %w", err)
 		}
+		peer.fsm.lock.Lock()
 		peer.fsm.pConf.ApplyPolicy = c.ApplyPolicy
+		peer.fsm.lock.Unlock()
 		needsSoftResetIn = true
 	}
 	original := peer.fsm.pConf
@@ -4111,8 +4398,13 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 	}
 
 	if !original.Timers.Config.Equal(&c.Timers.Config) {
-		peer.fsm.logger.Info("Update timer configuration", slog.String("Err", err.Error()))
+		peer.fsm.logger.Info("Update timer configuration")
+		// connectLoop reads pConf.Timers.Config under fsm.lock (fsm.go), so this
+		// write needs it too. Until the nil dereference above was fixed, this line
+		// was unreachable and the race could never be observed.
+		peer.fsm.lock.Lock()
 		peer.fsm.pConf.Timers.Config = c.Timers.Config
+		peer.fsm.lock.Unlock()
 	}
 
 	isLimit, err := peer.updatePrefixLimitConfig(c.AfiSafis)
@@ -4122,7 +4414,9 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 	if err != nil {
 		peer.fsm.logger.Error("failed to update prefixLimit", slog.String("Err", err.Error()))
 		// rollback to original state
+		peer.fsm.lock.Lock()
 		peer.fsm.pConf = original
+		peer.fsm.lock.Unlock()
 		return needsSoftResetIn, err
 	}
 

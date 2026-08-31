@@ -191,6 +191,15 @@ func inSlice(n Neighbor, b []Neighbor) int {
 	return -1
 }
 
+func inVrfSlice(v Vrf, b []Vrf) int {
+	for i, vb := range b {
+		if vb.Config.Name == v.Config.Name {
+			return i
+		}
+	}
+	return -1
+}
+
 func existPeerGroup(n string, b []PeerGroup) int {
 	for i, nb := range b {
 		if nb.Config.PeerGroupName == n {

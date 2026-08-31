@@ -27,7 +27,6 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/osrg/gobgp/v4/internal/pkg/netutils"
 	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 )
@@ -148,30 +147,23 @@ func NewPeerInfo(g *oc.Global, p *oc.Neighbor, AS, localAS uint32, ID, localID n
 	}
 }
 
-func NewNetlinkPeerInfo(iface string, logger *slog.Logger) *PeerInfo {
-	peerInfo := &PeerInfo{
+// NewNetlinkPeerInfo builds the PeerInfo used as the source of a netlink-imported
+// path.
+//
+// It deliberately does NOT populate IPv4Nexthop/IPv6Nexthop/IPv6LinkLocalNexthop.
+// UpdatePathAttrs reads those three fields from its own `info *PeerInfo`
+// parameter, and its sole caller passes the BGP *peer's* PeerInfo (populated
+// separately when the session comes up), not the path's source. Nothing reads
+// them off a path source, so populating them here cost four full netlink dumps
+// (2x InterfaceByName + 2x Addrs) per route per import tick for values that were
+// discarded. Only IsNetlink and NetlinkIfName are read from the source.
+func NewNetlinkPeerInfo(iface string) *PeerInfo {
+	return &PeerInfo{
 		ID:            netip.MustParseAddr("0.0.0.1"), // Magic value
 		Address:       netip.Addr{},                   // Invalid address - makes IsLocal() return true
 		NetlinkIfName: iface,
 		IsNetlink:     true,
 	}
-
-	// Populate IPv4 nexthop from interface
-	if ipv4, err := netutils.GetIPv4Nexthop(iface, logger); err == nil {
-		peerInfo.IPv4Nexthop = ipv4
-	}
-
-	// Populate IPv6 nexthops from interface
-	if ipv6nexthops, err := netutils.GetIPv6Nexthops(iface, logger); err == nil {
-		if ipv6nexthops.Global != nil {
-			peerInfo.IPv6Nexthop = ipv6nexthops.Global
-		}
-		if ipv6nexthops.LinkLocal != nil {
-			peerInfo.IPv6LinkLocalNexthop = ipv6nexthops.LinkLocal
-		}
-	}
-
-	return peerInfo
 }
 
 type Destination struct {

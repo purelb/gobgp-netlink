@@ -281,9 +281,10 @@ func InitialConfig(ctx context.Context, bgpServer *server.BgpServer, newConfig *
 		}
 	}
 
-	bgpServer.GetBgpConfig().Netlink = newConfig.Netlink
-	bgpServer.GetBgpConfig().Vrfs = newConfig.Vrfs
-	if err := bgpServer.StartNetlink(ctx); err != nil {
+	// Assign and apply in one locked operation. Writing through GetBgpConfig
+	// here races the import scan and buildVrfMappings, which read these same
+	// fields from the server's own goroutines.
+	if err := bgpServer.StartNetlinkWithConfig(ctx, &newConfig.Netlink, newConfig.Vrfs); err != nil {
 		bgpServer.Log().Error("failed to start netlink",
 			slog.String("Topic", "config"), slog.Any("Error", err))
 	}
@@ -332,41 +333,7 @@ func InitialConfig(ctx context.Context, bgpServer *server.BgpServer, newConfig *
 				slog.String("Topic", "config"), slog.Any("Error", err))
 		}
 	}
-	for _, vrf := range newConfig.Vrfs {
-		rd, err := bgp.ParseRouteDistinguisher(vrf.Config.Rd)
-		if err != nil {
-			bgpServer.Log().Error("failed to load vrf rd config",
-				slog.String("Topic", "config"), slog.Any("Error", err))
-		}
-
-		importRtList, err := marshalRouteTargets(vrf.Config.ImportRtList)
-		if err != nil {
-			bgpServer.Log().Error("failed to load vrf import rt config",
-				slog.String("Topic", "config"), slog.Any("Error", err))
-		}
-		exportRtList, err := marshalRouteTargets(vrf.Config.ExportRtList)
-		if err != nil {
-			bgpServer.Log().Error("failed to load vrf export rt config",
-				slog.String("Topic", "config"), slog.Any("Error", err))
-		}
-
-		a, err := apiutil.MarshalRD(rd)
-		if err != nil {
-			bgpServer.Log().Error("failed to set vrf config",
-				slog.String("Topic", "config"), slog.Any("Error", err))
-		}
-		if err := bgpServer.AddVrf(ctx, &api.AddVrfRequest{
-			Vrf: &api.Vrf{
-				Name:     vrf.Config.Name,
-				Rd:       a,
-				Id:       vrf.Config.Id,
-				ImportRt: importRtList,
-				ExportRt: exportRtList,
-			},
-		}); err != nil {
-			bgpServer.Log().Error("failed to set vrf config", slog.String("Topic", "config"), slog.Any("Error", err))
-		}
-	}
+	addVrfs(ctx, bgpServer, newConfig.Vrfs)
 	for _, c := range newConfig.MrtDump {
 		if len(c.Config.FileName) == 0 {
 			continue
@@ -427,9 +394,91 @@ func InitialConfig(ctx context.Context, bgpServer *server.BgpServer, newConfig *
 // hangle graceful restart and 2) requires a BgpConfigSet for the previous
 // configuration so that it can compute the delta between it and the new
 // config. The new BgpConfigSet can be obtained using ReadConfigFile.
+// addVrfs creates VRFs in the RIB. Shared by initial load and reload so the two
+// cannot drift apart.
+func addVrfs(ctx context.Context, bgpServer *server.BgpServer, vrfs []oc.Vrf) {
+	for _, vrf := range vrfs {
+		rd, err := bgp.ParseRouteDistinguisher(vrf.Config.Rd)
+		if err != nil {
+			bgpServer.Log().Error("failed to load vrf rd config",
+				slog.String("Topic", "config"), slog.Any("Error", err))
+		}
+
+		importRtList, err := marshalRouteTargets(vrf.Config.ImportRtList)
+		if err != nil {
+			bgpServer.Log().Error("failed to load vrf import rt config",
+				slog.String("Topic", "config"), slog.Any("Error", err))
+		}
+		exportRtList, err := marshalRouteTargets(vrf.Config.ExportRtList)
+		if err != nil {
+			bgpServer.Log().Error("failed to load vrf export rt config",
+				slog.String("Topic", "config"), slog.Any("Error", err))
+		}
+
+		a, err := apiutil.MarshalRD(rd)
+		if err != nil {
+			bgpServer.Log().Error("failed to set vrf config",
+				slog.String("Topic", "config"), slog.Any("Error", err))
+		}
+		if err := bgpServer.AddVrf(ctx, &api.AddVrfRequest{
+			Vrf: &api.Vrf{
+				Name:     vrf.Config.Name,
+				Rd:       a,
+				Id:       vrf.Config.Id,
+				ImportRt: importRtList,
+				ExportRt: exportRtList,
+			},
+		}); err != nil {
+			bgpServer.Log().Error("failed to set vrf config", slog.String("Topic", "config"), slog.Any("Error", err))
+		}
+	}
+}
+
+// deleteVrfs removes VRFs from the RIB.
+//
+// DeleteVrf also withdraws anything imported into the VRF, flushes what was
+// exported to the kernel, drops the VRF's config entry and rebuilds the RD
+// mapping, so a later VRF reusing the RD is not resolved to this one.
+func deleteVrfs(ctx context.Context, bgpServer *server.BgpServer, vrfs []oc.Vrf) {
+	for _, vrf := range vrfs {
+		bgpServer.Log().Info("Delete VRF",
+			slog.String("Topic", "config"), slog.String("Key", vrf.Config.Name))
+		if err := bgpServer.DeleteVrf(ctx, &api.DeleteVrfRequest{Name: vrf.Config.Name}); err != nil {
+			bgpServer.Log().Error("failed to delete vrf",
+				slog.String("Topic", "config"),
+				slog.String("Key", vrf.Config.Name),
+				slog.Any("Error", err))
+		}
+	}
+}
+
+// recreateVrfs applies a structural VRF change: identity fields cannot be
+// updated in place, because AddVrf refuses a name that already exists.
+//
+// This moves routes. Every path in the VRF is withdrawn with the old
+// definition and re-learned under the new one, so it is logged at Info: a
+// reload that previously did nothing at all now changes forwarding.
+//
+// A VRF that a neighbour is still using cannot be recreated - DeleteVrf refuses
+// it, and the subsequent add then fails because the name still exists. Both are
+// logged and the VRF keeps its old definition, so the change is ignored rather
+// than half-applied. Removing the neighbour first, or restarting, is the way
+// through that.
+func recreateVrfs(ctx context.Context, bgpServer *server.BgpServer, vrfs []oc.Vrf) {
+	for _, vrf := range vrfs {
+		bgpServer.Log().Info("VRF definition changed, recreating (routes in this VRF will be relearned)",
+			slog.String("Topic", "config"),
+			slog.String("Key", vrf.Config.Name),
+			slog.String("Rd", vrf.Config.Rd))
+	}
+	deleteVrfs(ctx, bgpServer, vrfs)
+	addVrfs(ctx, bgpServer, vrfs)
+}
+
 func UpdateConfig(ctx context.Context, bgpServer *server.BgpServer, c, newConfig *oc.BgpConfigSet) (*oc.BgpConfigSet, error) {
 	addedPg, deletedPg, updatedPg := oc.UpdatePeerGroupConfig(bgpServer.Log(), c, newConfig)
 	added, deleted, updated := oc.UpdateNeighborConfig(bgpServer.Log(), c, newConfig)
+	addedVrf, deletedVrf, updatedVrf := oc.UpdateVrfConfig(bgpServer.Log(), c, newConfig)
 	updatePolicy := oc.CheckPolicyDifference(bgpServer.Log(), oc.ConfigSetToRoutingPolicy(c), oc.ConfigSetToRoutingPolicy(newConfig))
 
 	if updatePolicy {
@@ -458,10 +507,23 @@ func UpdateConfig(ctx context.Context, bgpServer *server.BgpServer, c, newConfig
 	needsSoftResetIn := updatePeerGroups(ctx, bgpServer, updatedPg)
 	updatePolicy = updatePolicy || needsSoftResetIn
 	addDynamicNeighbors(ctx, bgpServer, newConfig.DynamicNeighbors)
+
+	// VRFs are created before neighbours, so a neighbour naming a new VRF finds
+	// it, and deleted after, because DeleteVrf refuses a VRF a neighbour is
+	// still using.
+	//
+	// Reload used to apply no VRF change at all: AddVrf ran only on initial
+	// load, so a VRF added or renamed in the config file never reached the RIB
+	// and the daemon had to be restarted.
+	addVrfs(ctx, bgpServer, addedVrf)
+	recreateVrfs(ctx, bgpServer, updatedVrf)
+
 	addNeighbors(ctx, bgpServer, added)
 	deleteNeighbors(ctx, bgpServer, deleted)
 	needsSoftResetIn = updateNeighbors(ctx, bgpServer, updated)
 	updatePolicy = updatePolicy || needsSoftResetIn
+
+	deleteVrfs(ctx, bgpServer, deletedVrf)
 
 	if updatePolicy {
 		if err := bgpServer.ResetPeer(ctx, &api.ResetPeerRequest{
@@ -474,16 +536,33 @@ func UpdateConfig(ctx context.Context, bgpServer *server.BgpServer, c, newConfig
 		}
 	}
 
-	// Update netlink configuration
-	if !newConfig.Netlink.Equal(&c.Netlink) {
+	// Update netlink configuration.
+	//
+	// Vrfs is carried too, not just Netlink: UpdateConfig never refreshed it, so
+	// a SIGHUP that changed a VRF's netlink-import or netlink-export block never
+	// reached buildVrfMappings and was silently ignored.
+	if !newConfig.Netlink.Equal(&c.Netlink) || !vrfsEqual(newConfig.Vrfs, c.Vrfs) {
 		bgpServer.Log().Info("netlink config changed, updating",
 			slog.String("Topic", "config"))
-		bgpServer.GetBgpConfig().Netlink = newConfig.Netlink
-		if err := bgpServer.StartNetlink(ctx); err != nil {
+		if err := bgpServer.StartNetlinkWithConfig(ctx, &newConfig.Netlink, newConfig.Vrfs); err != nil {
 			bgpServer.Log().Warn("failed to update netlink config",
 				slog.String("Topic", "config"), slog.Any("Error", err))
 		}
 	}
 
 	return newConfig, nil
+}
+
+// vrfsEqual reports whether two VRF lists are equivalent, using the generated
+// per-VRF comparison so netlink-import and netlink-export blocks are included.
+func vrfsEqual(a, b []oc.Vrf) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !a[i].Equal(&b[i]) {
+			return false
+		}
+	}
+	return true
 }

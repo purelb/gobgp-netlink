@@ -103,6 +103,44 @@ func UpdatePeerGroupConfig(logger *slog.Logger, curC, newC *BgpConfigSet) ([]Pee
 	return addedPg, deletedPg, updatedPg
 }
 
+// UpdateVrfConfig reports which VRFs were added, deleted, or structurally
+// changed between two configurations.
+//
+// "Updated" means the identity fields changed - RD, route targets, id. Those
+// cannot be applied in place, because AddVrf refuses a name that already
+// exists, so the caller has to delete and re-add, which moves every route in
+// the VRF.
+//
+// A VRF whose netlink-import or netlink-export block changed is deliberately
+// NOT reported here. Vrf.Equal covers those too, and treating them as an update
+// would tear down and rebuild a VRF over a changed metric. They are applied
+// separately by StartNetlinkWithConfig, which does not disturb routing.
+func UpdateVrfConfig(logger *slog.Logger, curC, newC *BgpConfigSet) ([]Vrf, []Vrf, []Vrf) {
+	added := []Vrf{}
+	deleted := []Vrf{}
+	updated := []Vrf{}
+
+	for _, v := range newC.Vrfs {
+		idx := inVrfSlice(v, curC.Vrfs)
+		if idx < 0 {
+			added = append(added, v)
+			continue
+		}
+		if !v.Config.Equal(&curC.Vrfs[idx].Config) {
+			logger.Debug("Current vrf config", slog.String("Topic", "Config"), slog.Any("Key", curC.Vrfs[idx].Config))
+			logger.Debug("New vrf config", slog.String("Topic", "Config"), slog.Any("Key", v.Config))
+			updated = append(updated, v)
+		}
+	}
+
+	for _, v := range curC.Vrfs {
+		if inVrfSlice(v, newC.Vrfs) < 0 {
+			deleted = append(deleted, v)
+		}
+	}
+	return added, deleted, updated
+}
+
 func UpdateNeighborConfig(logger *slog.Logger, curC, newC *BgpConfigSet) ([]Neighbor, []Neighbor, []Neighbor) {
 	added := []Neighbor{}
 	deleted := []Neighbor{}

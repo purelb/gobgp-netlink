@@ -650,8 +650,11 @@ func (s *server) AddPath(ctx context.Context, r *api.AddPathRequest) (*api.AddPa
 		return &api.AddPathResponse{}, err
 	}
 
+	// NOTE: AddPath already recorded this UUID in uuidMap under mgmtOperation
+	// (see BgpServer.AddPath). Recording it again here would race the Serve
+	// goroutine, and the key would differ for VRF paths because fixupApiPath
+	// rewrites the NLRI to the VPN family before pathTokey is computed.
 	id := path[0].UUID
-	s.bgpServer.uuidMap[apiutilPathTokey(p)] = id
 	uuidBytes, err = id.MarshalBinary()
 	return &api.AddPathResponse{Uuid: uuidBytes}, err
 }
