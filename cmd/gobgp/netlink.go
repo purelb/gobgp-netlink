@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -294,6 +295,98 @@ func flushNetlinkExport() error {
 	return nil
 }
 
+// vrfExportConfigFlags are the flags that describe a VRF's export configuration,
+// as opposed to flags that merely select what to act on.
+var vrfExportConfigFlags = []string{
+	"linux-vrf", "table-id", "metric", "skip-nexthop-validation",
+	"communities", "large-communities",
+}
+
+// buildVrfExportConfig assembles the configuration to send with
+// vrf-enable-export, preserving anything the operator did not ask to change.
+//
+// The server overwrites every field whenever a config is supplied, and it has no
+// way to tell "not specified" from "set to the zero value" - protobuf scalars
+// carry no presence. So the merge has to happen here.
+//
+// Building the message straight from flag values meant enabling export also
+// silently rewrote the configuration to the flag defaults: on a VRF configured
+// with metric 10 and validate-nexthop false, "gobgp netlink vrf-enable-export
+// kubevrf" reset the metric to 0 and flipped validation on. The community
+// filter went the same way, and an empty community list means "match every
+// route", so a filtered export quietly became an unfiltered one.
+//
+// Returns nil when no configuration flag was given, which the server reads as
+// "enable, change nothing".
+func buildVrfExportConfig(cmd *cobra.Command, vrfName string) (*api.VrfNetlinkExportConfig, error) {
+	if !slices.ContainsFunc(vrfExportConfigFlags, cmd.Flags().Changed) {
+		return nil, nil
+	}
+
+	// Seed from what is configured now so unmentioned fields survive.
+	config := &api.VrfNetlinkExportConfig{}
+	if current, err := currentVrfExportConfig(vrfName); err != nil {
+		return nil, err
+	} else if current != nil {
+		config = current
+	}
+
+	if cmd.Flags().Changed("linux-vrf") {
+		config.LinuxVrf, _ = cmd.Flags().GetString("linux-vrf")
+	}
+	if cmd.Flags().Changed("table-id") {
+		config.LinuxTableId, _ = cmd.Flags().GetInt32("table-id")
+	}
+	if cmd.Flags().Changed("metric") {
+		config.Metric, _ = cmd.Flags().GetUint32("metric")
+	}
+	if cmd.Flags().Changed("skip-nexthop-validation") {
+		config.SkipNexthopValidation, _ = cmd.Flags().GetBool("skip-nexthop-validation")
+	}
+	if cmd.Flags().Changed("communities") {
+		s, _ := cmd.Flags().GetString("communities")
+		config.CommunityList = splitList(s)
+	}
+	if cmd.Flags().Changed("large-communities") {
+		s, _ := cmd.Flags().GetString("large-communities")
+		config.LargeCommunityList = splitList(s)
+	}
+	return config, nil
+}
+
+// currentVrfExportConfig returns a VRF's existing export configuration, or nil
+// if it has none yet.
+func currentVrfExportConfig(vrfName string) (*api.VrfNetlinkExportConfig, error) {
+	res, err := client.ListNetlinkExportRules(context.Background(), &api.ListNetlinkExportRulesRequest{})
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range res.GetVrfRules() {
+		if r.GetGobgpVrf() != vrfName {
+			continue
+		}
+		return &api.VrfNetlinkExportConfig{
+			LinuxVrf:     r.GetLinuxVrf(),
+			LinuxTableId: r.GetLinuxTableId(),
+			Metric:       r.GetMetric(),
+			// The wire field is the inverse of the reported one.
+			SkipNexthopValidation: !r.GetValidateNexthop(),
+			CommunityList:         r.GetCommunityList(),
+			LargeCommunityList:    r.GetLargeCommunityList(),
+		}, nil
+	}
+	return nil, nil
+}
+
+// splitList turns a comma-separated flag value into a list, treating an empty
+// string as an explicit empty list rather than a one-element list of "".
+func splitList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
 func newNetlinkCmd() *cobra.Command {
 	var vrf string
 
@@ -442,8 +535,18 @@ Optionally override with --interfaces flag.`,
 			fmt.Println("Netlink export enabled")
 		},
 	}
-	enableExportCmd.Flags().Uint32("dampening-interval", 100, "update dampening interval in ms")
-	enableExportCmd.Flags().Int32("route-protocol", 186, "Linux route protocol (default: 186 for BGP)")
+	// Both default to 0, meaning "leave the running configuration alone".
+	//
+	// The server treats a zero field as "unchanged" and substitutes its own
+	// default only when nothing is configured. Giving these flags non-zero
+	// client-side defaults meant every invocation sent a value, so simply
+	// re-enabling export silently rewrote whatever was configured: a daemon
+	// running route-protocol 201 was reset to 186 while its already-installed
+	// routes kept protocol 201, leaving the configuration and the kernel
+	// disagreeing. The next restart would then sweep for 186 and never reclaim
+	// those routes.
+	enableExportCmd.Flags().Uint32("dampening-interval", 0, "update dampening interval in ms (0 = leave unchanged; server default 100)")
+	enableExportCmd.Flags().Int32("route-protocol", 0, "Linux route protocol (0 = leave unchanged; server default 186, RTPROT_BGP)")
 	netlinkCmd.AddCommand(enableExportCmd)
 
 	// Global disable-export command
@@ -523,27 +626,13 @@ Optionally override with --interfaces flag.`,
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			vrfName := args[0]
-			linuxVrf, _ := cmd.Flags().GetString("linux-vrf")
-			tableId, _ := cmd.Flags().GetInt32("table-id")
-			metric, _ := cmd.Flags().GetUint32("metric")
-			skipNexthopValidation, _ := cmd.Flags().GetBool("skip-nexthop-validation")
-			communitiesStr, _ := cmd.Flags().GetString("communities")
-			largeCommunitiesStr, _ := cmd.Flags().GetString("large-communities")
 
-			config := &api.VrfNetlinkExportConfig{
-				LinuxVrf:              linuxVrf,
-				LinuxTableId:          tableId,
-				Metric:                metric,
-				SkipNexthopValidation: skipNexthopValidation,
-			}
-			if communitiesStr != "" {
-				config.CommunityList = strings.Split(communitiesStr, ",")
-			}
-			if largeCommunitiesStr != "" {
-				config.LargeCommunityList = strings.Split(largeCommunitiesStr, ",")
+			config, err := buildVrfExportConfig(cmd, vrfName)
+			if err != nil {
+				exitWithError(err)
 			}
 
-			_, err := client.EnableVrfNetlinkExport(context.Background(), &api.EnableVrfNetlinkExportRequest{
+			_, err = client.EnableVrfNetlinkExport(context.Background(), &api.EnableVrfNetlinkExportRequest{
 				Vrf:    vrfName,
 				Config: config,
 			})
@@ -553,12 +642,15 @@ Optionally override with --interfaces flag.`,
 			fmt.Printf("VRF %s netlink export enabled\n", vrfName)
 		},
 	}
-	vrfEnableExportCmd.Flags().String("linux-vrf", "", "target Linux VRF name (default: same as GoBGP VRF)")
-	vrfEnableExportCmd.Flags().Int32("table-id", 0, "Linux routing table ID (0 = auto-lookup)")
-	vrfEnableExportCmd.Flags().Uint32("metric", 0, "route metric")
-	vrfEnableExportCmd.Flags().Bool("skip-nexthop-validation", false, "skip nexthop validation")
-	vrfEnableExportCmd.Flags().String("communities", "", "comma-separated communities to filter")
-	vrfEnableExportCmd.Flags().String("large-communities", "", "comma-separated large communities to filter")
+	// Unset flags leave the existing configuration alone; see
+	// buildVrfExportConfig. The defaults below describe what a VRF with no
+	// configuration at all gets, not what an unset flag sends.
+	vrfEnableExportCmd.Flags().String("linux-vrf", "", "target Linux VRF name (unset: unchanged; default same as GoBGP VRF)")
+	vrfEnableExportCmd.Flags().Int32("table-id", 0, "Linux routing table ID (unset: unchanged; 0 = auto-lookup)")
+	vrfEnableExportCmd.Flags().Uint32("metric", 0, "route metric (unset: unchanged)")
+	vrfEnableExportCmd.Flags().Bool("skip-nexthop-validation", false, "skip nexthop validation (unset: unchanged)")
+	vrfEnableExportCmd.Flags().String("communities", "", "comma-separated communities to filter (unset: unchanged; empty string clears)")
+	vrfEnableExportCmd.Flags().String("large-communities", "", "comma-separated large communities to filter (unset: unchanged; empty string clears)")
 	netlinkCmd.AddCommand(vrfEnableExportCmd)
 
 	// Per-VRF disable-export command
