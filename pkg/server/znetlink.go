@@ -27,7 +27,6 @@ import (
 	custom_net "github.com/osrg/gobgp/v4/internal/pkg/netutils"
 	"github.com/osrg/gobgp/v4/internal/pkg/table"
 	"github.com/osrg/gobgp/v4/pkg/config/oc"
-	"github.com/osrg/gobgp/v4/pkg/netlink"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 )
 
@@ -56,7 +55,6 @@ type importWork struct {
 }
 
 type netlinkClient struct {
-	client *netlink.NetlinkClient
 	server *BgpServer
 	dead   chan struct{}
 	done   chan struct{} // closed when the scan loop has exited
@@ -81,12 +79,7 @@ type netlinkClient struct {
 
 func newNetlinkClient(s *BgpServer) (*netlinkClient, error) {
 	s.logger.Debug("creating new netlink client", slog.String("Topic", "netlink"))
-	n, err := netlink.NewNetlinkClient(s.logger)
-	if err != nil {
-		return nil, err
-	}
 	w := &netlinkClient{
-		client:   n,
 		server:   s,
 		dead:     make(chan struct{}),
 		done:     make(chan struct{}),

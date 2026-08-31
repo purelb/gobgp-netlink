@@ -40,6 +40,15 @@ const (
 
 	// Default dampening interval to prevent flapping
 	defaultDampeningInterval = 100 * time.Millisecond
+
+	// defaultDampeningMaxDelay bounds how long dampening may hold a prefix back.
+	// Without a bound, a prefix updating faster than the interval is deferred
+	// forever and never reaches the FIB at all.
+	defaultDampeningMaxDelay = 2 * time.Second
+
+	// netlinkSocketTimeout bounds a single netlink exchange. Generous on
+	// purpose: full table dumps on a busy node are legitimately slow.
+	netlinkSocketTimeout = 30 * time.Second
 )
 
 // Route protocols reserved by the kernel and iproute2. Exporting under one of
@@ -159,6 +168,9 @@ type dampenEntry struct {
 	path      *table.Path
 	timer     *time.Timer
 	updatedAt time.Time
+	// firstDeferred is when this run of deferrals began, used to cap how long a
+	// continuously-updating prefix can be held back.
+	firstDeferred time.Time
 }
 
 // exportStats tracks export operation statistics
@@ -211,6 +223,7 @@ type netlinkExportClient struct {
 
 	// Dampening
 	dampeningInterval time.Duration
+	dampeningMaxDelay time.Duration
 	pendingUpdates    map[string]*dampenEntry // prefix -> entry
 	dampenMu          sync.Mutex
 
@@ -227,7 +240,6 @@ type netlinkExportClient struct {
 	sweptStaleRoutes bool
 
 	// Shutdown
-	stopCh  chan struct{}
 	stopped bool // protects against double stop()
 }
 
@@ -238,6 +250,27 @@ func newNetlinkExportClient(server *BgpServer, logger *slog.Logger, routeProtoco
 	if err != nil {
 		return nil, fmt.Errorf("failed to create netlink handle: %w", err)
 	}
+
+	// Netlink sockets have no timeout by default, so a reply the kernel never
+	// sends wedges the export path permanently while holding the client lock.
+	//
+	// The value is deliberately generous rather than snappy: cleanupStaleRoutes
+	// dumps whole routing tables, which on a node running an overlay CNI can be
+	// tens of thousands of routes. A short timeout would turn a working daemon
+	// into one whose every dump fails.
+	if err := handle.SetSocketTimeout(netlinkSocketTimeout); err != nil {
+		logger.Warn("Failed to set netlink socket timeout",
+			slog.String("Topic", "netlink"),
+			slog.Any("Error", err))
+	}
+	// The handle falls back to a package-global socket once Close has run, so
+	// set that one too or the timeout silently stops applying.
+	if err := go_netlink.SetSocketTimeout(netlinkSocketTimeout); err != nil {
+		logger.Warn("Failed to set package netlink socket timeout",
+			slog.String("Topic", "netlink"),
+			slog.Any("Error", err))
+	}
+
 	return newNetlinkExportClientWithHandle(server, logger, handle, routeProtocol, dampeningInterval)
 }
 
@@ -274,7 +307,6 @@ func newNetlinkExportClientWithHandle(server *BgpServer, logger *slog.Logger, ha
 		pendingUpdates:    make(map[string]*dampenEntry),
 		routeProtocol:     routeProtocol,
 		dampeningInterval: dampeningInterval,
-		stopCh:            make(chan struct{}),
 	}
 
 	// NOTE: cleanupStaleRoutes is deliberately NOT called here. It issues
@@ -1154,20 +1186,9 @@ func (e *netlinkExportClient) exportRoute(path *table.Path, rule *exportRule) er
 
 // withdrawRoute removes a BGP path from the Linux routing table
 func (e *netlinkExportClient) withdrawRoute(path *table.Path, vrfName string) error {
-	// Get prefix - handle VPN families
-	nlri := path.GetNlri()
-	family := path.GetFamily()
-	var prefix string
-
-	// For VPN families, extract just the IP prefix without RD
-	if family == bgp.RF_IPv4_VPN || family == bgp.RF_IPv6_VPN {
-		if vpnNlri, ok := nlri.(*bgp.LabeledVPNIPAddrPrefix); ok {
-			prefix = vpnNlri.IPPrefix()
-		} else {
-			prefix = nlri.String()
-		}
-	} else {
-		prefix = nlri.String()
+	prefix, err := exportPrefixKey(path)
+	if err != nil {
+		return err
 	}
 
 	// Every rule that installed this prefix has its own kernel route, so a
@@ -1237,19 +1258,30 @@ func (e *netlinkExportClient) withdrawRoute(path *table.Path, vrfName string) er
 }
 
 // processDampenedUpdate processes a route update after dampening delay
-func (e *netlinkExportClient) processDampenedUpdate(path *table.Path) {
-	nlri := path.GetNlri()
-	prefix := nlri.String()
-
+// processDampenedUpdate applies the most recent update deferred for a prefix.
+//
+// It takes the prefix rather than a path so the entry's current path is used.
+// The timer closure captured a path at scheduling time, so a re-arm could carry
+// a stale one; keying by prefix means the newest update always wins.
+func (e *netlinkExportClient) processDampenedUpdate(prefix string) {
 	e.dampenMu.Lock()
+	entry, ok := e.pendingUpdates[prefix]
 	delete(e.pendingUpdates, prefix)
 	e.dampenMu.Unlock()
 
-	// Process the update
-	e.processUpdate(path)
+	if !ok || entry.path == nil {
+		return
+	}
+	e.processUpdate(entry.path)
 }
 
-// scheduleUpdate schedules a route update with dampening
+// scheduleUpdate schedules a route update with dampening.
+//
+// Dampening deliberately delays a write so a flapping prefix does not churn the
+// FIB. The deferral is capped: without a cap, a prefix updating faster than the
+// interval had its timer cancelled and restarted on every update and was
+// therefore never programmed at all - dampening turned into permanent
+// suppression, which is the opposite of what it is for.
 func (e *netlinkExportClient) scheduleUpdate(path *table.Path) {
 	if e.dampeningInterval == 0 {
 		// No dampening, process immediately
@@ -1257,35 +1289,57 @@ func (e *netlinkExportClient) scheduleUpdate(path *table.Path) {
 		return
 	}
 
-	nlri := path.GetNlri()
-	prefix := nlri.String()
+	prefix, err := exportPrefixKey(path)
+	if err != nil {
+		e.logger.Warn("Skipping update with unusable prefix",
+			slog.String("Topic", "netlink"),
+			slog.Any("Error", err))
+		return
+	}
 
 	e.dampenMu.Lock()
 	defer e.dampenMu.Unlock()
 
-	// Check if there's already a pending update
 	if entry, exists := e.pendingUpdates[prefix]; exists {
-		// Cancel existing timer and create new one
-		entry.timer.Stop()
 		entry.path = path
+
+		// Once the first deferral of a run has been outstanding for the maximum
+		// delay, stop pushing it back and let the next firing through.
+		if time.Since(entry.firstDeferred) >= e.maxDampeningDelay() {
+			e.logger.Debug("Dampening cap reached, allowing update through",
+				slog.String("Topic", "netlink"),
+				slog.String("Prefix", prefix))
+			return
+		}
+
+		entry.timer.Stop()
 		entry.updatedAt = time.Now()
 		entry.timer = time.AfterFunc(e.dampeningInterval, func() {
-			e.processDampenedUpdate(path)
+			e.processDampenedUpdate(prefix)
 		})
 		e.statsMu.Lock()
 		e.stats.DampenedUpdates++
 		e.statsMu.Unlock()
-	} else {
-		// Create new dampening entry
-		timer := time.AfterFunc(e.dampeningInterval, func() {
-			e.processDampenedUpdate(path)
-		})
-		e.pendingUpdates[prefix] = &dampenEntry{
-			path:      path,
-			timer:     timer,
-			updatedAt: time.Now(),
-		}
+		return
 	}
+
+	now := time.Now()
+	e.pendingUpdates[prefix] = &dampenEntry{
+		path:          path,
+		updatedAt:     now,
+		firstDeferred: now,
+		timer: time.AfterFunc(e.dampeningInterval, func() {
+			e.processDampenedUpdate(prefix)
+		}),
+	}
+}
+
+// maxDampeningDelay bounds how long a flapping prefix can be held back.
+func (e *netlinkExportClient) maxDampeningDelay() time.Duration {
+	if e.dampeningMaxDelay > 0 {
+		return e.dampeningMaxDelay
+	}
+	return defaultDampeningMaxDelay
 }
 
 // withdrawTargets returns the tracking buckets a path is entitled to withdraw
@@ -1565,9 +1619,6 @@ func (e *netlinkExportClient) stop(flushRoutes bool) error {
 	if flushRoutes {
 		_ = e.flush()
 	}
-
-	// Signal shutdown
-	close(e.stopCh)
 
 	// Cancel pending dampened updates with proper locking
 	e.dampenMu.Lock()

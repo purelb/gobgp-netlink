@@ -809,3 +809,83 @@ func TestReadOnlyRPCsSurviveConcurrentDisable(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// --- dampening ---
+
+// TestDampeningCapInstallsFlappingPrefix: dampening cancelled and restarted its
+// timer on every update, so a prefix updating faster than the interval was
+// deferred forever and never programmed at all. Dampening is meant to delay a
+// write, not suppress it.
+//
+// The assertion has to land while the prefix is STILL being updated. Checking
+// after the updates stop proves nothing: the final timer fires and installs the
+// route either way.
+func TestDampeningCapInstallsFlappingPrefix(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f, &exportRule{Name: "r", TableId: 0, Metric: 20})
+	e.dampeningInterval = 50 * time.Millisecond
+	e.dampeningMaxDelay = 200 * time.Millisecond
+
+	path := testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")
+
+	// Update continuously, faster than the dampening interval, so that without a
+	// cap the timer is always cancelled before it can fire.
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				e.scheduleUpdate(path)
+			}
+		}
+	}()
+	defer func() { close(stop); <-done }()
+
+	assert.Eventually(t, func() bool { return f.hasRoute(0, "10.0.0.0/24") },
+		2*time.Second, 10*time.Millisecond,
+		"a prefix updating faster than the dampening interval must still reach "+
+			"the FIB while it is still flapping")
+}
+
+// TestDampeningStillDefersBurst: the cap must not defeat dampening itself. A
+// short burst is collapsed into a single kernel write.
+func TestDampeningStillDefersBurst(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f, &exportRule{Name: "r", TableId: 0, Metric: 20})
+	e.dampeningInterval = 100 * time.Millisecond
+	e.dampeningMaxDelay = 5 * time.Second
+
+	path := testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")
+	for range 10 {
+		e.scheduleUpdate(path)
+	}
+
+	// Nothing written yet: the burst is still being collapsed.
+	replace, _, _ := f.counts()
+	assert.Equal(t, 0, replace, "a burst should not be written through immediately")
+
+	assert.Eventually(t, func() bool { return f.hasRoute(0, "10.0.0.0/24") },
+		2*time.Second, 10*time.Millisecond)
+
+	replace, _, _ = f.counts()
+	assert.Equal(t, 1, replace, "ten updates in a burst should collapse to one write")
+}
+
+// TestNetlinkSocketTimeoutIsSet guards against the export path wedging forever
+// on a kernel reply that never arrives.
+func TestNetlinkSocketTimeoutIsSet(t *testing.T) {
+	f := newFakeNetlink()
+	_ = f.SetSocketTimeout(netlinkSocketTimeout)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	assert.Equal(t, netlinkSocketTimeout, f.socketTimeout)
+	assert.GreaterOrEqual(t, netlinkSocketTimeout, 30*time.Second,
+		"must stay generous: cleanupStaleRoutes dumps whole routing tables")
+}
