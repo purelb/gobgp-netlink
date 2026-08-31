@@ -1568,6 +1568,15 @@ func (s *BgpServer) handleFSMMessage(peer *peer, e *fsmMsg) {
 				}
 			}
 
+			// Record the session's interface on the PeerInfo.
+			//
+			// Paths learned from this peer carry it as their source, and a route
+			// whose nexthop is an IPv6 link-local address cannot be programmed
+			// into the FIB without an output interface: the kernel rejects a
+			// link-local gateway with no RTA_OIF. This is the only place the
+			// interface is known, so netlink export reads it from here.
+			peer.peerInfo.NetlinkIfName = interfaceName
+
 			// Populate IPv4 nexthop
 			if localAddr.Is4() {
 				// IPv4 TCP session - use TCP address as primary

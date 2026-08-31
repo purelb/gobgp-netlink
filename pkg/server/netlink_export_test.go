@@ -33,6 +33,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	go_netlink "github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 func TestValidateRouteProtocol(t *testing.T) {
@@ -563,4 +564,134 @@ func TestVrfExportFailsClosedOnBadCommunity(t *testing.T) {
 
 	assert.Equal(t, 0, f.routeCount(),
 		"an unparseable community filter must export nothing, not everything")
+}
+
+// --- nexthop validation, output interface, ONLINK ---
+
+// netlinkSourcedPath builds a path whose source carries an interface name, as a
+// netlink-imported route or a route learned over an unnumbered session does.
+func netlinkSourcedPath(t *testing.T, cidr, nexthop, iface string) *table.Path {
+	t.Helper()
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(cidr))
+	assert.NoError(t, err)
+	attrs := []bgp.PathAttributeInterface{
+		bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP),
+	}
+	family := bgp.RF_IPv4_UC
+	if netip.MustParseAddr(nexthop).Is6() {
+		family = bgp.RF_IPv6_UC
+		mpreach, err := bgp.NewPathAttributeMpReachNLRI(family,
+			[]bgp.PathNLRI{{NLRI: nlri}}, netip.MustParseAddr(nexthop))
+		assert.NoError(t, err)
+		attrs = append(attrs, mpreach)
+	} else {
+		nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr(nexthop))
+		assert.NoError(t, err)
+		attrs = append(attrs, nh)
+	}
+	p := table.NewPath(family, table.NewNetlinkPeerInfo(iface),
+		bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+	assert.NotNil(t, p)
+	return p
+}
+
+// TestNexthopValidationWorksForVrfTable: validation looked the nexthop up in the
+// main table and then required the answer to come from the rule's table, which
+// can never hold for a VRF. Every rule targeting a VRF silently exported nothing
+// while validation was on - and it is on by default.
+func TestNexthopValidationWorksForVrfTable(t *testing.T) {
+	f := newFakeNetlink()
+	f.setReachable("192.168.1.1", 100, unix.RTN_UNICAST)
+
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "vrf", VrfName: "vrf-red", TableId: 100, Metric: 20, ValidateNexthop: true})
+	f.addLink("vrf-red", 7)
+
+	e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"))
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
+		"a reachable nexthop in the VRF table should validate")
+}
+
+// TestNexthopValidationRejectsUnreachableType: a provisioned VRF table carries
+// an "unreachable default", which satisfies a bare table check while meaning the
+// opposite of reachable.
+func TestNexthopValidationRejectsUnreachableType(t *testing.T) {
+	f := newFakeNetlink()
+	f.setReachable("192.168.1.1", 100, unix.RTN_UNREACHABLE)
+
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "vrf", VrfName: "vrf-red", TableId: 100, Metric: 20, ValidateNexthop: true})
+	f.addLink("vrf-red", 7)
+
+	e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"))
+	assert.Equal(t, 0, f.routeCount(), "an unreachable route must not count as reachable")
+}
+
+// TestLinkLocalNexthopGetsOutputInterface is the unnumbered export case.
+//
+// The kernel rejects a link-local gateway with RTA_OIF=0, and the device was
+// only ever set when validation was disabled, so with the default settings these
+// routes could not be installed at all.
+func TestLinkLocalNexthopGetsOutputInterface(t *testing.T) {
+	f := newFakeNetlink()
+	f.addLink("eth0", 3)
+
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "global", TableId: 0, Metric: 20, ValidateNexthop: true})
+
+	e.processUpdate(netlinkSourcedPath(t, "2001:db8:1::/64", "fe80::1", "eth0"))
+
+	route := f.routeFor(0, "2001:db8:1::/64")
+	if assert.NotNil(t, route, "a link-local nexthop route should be installed") {
+		assert.Equal(t, 3, route.LinkIndex,
+			"the route must carry the session's interface as its output device")
+	}
+}
+
+// TestLinkLocalNexthopWithoutInterfaceIsRejected: better a clear error than a
+// bare EINVAL from the kernel.
+func TestLinkLocalNexthopWithoutInterfaceIsRejected(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "global", TableId: 0, Metric: 20, ValidateNexthop: true})
+
+	// Source has no interface recorded.
+	err := e.exportRoute(testUnicastPath(t, "2001:db8:1::/64", "fe80::1"), e.rules[0])
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "output interface")
+	assert.Equal(t, 0, f.routeCount())
+}
+
+// TestOnlinkIsIndependentOfValidation: the two were one flag, so an operator who
+// had disabled validation to work around the VRF bug would silently lose ONLINK
+// when turning it back on. The device must be set either way.
+func TestOnlinkIsIndependentOfValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		validate bool
+		wantFlag int
+	}{
+		{"validation on", true, 0},
+		{"validation off", false, int(go_netlink.FLAG_ONLINK)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeNetlink()
+			f.addLink("vrf-red", 7)
+			f.setReachable("192.168.1.1", 100, unix.RTN_UNICAST)
+
+			e := newTestExportClient(t, f, &exportRule{
+				Name: "vrf", VrfName: "vrf-red", TableId: 100,
+				Metric: 20, ValidateNexthop: tt.validate,
+			})
+
+			e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"))
+
+			route := f.routeFor(100, "10.0.0.0/24")
+			if assert.NotNil(t, route) {
+				assert.Equal(t, tt.wantFlag, route.Flags, "ONLINK follows validation")
+				assert.Equal(t, 7, route.LinkIndex,
+					"the VRF device must be set regardless of validation")
+			}
+		})
+	}
 }

@@ -88,6 +88,36 @@ func (f *fakeNetlink) addRoute(r go_netlink.Route) {
 	f.routes[fakeKey(&r)] = r
 }
 
+// addLink registers an interface the fake can resolve by name.
+func (f *fakeNetlink) addLink(name string, index int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	attrs := go_netlink.NewLinkAttrs()
+	attrs.Name = name
+	attrs.Index = index
+	f.links[name] = &go_netlink.Dummy{LinkAttrs: attrs}
+}
+
+// setReachable makes a nexthop resolvable, in the given table and with the given
+// route type. A nexthop absent from this map is unreachable.
+func (f *fakeNetlink) setReachable(nh string, table int, routeType int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reachable[nh] = go_netlink.Route{Table: table, Type: routeType}
+}
+
+// routeFor returns the installed route for a destination in a table.
+func (f *fakeNetlink) routeFor(table int, dst string) *go_netlink.Route {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, r := range f.routes {
+		if k.table == table && k.dst == dst {
+			return &r
+		}
+	}
+	return nil
+}
+
 // routeCount reports how many routes the fake FIB currently holds.
 func (f *fakeNetlink) routeCount() int {
 	f.mu.Lock()

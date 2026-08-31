@@ -31,6 +31,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	go_netlink "github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -872,33 +873,86 @@ func (e *netlinkExportClient) matchesRule(path *table.Path, rule *exportRule) bo
 	return false
 }
 
-// isNexthopReachable checks if a nexthop is reachable via the kernel routing table
-func (e *netlinkExportClient) isNexthopReachable(nh net.IP, tableId int) bool {
+// isLinkLocal reports whether an address is IPv6 link-local (fe80::/10).
+//
+// These need special handling throughout: they are per-link, so they cannot be
+// resolved or installed without an interface to scope them to.
+func isLinkLocal(ip net.IP) bool {
+	return ip.To4() == nil && ip.IsLinkLocalUnicast()
+}
+
+// outgoingInterface returns the device a route should be installed on, or ""
+// to let the kernel decide.
+//
+// A link-local nexthop must have one: it is only meaningful on the link it was
+// learned from. That link is the BGP session's interface, recorded on the peer's
+// PeerInfo when the session comes up, or the scan interface for a
+// netlink-imported path.
+//
+// For a VRF-scoped rule the device is the VRF itself, which is what places the
+// route in that VRF's table.
+func (e *netlinkExportClient) outgoingInterface(path *table.Path, rule *exportRule, nexthop net.IP) string {
+	if isLinkLocal(nexthop) {
+		if src := path.GetSource(); src != nil {
+			if iface := src.GetNeighborInterface(); iface != "" {
+				return iface
+			}
+		}
+		// Fall through: a VRF device is better than nothing, though it will not
+		// usually be the right link for a link-local nexthop.
+	}
+	return rule.VrfName
+}
+
+// isNexthopReachable checks whether a nexthop is reachable in the table the rule
+// exports into.
+//
+// The lookup has to be scoped to that table. It used to call plain RouteGet,
+// which the kernel resolves in the main table, and then require the answer to
+// come from the rule's table - a condition that can never hold for a non-main
+// table, so every rule targeting a VRF silently exported nothing while
+// validation was on, which is the default.
+func (e *netlinkExportClient) isNexthopReachable(nh net.IP, rule *exportRule) bool {
 	e.statsMu.Lock()
 	e.stats.NexthopValidation++
 	e.statsMu.Unlock()
 
-	// Try to find a route to the nexthop
-	routes, err := e.client.RouteGet(nh)
-	if err != nil || len(routes) == 0 {
+	failed := func() bool {
 		e.statsMu.Lock()
 		e.stats.NexthopFailed++
 		e.statsMu.Unlock()
 		return false
 	}
 
+	var opts *go_netlink.RouteGetOptions
+	switch {
+	case rule.VrfName != "":
+		// Equivalent to "ip route get <nh> vrf <name>": the kernel's l3mdev
+		// redirect sends the lookup into that VRF's table.
+		opts = &go_netlink.RouteGetOptions{VrfName: rule.VrfName}
+	case isLinkLocal(nh):
+		// A link-local nexthop is ambiguous without a link. Nothing to scope it
+		// to here, so leave it to the caller's interface handling rather than
+		// failing a route that is perfectly valid.
+		return true
+	}
+
+	routes, err := e.client.RouteGetWithOptions(nh, opts)
+	if err != nil || len(routes) == 0 {
+		return failed()
+	}
+
 	// If we're exporting to a specific table, verify the nexthop route is in that table
-	if tableId > 0 {
+	if tableId := rule.TableId; tableId > 0 {
 		for _, route := range routes {
-			if route.Table == tableId {
+			// A provisioned VRF table carries an "unreachable default", which
+			// satisfies the table check while meaning the opposite of reachable.
+			if route.Table == tableId && route.Type == unix.RTN_UNICAST {
 				return true
 			}
 		}
 		// Nexthop not in target table
-		e.statsMu.Lock()
-		e.stats.NexthopFailed++
-		e.statsMu.Unlock()
-		return false
+		return failed()
 	}
 
 	return true
@@ -939,7 +993,7 @@ func (e *netlinkExportClient) exportRoute(path *table.Path, rule *exportRule) er
 
 	// Validate nexthop if enabled (default: true)
 	if rule.ValidateNexthop {
-		if !e.isNexthopReachable(nexthopIP, rule.TableId) {
+		if !e.isNexthopReachable(nexthopIP, rule) {
 			e.logger.Debug("Nexthop validation failed",
 				slog.String("Topic", "netlink"),
 				slog.String("Prefix", prefix),
@@ -1006,29 +1060,47 @@ func (e *netlinkExportClient) exportRoute(path *table.Path, rule *exportRule) er
 		Protocol: go_netlink.RouteProtocol(e.routeProtocol),
 	}
 
-	// If nexthop validation is disabled, set RTNH_F_ONLINK flag
-	// This tells the kernel to accept the nexthop even if it's not directly reachable
-	// For VRF tables, we also need to specify the VRF device
+	// Resolve the output interface.
+	//
+	// This is independent of ONLINK, and it used to be conflated with it: the
+	// device was looked up only when validation was disabled. A route whose
+	// nexthop is an IPv6 link-local address needs an output interface in every
+	// case, because the kernel rejects a link-local gateway carrying RTA_OIF=0
+	// with EINVAL. That is exactly the unnumbered-peer case this fork exists to
+	// support, so with validation on - the default - those routes could not be
+	// installed at all.
+	if linkName := e.outgoingInterface(path, rule, nexthopIP); linkName != "" {
+		link, err := e.client.LinkByName(linkName)
+		if err != nil {
+			e.logger.Warn("Failed to look up outgoing interface for route",
+				slog.String("Topic", "netlink"),
+				slog.String("Prefix", prefix),
+				slog.String("Interface", linkName),
+				slog.Any("Error", err))
+			if isLinkLocal(nexthopIP) {
+				// Without a device the kernel will refuse this outright; say so
+				// rather than letting RouteReplace fail with a bare EINVAL.
+				return fmt.Errorf("link-local nexthop %s needs an output interface, %q not found",
+					nexthop.String(), linkName)
+			}
+		} else {
+			route.LinkIndex = link.Attrs().Index
+			e.logger.Debug("Set outgoing interface for route",
+				slog.String("Topic", "netlink"),
+				slog.String("Prefix", prefix),
+				slog.String("Interface", linkName),
+				slog.Int("LinkIndex", route.LinkIndex))
+		}
+	} else if isLinkLocal(nexthopIP) {
+		return fmt.Errorf("link-local nexthop %s has no known output interface", nexthop.String())
+	}
+
+	// ONLINK tells the kernel to accept a nexthop that is not covered by an
+	// on-link prefix. It is a separate decision from whether we validated
+	// reachability ourselves, and pairing the two meant that turning validation
+	// back on silently dropped the flag and changed forwarding behaviour.
 	if !rule.ValidateNexthop {
 		route.Flags = int(go_netlink.FLAG_ONLINK)
-
-		// If exporting to a VRF, look up the VRF device and set LinkIndex
-		if rule.VrfName != "" {
-			vrfLink, err := e.client.LinkByName(rule.VrfName)
-			if err != nil {
-				e.logger.Warn("Failed to lookup VRF link for ONLINK route",
-					slog.String("Topic", "netlink"),
-					slog.String("VRF", rule.VrfName),
-					slog.Any("Error", err))
-			} else {
-				route.LinkIndex = vrfLink.Attrs().Index
-				e.logger.Debug("Setting VRF device for ONLINK route",
-					slog.String("Topic", "netlink"),
-					slog.String("VRF", rule.VrfName),
-					slog.Int("LinkIndex", route.LinkIndex))
-			}
-		}
-
 		e.logger.Debug("Setting ONLINK flag for route with unvalidated nexthop",
 			slog.String("Topic", "netlink"),
 			slog.String("Prefix", prefix),
