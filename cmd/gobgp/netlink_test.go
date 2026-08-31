@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -78,4 +79,53 @@ func TestNetlinkOptionalFlagsDefaultToZero(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildVrfExportConfigNoFlagsLeavesConfigAlone is the defect this guards.
+//
+// vrf-enable-export built its message straight from flag values, and the server
+// overwrites every field whenever a config is supplied. Enabling export on a VRF
+// configured with metric 10 and validate-nexthop false therefore reset the
+// metric to 0 and flipped validation on. Worse, it cleared the community filter,
+// and an empty community list means "match every route" - a filtered export
+// silently became unfiltered.
+//
+// With no configuration flags given there is nothing to change, so no config is
+// sent at all and the server leaves the VRF as it was.
+func TestBuildVrfExportConfigNoFlagsLeavesConfigAlone(t *testing.T) {
+	cmd := findSubcommand(t, newNetlinkCmd(), "vrf-enable-export")
+
+	config, err := buildVrfExportConfig(cmd, "kubevrf")
+	assert.NoError(t, err)
+	assert.Nil(t, config,
+		"with no configuration flags the command must send no config at all")
+}
+
+// TestVrfExportConfigFlagsAreComplete keeps the "did anything change?" check in
+// step with the flags the command actually defines. A flag missing from the list
+// would be silently ignored.
+func TestVrfExportConfigFlagsAreComplete(t *testing.T) {
+	cmd := findSubcommand(t, newNetlinkCmd(), "vrf-enable-export")
+
+	for _, name := range vrfExportConfigFlags {
+		assert.NotNil(t, cmd.Flags().Lookup(name),
+			"flag %q is listed as a config flag but not defined", name)
+	}
+
+	cmd.Flags().VisitAll(func(f *pflag.Flag) {
+		if f.Name == "help" {
+			return
+		}
+		assert.Contains(t, vrfExportConfigFlags, f.Name,
+			"flag %q is defined but not treated as a config flag, so setting it "+
+				"would be ignored", f.Name)
+	})
+}
+
+func TestSplitList(t *testing.T) {
+	// An empty string must mean "no entries", not one empty entry: the latter
+	// would be parsed as a community and rejected.
+	assert.Nil(t, splitList(""))
+	assert.Equal(t, []string{"65000:1"}, splitList("65000:1"))
+	assert.Equal(t, []string{"65000:1", "65000:2"}, splitList("65000:1,65000:2"))
 }
