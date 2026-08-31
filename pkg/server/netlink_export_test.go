@@ -18,13 +18,17 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
 	"testing"
 	"time"
 
+	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/internal/pkg/table"
+	"github.com/osrg/gobgp/v4/pkg/apiutil"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/stretchr/testify/assert"
@@ -419,4 +423,144 @@ func TestUnicastWithdrawDoesNotTouchVrfBuckets(t *testing.T) {
 
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
 		"a unicast withdrawal must not reach a VRF export bucket")
+}
+
+// --- VRF created over gRPC ---
+
+func newVrfTestServer(t *testing.T) *BgpServer {
+	t.Helper()
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65001, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	t.Cleanup(func() {
+		assert.NoError(t, s.StopBgp(context.Background(), &api.StopBgpRequest{}))
+	})
+	return s
+}
+
+func addTestVrf(t *testing.T, s *BgpServer, name, rd string) {
+	t.Helper()
+	rdVal, err := bgp.ParseRouteDistinguisher(rd)
+	assert.NoError(t, err)
+	apiRd, err := apiutil.MarshalRD(rdVal)
+	assert.NoError(t, err)
+	assert.NoError(t, s.AddVrf(context.Background(), &api.AddVrfRequest{
+		Vrf: &api.Vrf{Name: name, Id: 1, Rd: apiRd},
+	}))
+}
+
+// TestAddVrfCreatesConfigEntry is the root of the per-VRF netlink failure.
+//
+// AddVrf wrote only globalRib.Vrfs, and everything netlink keys off
+// bgpConfig.Vrfs: buildVrfMappings builds rdToVrf from it, the import scan gates
+// on it, and the four per-VRF RPCs look their VRF up in it. A VRF created over
+// gRPC - the only way a controller creates one - existed for routing but not for
+// netlink.
+func TestAddVrfCreatesConfigEntry(t *testing.T) {
+	s := newVrfTestServer(t)
+	addTestVrf(t, s, "vrf1", "100:1")
+
+	s.shared.mu.Lock()
+	defer s.shared.mu.Unlock()
+
+	var found *oc.Vrf
+	for i := range s.bgpConfig.Vrfs {
+		if s.bgpConfig.Vrfs[i].Config.Name == "vrf1" {
+			found = &s.bgpConfig.Vrfs[i]
+		}
+	}
+	if assert.NotNil(t, found, "AddVrf should create a config entry") {
+		// The RD is what buildVrfMappings resolves an incoming VPN path
+		// through. Without it, export stays dead even with an entry present.
+		assert.Equal(t, "100:1", found.Config.Rd)
+	}
+}
+
+// TestPerVrfNetlinkRPCsFindGrpcCreatedVrf: these used to return
+// "VRF not found - create it first via AddVrf" for a VRF AddVrf had just
+// created, and the controller treats that as fatal and requeues forever.
+func TestPerVrfNetlinkRPCsFindGrpcCreatedVrf(t *testing.T) {
+	s := newVrfTestServer(t)
+	addTestVrf(t, s, "vrf1", "100:1")
+	ctx := context.Background()
+
+	assert.NoError(t, s.EnableVrfNetlinkImport(ctx, &api.EnableVrfNetlinkImportRequest{
+		Vrf: "vrf1", Interfaces: []string{"eth0"},
+	}))
+	assert.NoError(t, s.EnableVrfNetlinkExport(ctx, &api.EnableVrfNetlinkExportRequest{
+		Vrf: "vrf1", Config: &api.VrfNetlinkExportConfig{LinuxTableId: 100},
+	}))
+	assert.NoError(t, s.DisableVrfNetlinkImport(ctx, &api.DisableVrfNetlinkImportRequest{
+		Vrf: "vrf1", KeepRoutes: true,
+	}))
+	assert.NoError(t, s.DisableVrfNetlinkExport(ctx, &api.DisableVrfNetlinkExportRequest{
+		Vrf: "vrf1", KeepRoutes: true,
+	}))
+
+	// A VRF that genuinely does not exist must still be rejected.
+	assert.Error(t, s.EnableVrfNetlinkImport(ctx, &api.EnableVrfNetlinkImportRequest{
+		Vrf: "nope", Interfaces: []string{"eth0"},
+	}))
+}
+
+// TestVpnPathReachesExportForGrpcCreatedVrf is the assertion that matters.
+//
+// Checking that EnableVrfNetlinkExport returns success would pass while export
+// remained dead, because the RD mapping is what actually carries a VPN path to
+// the kernel. This asserts the route lands in the FIB.
+func TestVpnPathReachesExportForGrpcCreatedVrf(t *testing.T) {
+	s := newVrfTestServer(t)
+	addTestVrf(t, s, "vrf1", "100:1")
+
+	assert.NoError(t, s.EnableVrfNetlinkExport(context.Background(),
+		&api.EnableVrfNetlinkExportRequest{
+			Vrf:    "vrf1",
+			Config: &api.VrfNetlinkExportConfig{LinuxTableId: 100, SkipNexthopValidation: true},
+		}))
+
+	f := newFakeNetlink()
+	e, err := newNetlinkExportClientWithHandle(s, logger, f, RTPROT_BGP, 0)
+	assert.NoError(t, err)
+
+	s.shared.mu.Lock()
+	assert.NoError(t, e.buildVrfMappings())
+	s.shared.mu.Unlock()
+
+	e.processUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1"))
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
+		"a VPN path for a gRPC-created VRF should reach the kernel")
+}
+
+// TestVrfExportFailsClosedOnBadCommunity: matchesVrfExportFilters treats an
+// empty community list as "match everything", so dropping an unparseable entry
+// turned a filter into a wildcard - the only thing between a BGP peer and the
+// node's FIB.
+func TestVrfExportFailsClosedOnBadCommunity(t *testing.T) {
+	s := newVrfTestServer(t)
+	addTestVrf(t, s, "vrf1", "100:1")
+
+	assert.NoError(t, s.EnableVrfNetlinkExport(context.Background(),
+		&api.EnableVrfNetlinkExportRequest{
+			Vrf: "vrf1",
+			Config: &api.VrfNetlinkExportConfig{
+				LinuxTableId:          100,
+				SkipNexthopValidation: true,
+				CommunityList:         []string{"not-a-community"},
+			},
+		}))
+
+	f := newFakeNetlink()
+	e, err := newNetlinkExportClientWithHandle(s, logger, f, RTPROT_BGP, 0)
+	assert.NoError(t, err)
+
+	s.shared.mu.Lock()
+	assert.NoError(t, e.buildVrfMappings())
+	s.shared.mu.Unlock()
+
+	e.processUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1"))
+
+	assert.Equal(t, 0, f.routeCount(),
+		"an unparseable community filter must export nothing, not everything")
 }

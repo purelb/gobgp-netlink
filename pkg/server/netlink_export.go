@@ -533,16 +533,25 @@ func (e *netlinkExportClient) buildVrfMappings() error {
 			vrfExport.ValidateNexthop = true
 		}
 
-		// Parse communities
+		// Parse communities.
+		//
+		// A community filter that fails to parse must not silently widen the
+		// filter. matchesVrfExportFilters treats an empty list as "match
+		// everything", so skipping bad entries turned "export routes carrying
+		// this community" into "install every route this peer advertises into
+		// the node's FIB" - the filter is the only thing standing between a BGP
+		// peer and the kernel routing table. Refuse the VRF instead.
+		badFilter := false
 		vrfExport.CommunityList = make([]uint32, 0, len(vrf.NetlinkExport.CommunityList))
 		for _, commStr := range vrf.NetlinkExport.CommunityList {
 			comm, err := table.ParseCommunity(commStr)
 			if err != nil {
-				e.logger.Warn("Failed to parse community in VRF export config",
+				e.logger.Error("Invalid community in VRF export config, disabling export for this VRF",
 					slog.String("Topic", "netlink"),
 					slog.String("VRF", vrf.Config.Name),
 					slog.String("Community", commStr),
 					slog.Any("Error", err))
+				badFilter = true
 				continue
 			}
 			vrfExport.CommunityList = append(vrfExport.CommunityList, comm)
@@ -553,14 +562,29 @@ func (e *netlinkExportClient) buildVrfMappings() error {
 		for _, lcommStr := range vrf.NetlinkExport.LargeCommunityList {
 			lcomm, err := bgp.ParseLargeCommunity(lcommStr)
 			if err != nil {
-				e.logger.Warn("Failed to parse large community in VRF export config",
+				e.logger.Error("Invalid large community in VRF export config, disabling export for this VRF",
 					slog.String("Topic", "netlink"),
 					slog.String("VRF", vrf.Config.Name),
 					slog.String("LargeCommunity", lcommStr),
 					slog.Any("Error", err))
+				badFilter = true
 				continue
 			}
 			vrfExport.LargeCommunityList = append(vrfExport.LargeCommunityList, lcomm)
+		}
+
+		if badFilter {
+			// Fail closed: leave this VRF out of vrfRules entirely, and reclaim
+			// anything already installed for it. buildVrfMappings rebuilds
+			// vrfRules from scratch but does not touch e.exported, so without the
+			// reclaim the routes would stay in the kernel and untracked.
+			if err := e.flushVrfLocked(vrf.Config.Name); err != nil {
+				e.logger.Warn("Failed to reclaim routes for VRF with invalid filter",
+					slog.String("Topic", "netlink"),
+					slog.String("VRF", vrf.Config.Name),
+					slog.Any("Error", err))
+			}
+			continue
 		}
 
 		// Lookup Linux table ID if not specified
@@ -1486,9 +1510,23 @@ func (e *netlinkExportClient) stop(flushRoutes bool) error {
 func (e *netlinkExportClient) flushVrf(vrfName string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.flushVrfLocked(vrfName)
+}
+
+// flushVrfLocked is flushVrf for callers already holding e.mu, notably
+// buildVrfMappings when it rejects a VRF whose community filter will not parse.
+func (e *netlinkExportClient) flushVrfLocked(vrfName string) error {
+	// vrfName is the GoBGP VRF name, which is what vrfRules is keyed by. The
+	// tracking map is keyed by the *Linux* VRF, and the two differ whenever
+	// linux-vrf is configured - in which case this used to flush the wrong
+	// bucket and leave the real routes installed and untracked.
+	trackingKey := vrfName
+	if cfg, ok := e.vrfRules[vrfName]; ok && cfg.LinuxVrf != "" {
+		trackingKey = cfg.LinuxVrf
+	}
 
 	var errs []error
-	if vrfRoutes, ok := e.exported[vrfName]; ok {
+	if vrfRoutes, ok := e.exported[trackingKey]; ok {
 		for prefix, entries := range vrfRoutes {
 			for _, info := range entries {
 				if err := e.client.RouteDel(info.Route); err != nil && !isRouteAbsent(err) {
@@ -1496,13 +1534,14 @@ func (e *netlinkExportClient) flushVrf(vrfName string) error {
 					e.logger.Warn("Failed to delete route during VRF flush",
 						slog.String("Topic", "netlink"),
 						slog.String("VRF", vrfName),
+						slog.String("LinuxVRF", trackingKey),
 						slog.String("Prefix", prefix),
 						slog.String("Rule", info.RuleName),
 						slog.Any("Error", err))
 				}
 			}
 		}
-		delete(e.exported, vrfName)
+		delete(e.exported, trackingKey)
 	}
 	delete(e.vrfRules, vrfName)
 
