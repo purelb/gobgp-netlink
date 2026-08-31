@@ -225,7 +225,9 @@ func main() {
 		server.GrpcListenAddress(opts.GrpcHosts),
 		server.GrpcOption(grpcOpts),
 		server.LoggerOption(logger, lvl),
-		server.TimingHookOption(fsmTimingCollector))
+		server.TimingHookOption(fsmTimingCollector),
+		// Only the real daemon reconciles routes left behind by a previous run.
+		server.StaleRouteCleanupOption(true))
 	prometheus.MustRegister(metrics.NewBgpCollector(bgpServer))
 	prometheus.MustRegister(fsmTimingCollector)
 	go bgpServer.Serve()

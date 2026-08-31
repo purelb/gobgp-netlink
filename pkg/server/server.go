@@ -69,11 +69,12 @@ type nopTimingHook struct{}
 func (n nopTimingHook) Observe(op FSMOperation, tOp, tWait time.Duration) {}
 
 type options struct {
-	grpcAddress string
-	grpcOption  []grpc.ServerOption
-	logger      *slog.Logger
-	logLevelVar *slog.LevelVar
-	timingHook  FSMTimingHook
+	grpcAddress       string
+	grpcOption        []grpc.ServerOption
+	logger            *slog.Logger
+	logLevelVar       *slog.LevelVar
+	timingHook        FSMTimingHook
+	staleRouteCleanup bool
 }
 
 type ServerOption func(*options)
@@ -100,6 +101,20 @@ func LoggerOption(logger *slog.Logger, levelVar *slog.LevelVar) ServerOption {
 func TimingHookOption(hook FSMTimingHook) ServerOption {
 	return func(o *options) {
 		o.timingHook = hook
+	}
+}
+
+// StaleRouteCleanupOption enables the startup sweep that removes kernel routes
+// left behind by a previous run of this daemon.
+//
+// It is opt-in because the sweep issues host-wide RouteDel calls filtered only by
+// route protocol, and protocol 186 (RTPROT_BGP) is shared with FRR and other BGP
+// daemons. Only a real gobgpd process should ask for it; an embedded or
+// in-process BgpServer (notably the unit tests) must not delete routes belonging
+// to whatever else is running on the machine.
+func StaleRouteCleanupOption(enabled bool) ServerOption {
+	return func(o *options) {
+		o.staleRouteCleanup = enabled
 	}
 }
 
@@ -143,6 +158,9 @@ type BgpServer struct {
 	// netlink integration
 	netlinkClient       *netlinkClient
 	netlinkExportClient *netlinkExportClient
+	// staleRouteCleanup gates the destructive startup route sweep; see
+	// StaleRouteCleanupOption.
+	staleRouteCleanup bool
 }
 
 func NewBgpServer(opt ...ServerOption) *BgpServer {
@@ -162,19 +180,20 @@ func NewBgpServer(opt ...ServerOption) *BgpServer {
 	shared := newSharedData()
 
 	s := &BgpServer{
-		shared:       shared,
-		neighborMap:  make(map[netip.Addr]*peer),
-		peerGroupMap: make(map[string]*peerGroup),
-		policy:       table.NewRoutingPolicy(logger),
-		mgmtCh:       make(chan *mgmtOp, 1),
-		watcherMap:   make(map[watchEventType][]*watcher),
-		uuidMap:      make(map[string]uuid.UUID),
-		roaManager:   newROAManager(roaTable, logger),
-		roaTable:     roaTable,
-		logger:       logger,
-		logLevelVar:  lvl,
-		timingHook:   opts.timingHook,
-		shutdownWG:   &sync.WaitGroup{},
+		shared:            shared,
+		neighborMap:       make(map[netip.Addr]*peer),
+		peerGroupMap:      make(map[string]*peerGroup),
+		policy:            table.NewRoutingPolicy(logger),
+		mgmtCh:            make(chan *mgmtOp, 1),
+		watcherMap:        make(map[watchEventType][]*watcher),
+		uuidMap:           make(map[string]uuid.UUID),
+		roaManager:        newROAManager(roaTable, logger),
+		roaTable:          roaTable,
+		logger:            logger,
+		logLevelVar:       lvl,
+		timingHook:        opts.timingHook,
+		staleRouteCleanup: opts.staleRouteCleanup,
+		shutdownWG:        &sync.WaitGroup{},
 	}
 	s.bmpManager = newBmpClientManager(s)
 	s.mrtManager = newMrtManager(s)
@@ -1909,9 +1928,28 @@ func (s *BgpServer) parseExportRule(ruleConfig *oc.NetlinkExportRule) (*exportRu
 	return rule, nil
 }
 
+// netlinkImportEnabled reports whether any netlink import is configured, either
+// globally or on an individual VRF. The import client runs a 5s scan loop, so it
+// must not be created for deployments that never asked for import.
+func (s *BgpServer) netlinkImportEnabled() bool {
+	if s.bgpConfig.Netlink.Import.Enabled {
+		return true
+	}
+	for i := range s.bgpConfig.Vrfs {
+		if s.bgpConfig.Vrfs[i].NetlinkImport.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *BgpServer) StartNetlink(ctx context.Context) error {
 	s.logger.Debug("start netlink", slog.Any("start config", s.bgpConfig.Netlink))
-	if s.netlinkClient == nil {
+	// Only create the import client when import is actually configured. It starts
+	// a 5s ticker that scans interfaces and mutates the RIB; creating it
+	// unconditionally ran that loop on every gobgpd, including export-only and
+	// netlink-free deployments.
+	if s.netlinkClient == nil && s.netlinkImportEnabled() {
 		n, err := newNetlinkClient(s)
 		if err != nil {
 			return err
@@ -1931,6 +1969,25 @@ func (s *BgpServer) StartNetlink(ctx context.Context) error {
 				return fmt.Errorf("failed to create netlink export client: %w", err)
 			}
 			s.netlinkExportClient = exportClient
+
+			// Sweep routes left behind by a previous run. Two constraints:
+			//
+			//  - It MUST stay inside the construction branch. Run on every
+			//    StartNetlink it would delete this daemon's own routes while
+			//    e.exported still lists them, after which the idempotency check in
+			//    exportRoute returns early and never reprograms them.
+			//  - It is opt-in. The sweep filters only on route protocol, and 186 is
+			//    shared with FRR, so an in-process BgpServer must not run it.
+			if s.staleRouteCleanup {
+				if err := exportClient.cleanupStaleRoutes(); err != nil {
+					s.logger.Warn("Failed to cleanup stale routes at startup",
+						slog.String("Topic", "netlink"),
+						slog.Any("Error", err))
+				}
+			} else {
+				s.logger.Debug("Skipping stale route cleanup (not enabled)",
+					slog.String("Topic", "netlink"))
+			}
 		}
 
 		// Parse export rules (always reload to pick up configuration changes)
@@ -2125,7 +2182,17 @@ func (s *BgpServer) EnableVrfNetlinkImport(ctx context.Context, r *api.EnableVrf
 			if s.bgpConfig.Vrfs[i].Config.Name == r.Vrf {
 				s.bgpConfig.Vrfs[i].NetlinkImport.Enabled = true
 				s.bgpConfig.Vrfs[i].NetlinkImport.InterfaceList = r.Interfaces
-				if s.netlinkClient != nil {
+				// The import client is only created when import is enabled, so it
+				// may not exist yet if this is the first import of any kind. Create
+				// it here rather than silently deferring the scan to whenever
+				// StartNetlink next runs.
+				if s.netlinkClient == nil {
+					n, err := newNetlinkClient(s)
+					if err != nil {
+						return err
+					}
+					s.netlinkClient = n
+				} else {
 					s.netlinkClient.rescan()
 				}
 				s.logger.Info("Enabled VRF netlink import via gRPC",
@@ -2711,10 +2778,6 @@ func (s *BgpServer) fixupApiPath(vrfId string, pathList []*table.Path) error {
 
 func pathTokey(path *table.Path) string {
 	return fmt.Sprintf("%d:%s", path.RemoteID(), path.GetPrefix())
-}
-
-func apiutilPathTokey(path *apiutil.Path) string {
-	return fmt.Sprintf("%d:%s", path.RemoteID, path.Nlri.String())
 }
 
 func (s *BgpServer) addPathList(vrfId string, pathList []*table.Path) error {
@@ -4111,8 +4174,13 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 	}
 
 	if !original.Timers.Config.Equal(&c.Timers.Config) {
-		peer.fsm.logger.Info("Update timer configuration", slog.String("Err", err.Error()))
+		peer.fsm.logger.Info("Update timer configuration")
+		// connectLoop reads pConf.Timers.Config under fsm.lock (fsm.go), so this
+		// write needs it too. Until the nil dereference above was fixed, this line
+		// was unreachable and the race could never be observed.
+		peer.fsm.lock.Lock()
 		peer.fsm.pConf.Timers.Config = c.Timers.Config
+		peer.fsm.lock.Unlock()
 	}
 
 	isLimit, err := peer.updatePrefixLimitConfig(c.AfiSafis)

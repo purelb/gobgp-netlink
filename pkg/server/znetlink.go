@@ -151,6 +151,20 @@ func (n *netlinkClient) importForVrf(vrfName string, interfaces []string) {
 
 	currentPaths := make(map[string]*table.Path)
 
+	// Resolve any glob patterns ("eth*", "vlan*") to concrete interface names
+	// before scanning. This must happen here rather than inside
+	// GetGlobalUnicastRoutes: the concrete name is stored on the path source as
+	// NetlinkIfName and surfaces through the API and CLI, so a pattern must never
+	// be passed downstream.
+	interfaces, err := custom_net.ExpandInterfacePatterns(interfaces, n.server.logger)
+	if err != nil {
+		n.server.logger.Error("failed to expand interface patterns",
+			slog.String("Topic", "netlink"),
+			slog.String("VRF", vrfName),
+			slog.Any("Error", err))
+		return
+	}
+
 	// Scan interfaces for this VRF
 	for _, iface := range interfaces {
 		routes, err := custom_net.GetGlobalUnicastRoutes(iface, n.server.logger)
@@ -312,7 +326,7 @@ func (n *netlinkClient) ipNetsToPaths(routes []*custom_net.ConnectedRoute, iface
 			pattr = append(pattr, nexthop)
 		}
 
-		source := table.NewNetlinkPeerInfo(iface, n.server.logger)
+		source := table.NewNetlinkPeerInfo(iface)
 
 		path := table.NewPath(family, source, pathNlri, false, pattr, time.Now(), false)
 		path.SetIsFromExternal(true)

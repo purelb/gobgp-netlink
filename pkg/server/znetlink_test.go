@@ -38,8 +38,11 @@ func TestNetlinkClient(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	_, err = newNetlinkClient(s)
+	n, err := newNetlinkClient(s)
 	assert.NoError(t, err)
+	// newNetlinkClient starts a 5s scan goroutine. Without this it runs for the
+	// life of the test binary and contends with every later test in the package.
+	t.Cleanup(func() { n.stop(false) })
 }
 
 func TestEnableNetlink(t *testing.T) {

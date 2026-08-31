@@ -18,10 +18,12 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/osrg/gobgp/v4/internal/pkg/table"
@@ -147,13 +149,10 @@ func newNetlinkExportClient(server *BgpServer, logger *slog.Logger, routeProtoco
 		stopCh:            make(chan struct{}),
 	}
 
-	// Clean up any stale routes from previous runs
-	if err := client.cleanupStaleRoutes(); err != nil {
-		logger.Warn("Failed to cleanup stale routes at startup",
-			slog.String("Topic", "netlink"),
-			slog.Any("Error", err))
-	}
-
+	// NOTE: cleanupStaleRoutes is deliberately NOT called here. It issues
+	// host-wide RouteDel sweeps, which made merely constructing this client
+	// destructive, including from unit tests. StartNetlink calls it explicitly
+	// after construction instead.
 	return client, nil
 }
 
@@ -776,8 +775,22 @@ func (e *netlinkExportClient) withdrawRoute(path *table.Path, vrfName string) er
 	route := info.Route
 	e.mu.RUnlock()
 
-	// Delete the route
+	// Delete the route.
+	//
+	// ESRCH/ENOENT mean the route is already gone from the kernel, which is the
+	// state we are trying to reach. Treating it as fatal would skip the tracking
+	// removal below, and the stale entry would then make exportRoute's
+	// idempotency check refuse to ever reinstall the prefix. Fall through and
+	// reconcile our own bookkeeping instead. Any other errno stays an error.
 	err := e.client.RouteDel(route)
+	if err != nil && (errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.ENOENT)) {
+		e.logger.Info("Route already absent from kernel, clearing tracking",
+			slog.String("Topic", "netlink"),
+			slog.String("Prefix", prefix),
+			slog.String("VRF", vrfName),
+			slog.Any("Error", err))
+		err = nil
+	}
 	if err != nil {
 		e.statsMu.Lock()
 		e.stats.Errors++
