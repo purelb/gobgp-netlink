@@ -27,7 +27,8 @@ import (
 
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/internal/pkg/netutils"
-	"github.com/osrg/gobgp/v4/internal/pkg/table"
+	"github.com/osrg/gobgp/v4/pkg/apiutil"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -236,7 +237,7 @@ func newTestImportServer(t *testing.T, interfaces []string, topology map[string]
 			}
 			return routes, nil
 		},
-		advertisedPaths: make(map[string]map[string]*table.Path),
+		advertisedPaths: make(map[string]map[string]*importedRoute),
 	}
 	return s, n
 }
@@ -389,4 +390,81 @@ func TestMergeImportWork(t *testing.T) {
 	assert.Equal(t, "vrf1", got[1].vrfName)
 	assert.Equal(t, []string{"eth1", "eth2"}, got[1].interfaces,
 		"interfaces should merge without duplicates")
+}
+
+// TestVrfImportWithdrawalReachesRib is the regression test for cached paths
+// being mutated in place.
+//
+// The import loop used to store the live *table.Path it handed to addPathList.
+// For a VRF, fixupApiPath runs that path through Vrf.ToGlobalPath, which
+// rewrites the NLRI to the VPN family in place. Withdrawing the cached object
+// then handed ToGlobalPath a VPN-family path it has no case for, so it returned
+// "unsupported route family for vrf", fixupApiPath propagated that, and
+// addPathList dropped the whole withdrawal batch. The route stayed in the RIB
+// and kept being advertised.
+//
+// Caching the kernel route and rebuilding the path is what fixes it, and this
+// test fails without that: it was found on live hardware, not here, because
+// there was no VRF import withdrawal test at all.
+func TestVrfImportWithdrawalReachesRib(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65001, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	t.Cleanup(func() {
+		assert.NoError(t, s.StopBgp(context.Background(), &api.StopBgpRequest{}))
+	})
+
+	rd, err := bgp.ParseRouteDistinguisher("64553:175")
+	assert.NoError(t, err)
+	apiRd, err := apiutil.MarshalRD(rd)
+	assert.NoError(t, err)
+	assert.NoError(t, s.AddVrf(context.Background(), &api.AddVrfRequest{
+		Vrf: &api.Vrf{Name: "vrf1", Id: 1, Rd: apiRd},
+	}))
+
+	topology := map[string][]*netutils.ConnectedRoute{
+		"kubevrf0": {connected(t, "172.31.9.1/24")},
+	}
+
+	s.shared.mu.Lock()
+	for i := range s.bgpConfig.Vrfs {
+		if s.bgpConfig.Vrfs[i].Config.Name == "vrf1" {
+			s.bgpConfig.Vrfs[i].NetlinkImport.Enabled = true
+			s.bgpConfig.Vrfs[i].NetlinkImport.InterfaceList = []string{"kubevrf0"}
+		}
+	}
+	s.shared.mu.Unlock()
+
+	n := &netlinkClient{
+		server: s, dead: make(chan struct{}), done: make(chan struct{}),
+		rescanCh: make(chan struct{}, 1),
+		scan: func(iface string) ([]*netutils.ConnectedRoute, error) {
+			routes, ok := topology[iface]
+			if !ok {
+				return nil, fmt.Errorf("failed to find interface %s", iface)
+			}
+			return routes, nil
+		},
+		advertisedPaths: make(map[string]map[string]*importedRoute),
+	}
+
+	n.runImportCycle()
+	assert.Equal(t, 1, advertisedCount(n, "vrf1"), "the route should be imported")
+
+	statsAfterImport := n.getStats()
+	assert.Zero(t, statsAfterImport.Errors, "import must not error")
+
+	// The address goes away.
+	topology["kubevrf0"] = nil
+	n.runImportCycle()
+
+	assert.Equal(t, 0, advertisedCount(n, "vrf1"), "tracking should be cleared")
+
+	st := n.getStats()
+	assert.Zero(t, st.Errors,
+		"the withdrawal must not fail; a non-zero error count means the cached "+
+			"path was converted to the VPN family twice")
+	assert.Equal(t, uint64(1), st.Withdrawn, "the withdrawal must reach the RIB")
 }

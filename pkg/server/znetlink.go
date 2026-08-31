@@ -54,6 +54,24 @@ type importWork struct {
 	interfaces []string
 }
 
+// importedRoute is the kernel state a path was built from, kept instead of the
+// path itself.
+//
+// Caching the live *table.Path does not work: addPathList runs it through
+// fixupApiPath, which calls Vrf.ToGlobalPath and rewrites the NLRI to the VPN
+// family in place. The cached object is then already converted, so withdrawing
+// it hands ToGlobalPath a VPN-family path it has no case for; it returns
+// "unsupported route family for vrf", fixupApiPath propagates that, and
+// addPathList drops the entire withdrawal batch. Cloning does not help either -
+// Clone shares the root originInfo, so the mutation reaches through it.
+//
+// Rebuilding from the spec gives every path a fresh info, so each conversion
+// starts from the unicast form exactly once.
+type importedRoute struct {
+	route *custom_net.ConnectedRoute
+	iface string
+}
+
 type netlinkClient struct {
 	server *BgpServer
 	dead   chan struct{}
@@ -63,9 +81,10 @@ type netlinkClient struct {
 	rescanCh chan struct{}
 	// scan reads connected routes for one interface. Always non-nil.
 	scan interfaceScanner
-	// advertisedPaths tracks paths per VRF (vrf name -> prefix -> path)
-	// empty string key is used for global table
-	advertisedPaths map[string]map[string]*table.Path
+	// advertisedPaths tracks what has been imported, per VRF
+	// (vrf name -> prefix -> the kernel route it came from).
+	// The empty string key is used for the global table.
+	advertisedPaths map[string]map[string]*importedRoute
 	pathsMu         sync.RWMutex // protects advertisedPaths
 	stats           netlinkImportStats
 	statsMu         sync.RWMutex
@@ -87,7 +106,7 @@ func newNetlinkClient(s *BgpServer) (*netlinkClient, error) {
 		scan: func(iface string) ([]*custom_net.ConnectedRoute, error) {
 			return custom_net.GetGlobalUnicastRoutes(iface, s.logger)
 		},
-		advertisedPaths: make(map[string]map[string]*table.Path),
+		advertisedPaths: make(map[string]map[string]*importedRoute),
 	}
 	// The first pass happens on the loop goroutine rather than here. This
 	// constructor is reached from StartNetlink, which runs under shared.mu, and
@@ -170,8 +189,8 @@ func mergeImportWork(work []importWork) []importWork {
 // glob expansion. None of it touches server state. Holding shared.mu across
 // these would stall all BGP message processing for the duration of the scan,
 // and they have no timeout.
-func (n *netlinkClient) scanUnlocked(work []importWork) map[string]map[string]*table.Path {
-	scanned := make(map[string]map[string]*table.Path, len(work))
+func (n *netlinkClient) scanUnlocked(work []importWork) map[string]map[string]*importedRoute {
+	scanned := make(map[string]map[string]*importedRoute, len(work))
 
 	for _, w := range work {
 		// Resolve glob patterns ("eth*", "vlan*") to concrete interface names.
@@ -188,7 +207,7 @@ func (n *netlinkClient) scanUnlocked(work []importWork) map[string]map[string]*t
 			continue
 		}
 
-		current := make(map[string]*table.Path)
+		current := make(map[string]*importedRoute)
 		for _, iface := range interfaces {
 			routes, err := n.scan(iface)
 			if err != nil {
@@ -199,8 +218,14 @@ func (n *netlinkClient) scanUnlocked(work []importWork) map[string]map[string]*t
 					slog.Any("Error", err))
 				continue
 			}
-			for _, path := range n.ipNetsToPaths(routes, iface) {
-				current[path.GetNlri().String()] = path
+			for _, route := range routes {
+				// Build a path only to derive its canonical key; the spec is what
+				// is kept, and publishLocked rebuilds paths from it.
+				path := n.pathForRoute(route, iface)
+				if path == nil {
+					continue
+				}
+				current[path.GetNlri().String()] = &importedRoute{route: route, iface: iface}
 			}
 		}
 
@@ -220,32 +245,41 @@ func (n *netlinkClient) scanUnlocked(work []importWork) map[string]map[string]*t
 //
 // Caller MUST hold n.server.shared.mu. This calls addPathList, which is the
 // unlocked RIB primitive; internal/pkg/table has no synchronisation of its own.
-func (n *netlinkClient) publishLocked(vrfName string, currentPaths map[string]*table.Path) {
+func (n *netlinkClient) publishLocked(vrfName string, current map[string]*importedRoute) {
 	// Re-read the tracking map here rather than using a copy taken before the
 	// scan: withdrawVrfLocked may have emptied it while the scan was running.
 	n.pathsMu.Lock()
-	previousPaths := n.advertisedPaths[vrfName]
-	if previousPaths == nil {
-		previousPaths = make(map[string]*table.Path)
+	previous := n.advertisedPaths[vrfName]
+	if previous == nil {
+		previous = make(map[string]*importedRoute)
 	}
 	n.pathsMu.Unlock()
 
+	// Both lists are built from the cached kernel state rather than from stored
+	// paths, so every path handed to addPathList is freshly allocated and gets
+	// converted to the VPN family exactly once.
 	newPathList := make([]*table.Path, 0)
-	for key, path := range currentPaths {
-		if _, ok := previousPaths[key]; !ok {
+	for key, spec := range current {
+		if _, ok := previous[key]; ok {
+			continue
+		}
+		if path := n.pathForRoute(spec.route, spec.iface); path != nil {
 			newPathList = append(newPathList, path)
 		}
 	}
 
 	withdrawnPathList := make([]*table.Path, 0)
-	for key, path := range previousPaths {
-		if _, ok := currentPaths[key]; !ok {
+	for key, spec := range previous {
+		if _, ok := current[key]; ok {
+			continue
+		}
+		if path := n.pathForRoute(spec.route, spec.iface); path != nil {
 			withdrawnPathList = append(withdrawnPathList, path.Clone(true))
 		}
 	}
 
 	n.pathsMu.Lock()
-	n.advertisedPaths[vrfName] = currentPaths
+	n.advertisedPaths[vrfName] = current
 	n.pathsMu.Unlock()
 
 	if len(newPathList) > 0 {
@@ -381,41 +415,44 @@ func (n *netlinkClient) tick() {
 	n.runImportCycle()
 }
 
-func (n *netlinkClient) ipNetsToPaths(routes []*custom_net.ConnectedRoute, iface string) []*table.Path {
-	pathList := make([]*table.Path, 0, len(routes))
-	for _, route := range routes {
-		pathNlri, err := table.NewNlriFromAPI(route.Prefix)
-		if err != nil {
-			n.server.logger.Warn("failed to create nlri from netlink route",
-				slog.String("Topic", "netlink"),
-				slog.Any("Route", route),
-				slog.Any("Error", err))
-			continue
-		}
-
-		pattr := make([]bgp.PathAttributeInterface, 0)
-		origin := bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP)
-		pattr = append(pattr, origin)
-
-		family := bgp.RF_IPv4_UC
-		if route.Prefix.IP.To4() == nil {
-			family = bgp.RF_IPv6_UC
-			// Set unspecified nexthop - will be updated to peer's local address by UpdatePathAttrs
-			mpreach, _ := bgp.NewPathAttributeMpReachNLRI(family, []bgp.PathNLRI{pathNlri}, netip.MustParseAddr("::"))
-			pattr = append(pattr, mpreach)
-		} else {
-			// Set unspecified nexthop - will be updated to peer's local address by UpdatePathAttrs
-			nexthop, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("0.0.0.0"))
-			pattr = append(pattr, nexthop)
-		}
-
-		source := table.NewNetlinkPeerInfo(iface)
-
-		path := table.NewPath(family, source, pathNlri, false, pattr, time.Now(), false)
-		path.SetIsFromExternal(true)
-		pathList = append(pathList, path)
+// pathForRoute builds a fresh path for one connected route.
+//
+// Every caller gets a newly allocated path, which matters because addPathList
+// mutates what it is given: fixupApiPath rewrites the NLRI to the VPN family in
+// place for a VRF. Reusing a path across an add and a later withdrawal would
+// convert it twice, and the second conversion fails.
+func (n *netlinkClient) pathForRoute(route *custom_net.ConnectedRoute, iface string) *table.Path {
+	pathNlri, err := table.NewNlriFromAPI(route.Prefix)
+	if err != nil {
+		n.server.logger.Warn("failed to create nlri from netlink route",
+			slog.String("Topic", "netlink"),
+			slog.Any("Route", route),
+			slog.Any("Error", err))
+		return nil
 	}
-	return pathList
+
+	pattr := make([]bgp.PathAttributeInterface, 0, 2)
+	pattr = append(pattr, bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP))
+
+	family := bgp.RF_IPv4_UC
+	if route.Prefix.IP.To4() == nil {
+		family = bgp.RF_IPv6_UC
+		// Unspecified nexthop; UpdatePathAttrs replaces it with the peer's
+		// addresses, which for a netlink path is the RFC 2545 global plus
+		// link-local pair.
+		mpreach, _ := bgp.NewPathAttributeMpReachNLRI(family, []bgp.PathNLRI{pathNlri}, netip.MustParseAddr("::"))
+		pattr = append(pattr, mpreach)
+	} else {
+		nexthop, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("0.0.0.0"))
+		pattr = append(pattr, nexthop)
+	}
+
+	path := table.NewPath(family, table.NewNetlinkPeerInfo(iface), pathNlri, false, pattr, time.Now(), false)
+	if path == nil {
+		return nil
+	}
+	path.SetIsFromExternal(true)
+	return path
 }
 
 // getStats returns a copy of the current import statistics
@@ -447,7 +484,7 @@ func (n *netlinkClient) stopLocked(withdrawRoutes bool) {
 
 	n.pathsMu.Lock()
 	tracked := n.advertisedPaths
-	n.advertisedPaths = make(map[string]map[string]*table.Path)
+	n.advertisedPaths = make(map[string]map[string]*importedRoute)
 	n.pathsMu.Unlock()
 
 	if !withdrawRoutes {
@@ -455,8 +492,10 @@ func (n *netlinkClient) stopLocked(withdrawRoutes bool) {
 	}
 	for vrfName, vrfPaths := range tracked {
 		withdrawList := make([]*table.Path, 0, len(vrfPaths))
-		for _, path := range vrfPaths {
-			withdrawList = append(withdrawList, path.Clone(true))
+		for _, spec := range vrfPaths {
+			if path := n.pathForRoute(spec.route, spec.iface); path != nil {
+				withdrawList = append(withdrawList, path.Clone(true))
+			}
 		}
 		if len(withdrawList) > 0 {
 			n.applyLocked(vrfName, withdrawList, true)
@@ -482,8 +521,10 @@ func (n *netlinkClient) withdrawVrfLocked(vrfName string) {
 		return
 	}
 	withdrawList := make([]*table.Path, 0, len(vrfPaths))
-	for _, path := range vrfPaths {
-		withdrawList = append(withdrawList, path.Clone(true))
+	for _, spec := range vrfPaths {
+		if path := n.pathForRoute(spec.route, spec.iface); path != nil {
+			withdrawList = append(withdrawList, path.Clone(true))
+		}
 	}
 	if len(withdrawList) > 0 {
 		n.applyLocked(vrfName, withdrawList, true)
