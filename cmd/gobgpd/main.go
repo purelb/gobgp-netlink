@@ -69,6 +69,7 @@ func main() {
 		PProfHost         string  `long:"pprof-host" description:"specify the host that gobgpd listens on for pprof and metrics" default:"localhost:6060"`
 		PProfDisable      bool    `long:"pprof-disable" description:"disable pprof profiling"`
 		MetricsPath       string  `long:"metrics-path" description:"specify path for prometheus metrics, empty value disables them" default:"/metrics"`
+		MetricsHost       string  `long:"metrics-host" description:"specify a separate host:port for prometheus metrics; defaults to --pprof-host, which also serves pprof"`
 		UseSdNotify       bool    `long:"sdnotify" description:"use sd_notify protocol"`
 		TLS               bool    `long:"tls" description:"enable TLS authentication for gRPC API"`
 		TLSCertFile       string  `long:"tls-cert-file" description:"The TLS cert file"`
@@ -127,23 +128,44 @@ func main() {
 		runtime.GOMAXPROCS(opts.CPUs)
 	}
 
+	// Metrics and pprof were served from one mux on one address, and that
+	// address's flag is --pprof-host. Exposing metrics therefore meant choosing
+	// between exposing pprof alongside them or disabling pprof entirely.
+	// --metrics-host lets them bind separately; unset, everything behaves as
+	// before.
+	pprofEnabled := !opts.PProfDisable
+	metricsEnabled := opts.MetricsPath != ""
+	serve := func(addr string, mux *http.ServeMux, what string) {
+		go func() {
+			if err := http.ListenAndServe(addr, mux); err != nil {
+				logger.Warn("HTTP listener failed",
+					slog.String("Listener", what),
+					slog.String("Address", addr),
+					slog.String("Error", err.Error()))
+			}
+		}()
+	}
+
+	if metricsEnabled && opts.MetricsHost != "" && opts.MetricsHost != opts.PProfHost {
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle(opts.MetricsPath, promhttp.Handler())
+		serve(opts.MetricsHost, metricsMux, "metrics")
+		metricsEnabled = false // already served on its own address
+	}
+
 	httpMux := http.NewServeMux()
-	if !opts.PProfDisable {
+	if pprofEnabled {
 		httpMux.HandleFunc("/debug/pprof/", pprof.Index)
 		httpMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
 		httpMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 		httpMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		httpMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
-	if opts.MetricsPath != "" {
+	if metricsEnabled {
 		httpMux.Handle(opts.MetricsPath, promhttp.Handler())
 	}
-	if !opts.PProfDisable || opts.MetricsPath != "" {
-		go func() {
-			if err := http.ListenAndServe(opts.PProfHost, httpMux); err != nil {
-				logger.Warn("PProf failed", slog.String("Error", err.Error()))
-			}
-		}()
+	if pprofEnabled || metricsEnabled {
+		serve(opts.PProfHost, httpMux, "pprof")
 	}
 
 	lvl := new(slog.LevelVar)
@@ -229,6 +251,7 @@ func main() {
 		// Only the real daemon reconciles routes left behind by a previous run.
 		server.StaleRouteCleanupOption(true))
 	prometheus.MustRegister(metrics.NewBgpCollector(bgpServer))
+	prometheus.MustRegister(metrics.NewNetlinkCollector(bgpServer))
 	prometheus.MustRegister(fsmTimingCollector)
 	go bgpServer.Serve()
 

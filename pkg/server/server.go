@@ -1969,25 +1969,6 @@ func (s *BgpServer) StartNetlink(ctx context.Context) error {
 				return fmt.Errorf("failed to create netlink export client: %w", err)
 			}
 			s.netlinkExportClient = exportClient
-
-			// Sweep routes left behind by a previous run. Two constraints:
-			//
-			//  - It MUST stay inside the construction branch. Run on every
-			//    StartNetlink it would delete this daemon's own routes while
-			//    e.exported still lists them, after which the idempotency check in
-			//    exportRoute returns early and never reprograms them.
-			//  - It is opt-in. The sweep filters only on route protocol, and 186 is
-			//    shared with FRR, so an in-process BgpServer must not run it.
-			if s.staleRouteCleanup {
-				if err := exportClient.cleanupStaleRoutes(); err != nil {
-					s.logger.Warn("Failed to cleanup stale routes at startup",
-						slog.String("Topic", "netlink"),
-						slog.Any("Error", err))
-				}
-			} else {
-				s.logger.Debug("Skipping stale route cleanup (not enabled)",
-					slog.String("Topic", "netlink"))
-			}
 		}
 
 		// Parse export rules (always reload to pick up configuration changes)
@@ -2020,6 +2001,24 @@ func (s *BgpServer) StartNetlink(ctx context.Context) error {
 			s.logger.Warn("Failed to build VRF export mappings",
 				slog.String("Topic", "netlink"),
 				slog.Any("Error", err))
+		}
+
+		// Sweep routes left behind by a previous run. Three constraints:
+		//
+		//  - It runs at most once per client. On every StartNetlink it would
+		//    delete this daemon's own routes while e.exported still lists them,
+		//    after which the idempotency check in exportRoute returns early and
+		//    never reprograms them.
+		//  - It must run AFTER setRules/buildVrfMappings, because the set of
+		//    tables it is allowed to touch is derived from the configured rules.
+		//  - It is opt-in. The sweep filters on route protocol, and 186 is shared
+		//    with FRR, so an in-process BgpServer must not run it.
+		if s.staleRouteCleanup {
+			if err := s.netlinkExportClient.cleanupStaleRoutesOnce(); err != nil {
+				s.logger.Warn("Failed to cleanup stale routes at startup",
+					slog.String("Topic", "netlink"),
+					slog.Any("Error", err))
+			}
 		}
 
 		// Re-evaluate all existing RIB routes with the new rules
@@ -2088,6 +2087,12 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 			s.bgpConfig.Netlink.Export.DampeningInterval = r.DampeningInterval
 		}
 		if r.RouteProtocol != 0 {
+			// Reject rather than clamp on the API: an explicit caller asking for a
+			// protocol we will not honour should be told, not silently overridden.
+			// The field is int32, so negatives are reachable from the wire.
+			if err := validateRouteProtocol(int(r.RouteProtocol)); err != nil {
+				return err
+			}
 			s.bgpConfig.Netlink.Export.RouteProtocol = int(r.RouteProtocol)
 		}
 

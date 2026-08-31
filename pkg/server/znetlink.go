@@ -34,6 +34,7 @@ type netlinkImportStats struct {
 	Imported     uint64
 	Withdrawn    uint64
 	Errors       uint64
+	Ticks        uint64 // import scan iterations; stops advancing once the loop exits
 	LastImport   time.Time
 	LastWithdraw time.Time
 	LastError    time.Time
@@ -293,6 +294,9 @@ func (n *netlinkClient) loop() {
 		case <-n.dead:
 			return
 		case <-ticker.C:
+			n.statsMu.Lock()
+			n.stats.Ticks++
+			n.statsMu.Unlock()
 			n.runImport()
 		}
 	}

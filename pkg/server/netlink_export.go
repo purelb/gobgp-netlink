@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -39,6 +40,39 @@ const (
 	// Default dampening interval to prevent flapping
 	defaultDampeningInterval = 100 * time.Millisecond
 )
+
+// Route protocols reserved by the kernel and iproute2. Exporting under one of
+// these would make our routes indistinguishable from the system's own, and
+// cleanupStaleRoutes would then delete the system's routes.
+var reservedRouteProtocols = map[int]string{
+	1: "RTPROT_REDIRECT",
+	2: "RTPROT_KERNEL",
+	3: "RTPROT_BOOT",
+	4: "RTPROT_STATIC",
+}
+
+// validateRouteProtocol rejects values that cannot be used safely as the export
+// route protocol.
+//
+// The protocol is not merely a label: cleanupStaleRoutes uses it as the sole
+// filter for a route-deletion sweep, so an out-of-range or reserved value is a
+// destructive misconfiguration rather than a cosmetic one.
+//
+// Out-of-range values are especially bad because the kernel and the filter
+// disagree. The netlink library only writes the protocol when it is > 0, so a
+// negative value installs routes as RTPROT_UNSPEC(0) while the sweep still looks
+// for the negative number - the daemon's own routes become unattributable and
+// can never be cleaned up. Values above 255 truncate to a uint8 on write but not
+// on the comparison, with the same split-brain result.
+func validateRouteProtocol(proto int) error {
+	if proto < 1 || proto > 255 {
+		return fmt.Errorf("route protocol %d out of range (must be 1-255)", proto)
+	}
+	if name, reserved := reservedRouteProtocols[proto]; reserved {
+		return fmt.Errorf("route protocol %d is reserved (%s) and cannot be used for export", proto, name)
+	}
+	return nil
+}
 
 // exportRule defines a rule for exporting BGP routes to Linux routing tables
 type exportRule struct {
@@ -73,6 +107,8 @@ type exportStats struct {
 	NexthopValidation uint64    // Nexthop validation attempts
 	NexthopFailed     uint64    // Nexthop validation failures
 	DampenedUpdates   uint64    // Updates that were dampened
+	CleanupDeleted    uint64    // Stale routes deleted by the startup sweep
+	CleanupSkipped    uint64    // Routes the startup sweep left in place
 	LastExport        time.Time // Last successful export
 	LastWithdraw      time.Time // Last successful withdrawal
 	LastError         time.Time // Last error
@@ -115,6 +151,11 @@ type netlinkExportClient struct {
 	// Route protocol
 	routeProtocol int
 
+	// sweptStaleRoutes records that the startup sweep has already run for this
+	// client, so a later StartNetlink cannot delete our own live routes.
+	// Guarded by mu.
+	sweptStaleRoutes bool
+
 	// Shutdown
 	stopCh  chan struct{}
 	stopped bool // protects against double stop()
@@ -127,7 +168,18 @@ func newNetlinkExportClient(server *BgpServer, logger *slog.Logger, routeProtoco
 		return nil, fmt.Errorf("failed to create netlink handle: %w", err)
 	}
 
+	// Validate here rather than only at the gRPC entry point: the TOML config
+	// path reaches this constructor without passing through EnableNetlinkExport.
+	// Clamp rather than fail, because refusing to start export on a bad value
+	// turns a typo into an outage.
 	if routeProtocol == 0 {
+		routeProtocol = RTPROT_BGP
+	} else if err := validateRouteProtocol(routeProtocol); err != nil {
+		logger.Warn("Invalid netlink export route protocol, falling back to RTPROT_BGP",
+			slog.String("Topic", "netlink"),
+			slog.Int("Configured", routeProtocol),
+			slog.Int("Using", RTPROT_BGP),
+			slog.Any("Error", err))
 		routeProtocol = RTPROT_BGP
 	}
 
@@ -156,88 +208,156 @@ func newNetlinkExportClient(server *BgpServer, logger *slog.Logger, routeProtoco
 	return client, nil
 }
 
-// cleanupStaleRoutes removes any routes with our protocol that were left behind from previous runs
-func (e *netlinkExportClient) cleanupStaleRoutes() error {
-	e.logger.Info("Cleaning up stale netlink routes from previous runs",
-		slog.String("Topic", "netlink"),
-		slog.Int("Protocol", e.routeProtocol))
+// sweepTables returns the routing tables the stale-route sweep is allowed to
+// touch: exactly those named by a configured export rule, global or per-VRF.
+//
+// Previously the sweep enumerated the main table plus every VRF table present on
+// the host, whether or not this daemon had any reason to write to it. That
+// deleted other daemons' routes in tables it never exports to, while at the same
+// time missing rules that name a plain table-id with no VRF device.
+func (e *netlinkExportClient) sweepTables() []int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
 
-	// We need to list routes from all tables (including VRFs)
-	// The netlink library's RouteList(nil, family) only lists from the main table
-	// So we need to get all links and check their associated tables
-
-	// First, get all VRF links to find their table IDs
-	tablesToCheck := []int{0} // 0 means main table
-
-	links, err := e.client.LinkList()
-	if err == nil {
-		for _, link := range links {
-			if link.Type() == "vrf" {
-				// VRF links have a table attribute
-				if vrfLink, ok := link.(*go_netlink.Vrf); ok {
-					tablesToCheck = append(tablesToCheck, int(vrfLink.Table))
-				}
-			}
-		}
+	tables := make(map[int]struct{}, len(e.rules)+len(e.vrfRules))
+	for _, rule := range e.rules {
+		tables[rule.TableId] = struct{}{}
+	}
+	for _, vrf := range e.vrfRules {
+		tables[vrf.LinuxTableId] = struct{}{}
 	}
 
-	e.logger.Debug("Checking tables for stale routes",
-		slog.String("Topic", "netlink"),
-		slog.Any("Tables", tablesToCheck))
+	out := make([]int, 0, len(tables))
+	for id := range tables {
+		out = append(out, id)
+	}
+	slices.Sort(out)
+	return out
+}
 
-	cleanedCount := 0
-
-	// Check each table
-	for _, tableId := range tablesToCheck {
-		// List all routes from this table
-		var routes []go_netlink.Route
+// listRoutesForSweep lists a single table, retrying once if the kernel reports a
+// truncated dump.
+//
+// ErrDumpInterrupted means the routing table changed mid-dump, which is routine
+// on a busy node. The results are partial, so acting on them would under-report
+// what is present. Treating it as a plain error would skip the table silently.
+func (e *netlinkExportClient) listRoutesForSweep(tableId int) ([]go_netlink.Route, error) {
+	list := func() ([]go_netlink.Route, error) {
 		if tableId == 0 {
-			// Main table
-			routes, err = e.client.RouteList(nil, go_netlink.FAMILY_ALL)
-		} else {
-			// Specific table - use RouteListFiltered
-			filter := &go_netlink.Route{
-				Table: tableId,
-			}
-			routes, err = e.client.RouteListFiltered(go_netlink.FAMILY_ALL, filter, go_netlink.RT_FILTER_TABLE)
+			return e.client.RouteList(nil, go_netlink.FAMILY_ALL)
 		}
+		return e.client.RouteListFiltered(go_netlink.FAMILY_ALL,
+			&go_netlink.Route{Table: tableId}, go_netlink.RT_FILTER_TABLE)
+	}
 
+	routes, err := list()
+	if err != nil && errors.Is(err, go_netlink.ErrDumpInterrupted) {
+		e.logger.Debug("Route dump interrupted, retrying",
+			slog.String("Topic", "netlink"),
+			slog.Int("Table", tableId))
+		routes, err = list()
+	}
+	return routes, err
+}
+
+// cleanupStaleRoutesOnce runs the stale-route sweep at most once per client.
+//
+// StartNetlink is called on every enable and every config change, but the sweep
+// is only meaningful once: on a later call this daemon's own routes are live and
+// tracked in e.exported, and deleting them would leave exportRoute's idempotency
+// check refusing to reprogram them.
+func (e *netlinkExportClient) cleanupStaleRoutesOnce() error {
+	e.mu.Lock()
+	if e.sweptStaleRoutes {
+		e.mu.Unlock()
+		return nil
+	}
+	e.sweptStaleRoutes = true
+	e.mu.Unlock()
+
+	return e.cleanupStaleRoutes()
+}
+
+// cleanupStaleRoutes removes routes with our protocol left behind by a previous
+// run, restricted to the tables this daemon is configured to export into.
+//
+// Caveat worth knowing: protocol 186 (RTPROT_BGP) is the correct standard value
+// and is therefore shared with FRR and other BGP daemons. Within a table that
+// this daemon exports to, a route with our protocol is assumed to be ours. If
+// another BGP daemon writes to the same table, give this one a dedicated
+// table-id or a distinct route-protocol.
+func (e *netlinkExportClient) cleanupStaleRoutes() error {
+	tables := e.sweepTables()
+	if len(tables) == 0 {
+		e.logger.Info("No export rules configured, skipping stale route cleanup",
+			slog.String("Topic", "netlink"))
+		return nil
+	}
+
+	e.logger.Info("Cleaning up stale netlink routes from previous runs",
+		slog.String("Topic", "netlink"),
+		slog.Int("Protocol", e.routeProtocol),
+		slog.Any("Tables", tables))
+
+	deleted, skipped := 0, 0
+
+	for _, tableId := range tables {
+		routes, err := e.listRoutesForSweep(tableId)
 		if err != nil {
-			e.logger.Warn("Failed to list routes from table",
+			e.logger.Warn("Failed to list routes from table, leaving it untouched",
 				slog.String("Topic", "netlink"),
 				slog.Int("Table", tableId),
 				slog.Any("Error", err))
 			continue
 		}
 
-		// Filter and delete routes matching our protocol
 		for _, route := range routes {
-			if route.Protocol == go_netlink.RouteProtocol(e.routeProtocol) {
-				e.logger.Debug("Deleting stale route",
+			if route.Protocol != go_netlink.RouteProtocol(e.routeProtocol) {
+				skipped++
+				continue
+			}
+			// A nil Dst is the default route. We never export one, and deleting
+			// the node's default route would isolate it.
+			if route.Dst == nil {
+				e.logger.Info("Skipping default route during cleanup",
+					slog.String("Topic", "netlink"),
+					slog.Int("Table", route.Table))
+				skipped++
+				continue
+			}
+
+			e.logger.Debug("Deleting stale route",
+				slog.String("Topic", "netlink"),
+				slog.String("Prefix", route.Dst.String()),
+				slog.Int("Table", route.Table),
+				slog.Int("Protocol", int(route.Protocol)),
+				slog.Int("Metric", route.Priority))
+
+			if err := e.client.RouteDel(&route); err != nil {
+				e.logger.Warn("Failed to delete stale route",
 					slog.String("Topic", "netlink"),
 					slog.String("Prefix", route.Dst.String()),
 					slog.Int("Table", route.Table),
-					slog.Int("Protocol", int(route.Protocol)),
-					slog.Int("Metric", route.Priority))
-
-				if err := e.client.RouteDel(&route); err != nil {
-					e.logger.Warn("Failed to delete stale route",
-						slog.String("Topic", "netlink"),
-						slog.String("Prefix", route.Dst.String()),
-						slog.Int("Table", route.Table),
-						slog.Any("Error", err))
-				} else {
-					cleanedCount++
-				}
+					slog.Any("Error", err))
+				continue
 			}
+			deleted++
 		}
 	}
 
-	if cleanedCount > 0 {
-		e.logger.Info("Cleaned up stale routes",
-			slog.String("Topic", "netlink"),
-			slog.Int("Count", cleanedCount))
-	}
+	e.statsMu.Lock()
+	e.stats.CleanupDeleted += uint64(deleted)
+	e.stats.CleanupSkipped += uint64(skipped)
+	e.statsMu.Unlock()
+
+	// Info, not Debug: an operator upgrading to the narrowed sweep needs to be
+	// able to tell a working sweep from a no-op one.
+	e.logger.Info("Stale route cleanup complete",
+		slog.String("Topic", "netlink"),
+		slog.Int("Protocol", e.routeProtocol),
+		slog.Any("Tables", tables),
+		slog.Int("Deleted", deleted),
+		slog.Int("Skipped", skipped))
 
 	return nil
 }
