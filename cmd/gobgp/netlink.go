@@ -442,8 +442,18 @@ Optionally override with --interfaces flag.`,
 			fmt.Println("Netlink export enabled")
 		},
 	}
-	enableExportCmd.Flags().Uint32("dampening-interval", 100, "update dampening interval in ms")
-	enableExportCmd.Flags().Int32("route-protocol", 186, "Linux route protocol (default: 186 for BGP)")
+	// Both default to 0, meaning "leave the running configuration alone".
+	//
+	// The server treats a zero field as "unchanged" and substitutes its own
+	// default only when nothing is configured. Giving these flags non-zero
+	// client-side defaults meant every invocation sent a value, so simply
+	// re-enabling export silently rewrote whatever was configured: a daemon
+	// running route-protocol 201 was reset to 186 while its already-installed
+	// routes kept protocol 201, leaving the configuration and the kernel
+	// disagreeing. The next restart would then sweep for 186 and never reclaim
+	// those routes.
+	enableExportCmd.Flags().Uint32("dampening-interval", 0, "update dampening interval in ms (0 = leave unchanged; server default 100)")
+	enableExportCmd.Flags().Int32("route-protocol", 0, "Linux route protocol (0 = leave unchanged; server default 186, RTPROT_BGP)")
 	netlinkCmd.AddCommand(enableExportCmd)
 
 	// Global disable-export command
