@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v7
         with:
           go-version: "stable"
       - run: |
@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v7
         with:
           go-version: "stable"
       - name: golangci-lint
@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v7
         with:
           go-version: "stable"
       - run: |
@@ -78,7 +78,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v7
         with:
           go-version: "stable"
       - name: container image
