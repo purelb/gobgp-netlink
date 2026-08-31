@@ -19,9 +19,14 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"testing"
 
 	"github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/internal/pkg/netutils"
+	"github.com/osrg/gobgp/v4/internal/pkg/table"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -188,4 +193,78 @@ func TestEnableNetlinkExportDefaultRouteProtocol(t *testing.T) {
 
 	// RouteProtocol should remain unchanged when 0 is passed
 	assert.Equal(t, 200, s.bgpConfig.Netlink.Export.RouteProtocol)
+}
+
+// newTestImportClient builds an import client over a synthetic interface
+// topology, without starting the scan loop.
+//
+// The loop is deliberately not started: these tests drive runImport directly so
+// the assertions are deterministic rather than racing a 5s ticker.
+func newTestImportClient(s *BgpServer, topology map[string][]*netutils.ConnectedRoute) *netlinkClient {
+	return &netlinkClient{
+		server: s,
+		dead:   make(chan struct{}),
+		done:   make(chan struct{}),
+		scan: func(iface string) ([]*netutils.ConnectedRoute, error) {
+			routes, ok := topology[iface]
+			if !ok {
+				return nil, fmt.Errorf("failed to find interface %s", iface)
+			}
+			return routes, nil
+		},
+		advertisedPaths: make(map[string]map[string]*table.Path),
+	}
+}
+
+func connected(t *testing.T, cidr string) *netutils.ConnectedRoute {
+	t.Helper()
+	ip, ipnet, err := net.ParseCIDR(cidr)
+	assert.NoError(t, err)
+	return &netutils.ConnectedRoute{Prefix: ipnet, NextHop: ip}
+}
+
+// TestImportScanSeam proves the import path is testable without a real
+// interface. A CI runner has no eth0, so before the seam existed every import
+// test drove an empty scan and asserted nothing.
+func TestImportScanSeam(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
+
+	n := newTestImportClient(s, map[string][]*netutils.ConnectedRoute{
+		"eth0": {connected(t, "10.0.1.1/24")},
+		"eth1": {connected(t, "10.0.2.1/24"), connected(t, "2001:db8::1/64")},
+	})
+
+	n.importForVrf("", []string{"eth0", "eth1"})
+
+	n.pathsMu.RLock()
+	got := len(n.advertisedPaths[""])
+	n.pathsMu.RUnlock()
+	assert.Equal(t, 3, got, "all three connected routes should be imported")
+}
+
+// TestImportScanSeamSkipsFailedInterface: one unreadable interface must not
+// abort the scan of the others.
+func TestImportScanSeamSkipsFailedInterface(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
+
+	n := newTestImportClient(s, map[string][]*netutils.ConnectedRoute{
+		"eth0": {connected(t, "10.0.1.1/24")},
+	})
+
+	n.importForVrf("", []string{"missing0", "eth0"})
+
+	n.pathsMu.RLock()
+	got := len(n.advertisedPaths[""])
+	n.pathsMu.RUnlock()
+	assert.Equal(t, 1, got, "the readable interface should still be imported")
 }

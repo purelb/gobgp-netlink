@@ -74,6 +74,33 @@ func validateRouteProtocol(proto int) error {
 	return nil
 }
 
+// netlinkHandle is the kernel surface the export client uses.
+//
+// It exists so the export path can be tested. netlink_export.go is the file
+// that programs the node's FIB and it had no test coverage at all, because
+// every operation went straight to a *netlink.Handle and therefore to the real
+// kernel. *netlink.Handle satisfies this as-is, so production code needs no
+// adapter.
+//
+// Declared here rather than reusing pkg/netlink's NetlinkManager: that
+// interface has three methods, wraps package-level functions rather than a
+// handle, and is not what this client needs.
+type netlinkHandle interface {
+	Close()
+	LinkByName(name string) (go_netlink.Link, error)
+	LinkList() ([]go_netlink.Link, error)
+	RouteDel(route *go_netlink.Route) error
+	RouteGet(destination net.IP) ([]go_netlink.Route, error)
+	RouteGetWithOptions(destination net.IP, options *go_netlink.RouteGetOptions) ([]go_netlink.Route, error)
+	RouteList(link go_netlink.Link, family int) ([]go_netlink.Route, error)
+	RouteListFiltered(family int, filter *go_netlink.Route, filterMask uint64) ([]go_netlink.Route, error)
+	RouteReplace(route *go_netlink.Route) error
+	SetSocketTimeout(to time.Duration) error
+}
+
+// Compile-time assertion that the real handle still satisfies the seam.
+var _ netlinkHandle = (*go_netlink.Handle)(nil)
+
 // exportRule defines a rule for exporting BGP routes to Linux routing tables
 type exportRule struct {
 	Name             string
@@ -128,7 +155,7 @@ type vrfExportConfig struct {
 
 // netlinkExportClient manages exporting BGP routes to Linux routing tables
 type netlinkExportClient struct {
-	client   *go_netlink.Handle
+	client   netlinkHandle
 	server   *BgpServer
 	logger   *slog.Logger
 	rules    []*exportRule
@@ -161,13 +188,19 @@ type netlinkExportClient struct {
 	stopped bool // protects against double stop()
 }
 
-// newNetlinkExportClient creates a new netlink export client
+// newNetlinkExportClient creates a new netlink export client talking to the real
+// kernel.
 func newNetlinkExportClient(server *BgpServer, logger *slog.Logger, routeProtocol int, dampeningInterval time.Duration) (*netlinkExportClient, error) {
 	handle, err := go_netlink.NewHandle()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create netlink handle: %w", err)
 	}
+	return newNetlinkExportClientWithHandle(server, logger, handle, routeProtocol, dampeningInterval)
+}
 
+// newNetlinkExportClientWithHandle builds the client over a caller-supplied
+// kernel handle, so tests can substitute a fake for the real netlink socket.
+func newNetlinkExportClientWithHandle(server *BgpServer, logger *slog.Logger, handle netlinkHandle, routeProtocol int, dampeningInterval time.Duration) (*netlinkExportClient, error) {
 	// Validate here rather than only at the gRPC entry point: the TOML config
 	// path reaches this constructor without passing through EnableNetlinkExport.
 	// Clamp rather than fail, because refusing to start export on a bad value

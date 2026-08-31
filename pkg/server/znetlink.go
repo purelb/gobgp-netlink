@@ -41,11 +41,19 @@ type netlinkImportStats struct {
 	LastErrorMsg string
 }
 
+// interfaceScanner reads the connected routes currently configured on an
+// interface. The import loop goes through this rather than calling netutils
+// directly so tests can supply a synthetic topology; a CI runner has no eth0,
+// so without it every import test drives an empty scan and proves nothing.
+type interfaceScanner func(iface string) ([]*custom_net.ConnectedRoute, error)
+
 type netlinkClient struct {
 	client *netlink.NetlinkClient
 	server *BgpServer
 	dead   chan struct{}
 	done   chan struct{} // signals loop has exited
+	// scan reads connected routes for one interface. Always non-nil.
+	scan interfaceScanner
 	// advertisedPaths tracks paths per VRF (vrf name -> prefix -> path)
 	// empty string key is used for global table
 	advertisedPaths map[string]map[string]*table.Path
@@ -61,10 +69,13 @@ func newNetlinkClient(s *BgpServer) (*netlinkClient, error) {
 		return nil, err
 	}
 	w := &netlinkClient{
-		client:          n,
-		server:          s,
-		dead:            make(chan struct{}),
-		done:            make(chan struct{}),
+		client: n,
+		server: s,
+		dead:   make(chan struct{}),
+		done:   make(chan struct{}),
+		scan: func(iface string) ([]*custom_net.ConnectedRoute, error) {
+			return custom_net.GetGlobalUnicastRoutes(iface, s.logger)
+		},
 		advertisedPaths: make(map[string]map[string]*table.Path),
 	}
 	w.runImport()
@@ -168,7 +179,7 @@ func (n *netlinkClient) importForVrf(vrfName string, interfaces []string) {
 
 	// Scan interfaces for this VRF
 	for _, iface := range interfaces {
-		routes, err := custom_net.GetGlobalUnicastRoutes(iface, n.server.logger)
+		routes, err := n.scan(iface)
 		if err != nil {
 			n.server.logger.Error("failed to get connected routes",
 				slog.String("Topic", "netlink"),
