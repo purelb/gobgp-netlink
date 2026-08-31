@@ -119,6 +119,40 @@ type exportedRouteInfo struct {
 	ExportedAt time.Time         // When the route was exported
 }
 
+// isRouteAbsent reports whether a netlink error means the route is already gone.
+//
+// ESRCH/ENOENT are the kernel saying the route is not there, which is the state
+// a delete is trying to reach. Every other errno stays an error: EPERM means we
+// lack the capability, EINVAL means the request was malformed, and silently
+// swallowing either would hide a real failure.
+func isRouteAbsent(err error) bool {
+	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.ENOENT)
+}
+
+// exportPrefixKey returns the prefix a path is tracked and programmed under.
+//
+// There is one derivation because there used to be three, and they disagreed.
+// reEvaluateAllRoutes used nlri.String(), which for a VPN family includes the RD
+// ("100:1:10.0.0.0/24"), while exportRoute used IPPrefix(), which does not
+// ("10.0.0.0/24"). The two were then compared against each other, never matched,
+// and every VRF-exported route was withdrawn on any re-evaluation.
+//
+// The RD-stripped form is the correct one: it is what net.ParseCIDR and the
+// kernel's RTA_DST need. VRFs are separated by the outer tracking key, not here.
+func exportPrefixKey(path *table.Path) (string, error) {
+	nlri := path.GetNlri()
+	switch family := path.GetFamily(); family {
+	case bgp.RF_IPv4_VPN, bgp.RF_IPv6_VPN:
+		vpnNlri, ok := nlri.(*bgp.LabeledVPNIPAddrPrefix)
+		if !ok {
+			return "", fmt.Errorf("unexpected VPN NLRI type for family %s", family.String())
+		}
+		return vpnNlri.IPPrefix(), nil
+	default:
+		return nlri.String(), nil
+	}
+}
+
 // dampenEntry tracks pending route updates for dampening
 type dampenEntry struct {
 	path      *table.Path
@@ -155,11 +189,19 @@ type vrfExportConfig struct {
 
 // netlinkExportClient manages exporting BGP routes to Linux routing tables
 type netlinkExportClient struct {
-	client   netlinkHandle
-	server   *BgpServer
-	logger   *slog.Logger
-	rules    []*exportRule
-	exported map[string]map[string]*exportedRouteInfo // vrf -> prefix -> info
+	client netlinkHandle
+	server *BgpServer
+	logger *slog.Logger
+	rules  []*exportRule
+	// exported tracks installed routes: vrf -> prefix -> one entry per rule.
+	//
+	// The per-prefix list is not incidental. Two rules can legitimately install
+	// different kernel routes for the same prefix (different table, different
+	// metric), and the kernel keeps both. A single entry per prefix meant the
+	// second rule overwrote the first's bookkeeping and the first's route leaked
+	// permanently, invisible to withdraw, flush and flushVrf. Every global rule
+	// shares the "" bucket, so this was the default case, not an edge case.
+	exported map[string]map[string][]*exportedRouteInfo
 	mu       sync.RWMutex
 
 	// VRF export mapping
@@ -225,7 +267,7 @@ func newNetlinkExportClientWithHandle(server *BgpServer, logger *slog.Logger, ha
 		server:            server,
 		logger:            logger,
 		rules:             make([]*exportRule, 0),
-		exported:          make(map[string]map[string]*exportedRouteInfo),
+		exported:          make(map[string]map[string][]*exportedRouteInfo),
 		rdToVrf:           make(map[string]string),
 		vrfRules:          make(map[string]*vrfExportConfig),
 		pendingUpdates:    make(map[string]*dampenEntry),
@@ -395,6 +437,54 @@ func (e *netlinkExportClient) cleanupStaleRoutes() error {
 	return nil
 }
 
+// trackExportedLocked records a route this daemon installed. Caller holds e.mu.
+//
+// One entry per (vrf, prefix, rule): re-exporting through the same rule replaces
+// its entry, a different rule adds one.
+func (e *netlinkExportClient) trackExportedLocked(vrfName, prefix string, info *exportedRouteInfo) {
+	if e.exported[vrfName] == nil {
+		e.exported[vrfName] = make(map[string][]*exportedRouteInfo)
+	}
+	entries := e.exported[vrfName][prefix]
+	for i, existing := range entries {
+		if existing.RuleName == info.RuleName {
+			entries[i] = info
+			return
+		}
+	}
+	e.exported[vrfName][prefix] = append(entries, info)
+}
+
+// findExportedLocked returns this rule's tracked entry, if any. Caller holds e.mu.
+func (e *netlinkExportClient) findExportedLocked(vrfName, prefix, ruleName string) *exportedRouteInfo {
+	for _, info := range e.exported[vrfName][prefix] {
+		if info.RuleName == ruleName {
+			return info
+		}
+	}
+	return nil
+}
+
+// untrackExportedLocked drops one rule's entry, pruning empty levels so the
+// tracking map does not accumulate empty maps. Caller holds e.mu.
+func (e *netlinkExportClient) untrackExportedLocked(vrfName, prefix, ruleName string) {
+	entries := e.exported[vrfName][prefix]
+	kept := entries[:0]
+	for _, info := range entries {
+		if info.RuleName != ruleName {
+			kept = append(kept, info)
+		}
+	}
+	if len(kept) == 0 {
+		delete(e.exported[vrfName], prefix)
+		if len(e.exported[vrfName]) == 0 {
+			delete(e.exported, vrfName)
+		}
+		return
+	}
+	e.exported[vrfName][prefix] = kept
+}
+
 // setRules replaces all rules with a new set (for dynamic reconfiguration)
 func (e *netlinkExportClient) setRules(rules []*exportRule) {
 	e.mu.Lock()
@@ -531,38 +621,39 @@ func (e *netlinkExportClient) reEvaluateAllRoutes(pathList []*table.Path) {
 		slog.String("Topic", "netlink"),
 		slog.Int("PathCount", len(pathList)))
 
-	// Build a set of prefixes that should be exported based on new rules
-	shouldExport := make(map[string]map[string]bool) // vrf -> prefix -> should export
+	// exportKey identifies one installed route: which tracking bucket, which
+	// prefix, which rule. It must be built the same way here as on the export
+	// path, or the comparison below withdraws everything.
+	type exportKey struct {
+		vrf    string
+		prefix string
+		rule   string
+	}
+	shouldExport := make(map[exportKey]bool)
 
-	// Check each path against all rules
 	for _, path := range pathList {
 		if path.IsWithdraw {
 			continue
 		}
 
-		prefix := path.GetNlri().String()
+		prefix, err := exportPrefixKey(path)
+		if err != nil {
+			e.logger.Warn("Skipping path with unusable prefix during re-evaluation",
+				slog.String("Topic", "netlink"),
+				slog.Any("Error", err))
+			continue
+		}
 
-		// Check all rules
-		e.mu.RLock()
-		rules := e.rules
-		e.mu.RUnlock()
-
-		for _, rule := range rules {
-			if e.matchesRule(path, rule) {
-				vrfName := rule.VrfName
-				if shouldExport[vrfName] == nil {
-					shouldExport[vrfName] = make(map[string]bool)
-				}
-				shouldExport[vrfName][prefix] = true
-
-				// Export the route (idempotency check inside exportRoute will prevent duplicates)
-				if err := e.exportRoute(path, rule); err != nil {
-					e.logger.Warn("Failed to export route",
-						slog.String("Topic", "netlink"),
-						slog.String("Prefix", prefix),
-						slog.Any("Error", err))
-				}
-			}
+		// Dispatch exactly as processUpdate does. Re-evaluation used to apply
+		// the global rule set to every path regardless of family, which was wrong
+		// in both directions: VRF routes were exported through a separate
+		// per-VRF path and so could never appear in shouldExport (in a VRF-only
+		// deployment e.rules is empty, so every tracked route was withdrawn),
+		// while VPN paths were simultaneously matched against unicast rules and
+		// dumped into those rules' tables. Steady state and re-evaluation
+		// disagreed.
+		for _, applied := range e.exportPathToRules(path) {
+			shouldExport[exportKey{vrf: applied.VrfName, prefix: prefix, rule: applied.Name}] = true
 		}
 	}
 
@@ -570,19 +661,23 @@ func (e *netlinkExportClient) reEvaluateAllRoutes(pathList []*table.Path) {
 	routesToWithdraw := make([]struct {
 		vrf    string
 		prefix string
+		rule   string
 		route  *go_netlink.Route
 	}, 0)
 
 	e.mu.RLock()
 	for vrfName, vrfRoutes := range e.exported {
-		for prefix, info := range vrfRoutes {
-			// If this route is not in the shouldExport set, withdraw it
-			if shouldExport[vrfName] == nil || !shouldExport[vrfName][prefix] {
+		for prefix, entries := range vrfRoutes {
+			for _, info := range entries {
+				if shouldExport[exportKey{vrf: vrfName, prefix: prefix, rule: info.RuleName}] {
+					continue
+				}
 				routesToWithdraw = append(routesToWithdraw, struct {
 					vrf    string
 					prefix string
+					rule   string
 					route  *go_netlink.Route
-				}{vrfName, prefix, info.Route})
+				}{vrfName, prefix, info.RuleName, info.Route})
 			}
 		}
 	}
@@ -626,6 +721,84 @@ func (e *netlinkExportClient) reEvaluateAllRoutes(pathList []*table.Path) {
 
 	e.logger.Info("Route re-evaluation complete",
 		slog.String("Topic", "netlink"))
+}
+
+// vrfExportRule resolves the export rule a VPN path should be programmed with,
+// or nil if this daemon does not export that VRF or the path fails its filters.
+func (e *netlinkExportClient) vrfExportRule(path *table.Path) *exportRule {
+	vpnNlri, ok := path.GetNlri().(*bgp.LabeledVPNIPAddrPrefix)
+	if !ok {
+		return nil
+	}
+
+	e.mu.RLock()
+	vrfName, known := e.rdToVrf[vpnNlri.RD.String()]
+	var vrfExport *vrfExportConfig
+	if known {
+		vrfExport = e.vrfRules[vrfName]
+	}
+	e.mu.RUnlock()
+
+	if vrfExport == nil {
+		return nil
+	}
+	if !e.matchesVrfExportFilters(path, vrfExport) {
+		return nil
+	}
+
+	return &exportRule{
+		Name:            vrfName + "-vrf-export",
+		VrfName:         vrfExport.LinuxVrf,
+		TableId:         vrfExport.LinuxTableId,
+		Metric:          vrfExport.Metric,
+		ValidateNexthop: vrfExport.ValidateNexthop,
+	}
+}
+
+// exportPathToRules programs a path into the kernel through every rule that
+// matches it, and returns those rules.
+//
+// This is the single dispatch point for export. Steady-state updates and
+// re-evaluation both go through it, so they cannot disagree about which rules
+// apply to a path - which they did: VPN paths went only to the per-VRF path on
+// one route and only to the global rules on the other.
+//
+// A rule whose export attempt fails is still returned. The caller uses the
+// result to decide what to keep, and a transient failure to re-program a route
+// must not be read as "this rule no longer wants it" and turned into a
+// withdrawal.
+func (e *netlinkExportClient) exportPathToRules(path *table.Path) []*exportRule {
+	var applied []*exportRule
+
+	export := func(rule *exportRule) {
+		applied = append(applied, rule)
+		if err := e.exportRoute(path, rule); err != nil {
+			e.logger.Warn("Failed to export route",
+				slog.String("Topic", "netlink"),
+				slog.String("Rule", rule.Name),
+				slog.String("VRF", rule.VrfName),
+				slog.Any("Error", err))
+		}
+	}
+
+	switch path.GetFamily() {
+	case bgp.RF_IPv4_VPN, bgp.RF_IPv6_VPN:
+		// VPN paths are exported only through their VRF's configuration.
+		if rule := e.vrfExportRule(path); rule != nil {
+			export(rule)
+		}
+	default:
+		e.mu.RLock()
+		rules := slices.Clone(e.rules)
+		e.mu.RUnlock()
+		for _, rule := range rules {
+			if e.matchesRule(path, rule) {
+				export(rule)
+			}
+		}
+	}
+
+	return applied
 }
 
 // matchesRule checks if a path matches an export rule's community filters
@@ -753,54 +926,46 @@ func (e *netlinkExportClient) exportRoute(path *table.Path, rule *exportRule) er
 		}
 	}
 
-	// Check if already exported (idempotency)
+	// Check whether this rule already installed this prefix (idempotency).
+	//
+	// The lookup is per rule, not per prefix: another rule may have its own
+	// kernel route for the same prefix in a different table, and that one is not
+	// ours to reason about here.
 	e.mu.RLock()
-	vrfRoutes, vrfExists := e.exported[rule.VrfName]
-	if vrfExists {
-		if existingInfo, exists := vrfRoutes[prefix]; exists {
-			// Already exported - check if parameters changed
-			if existingInfo.RuleName == rule.Name {
-				// Same rule name - check if route parameters match
-				existingRoute := existingInfo.Route
-				if existingRoute.Table == rule.TableId &&
-					existingRoute.Priority == int(rule.Metric) &&
-					existingRoute.Gw.Equal(nexthopIP) {
-					// Route already exported with exact same parameters
-					e.mu.RUnlock()
-					return nil
-				}
-				// Parameters changed, need to delete old route first
-				e.mu.RUnlock()
-				e.logger.Info("Route parameters changed, deleting old route before re-export",
-					slog.String("Topic", "netlink"),
-					slog.String("Prefix", prefix),
-					slog.String("Rule", rule.Name),
-					slog.Int("OldMetric", existingRoute.Priority),
-					slog.Any("NewMetric", rule.Metric),
-					slog.Int("OldTable", existingRoute.Table),
-					slog.Int("NewTable", rule.TableId))
+	existingInfo := e.findExportedLocked(rule.VrfName, prefix, rule.Name)
+	e.mu.RUnlock()
 
-				// Delete the old route
-				if err := e.client.RouteDel(existingRoute); err != nil {
-					e.logger.Warn("Failed to delete old route during parameter change",
-						slog.String("Topic", "netlink"),
-						slog.String("Prefix", prefix),
-						slog.Any("Error", err))
-				}
-
-				// Remove from tracking so we can add the new one
-				e.mu.Lock()
-				delete(e.exported[rule.VrfName], prefix)
-				e.mu.Unlock()
-				// Continue to add the new route below
-			} else {
-				e.mu.RUnlock()
-			}
-		} else {
-			e.mu.RUnlock()
+	if existingInfo != nil {
+		existingRoute := existingInfo.Route
+		if existingRoute.Table == rule.TableId &&
+			existingRoute.Priority == int(rule.Metric) &&
+			existingRoute.Gw.Equal(nexthopIP) {
+			// Already installed with identical parameters.
+			return nil
 		}
-	} else {
-		e.mu.RUnlock()
+
+		// Parameters changed. The kernel identifies a route by table and metric,
+		// so the old one is a distinct entry and RouteReplace would leave it
+		// behind; delete it explicitly.
+		e.logger.Info("Route parameters changed, deleting old route before re-export",
+			slog.String("Topic", "netlink"),
+			slog.String("Prefix", prefix),
+			slog.String("Rule", rule.Name),
+			slog.Int("OldMetric", existingRoute.Priority),
+			slog.Any("NewMetric", rule.Metric),
+			slog.Int("OldTable", existingRoute.Table),
+			slog.Int("NewTable", rule.TableId))
+
+		if err := e.client.RouteDel(existingRoute); err != nil && !isRouteAbsent(err) {
+			e.logger.Warn("Failed to delete old route during parameter change",
+				slog.String("Topic", "netlink"),
+				slog.String("Prefix", prefix),
+				slog.Any("Error", err))
+		}
+
+		e.mu.Lock()
+		e.untrackExportedLocked(rule.VrfName, prefix, rule.Name)
+		e.mu.Unlock()
 	}
 
 	// Create netlink route
@@ -867,14 +1032,11 @@ func (e *netlinkExportClient) exportRoute(path *table.Path, rule *exportRule) er
 
 	// Track exported route
 	e.mu.Lock()
-	if e.exported[rule.VrfName] == nil {
-		e.exported[rule.VrfName] = make(map[string]*exportedRouteInfo)
-	}
-	e.exported[rule.VrfName][prefix] = &exportedRouteInfo{
+	e.trackExportedLocked(rule.VrfName, prefix, &exportedRouteInfo{
 		Route:      route,
 		RuleName:   rule.Name,
 		ExportedAt: time.Now(),
-	}
+	})
 	e.mu.Unlock()
 
 	e.statsMu.Lock()
@@ -912,60 +1074,58 @@ func (e *netlinkExportClient) withdrawRoute(path *table.Path, vrfName string) er
 		prefix = nlri.String()
 	}
 
-	// Check if this route was exported
+	// Every rule that installed this prefix has its own kernel route, so a
+	// withdrawal has to remove all of them, not just the first.
 	e.mu.RLock()
-	vrfRoutes, vrfExists := e.exported[vrfName]
-	if !vrfExists {
-		e.mu.RUnlock()
-		return nil // Not exported, nothing to do
-	}
-
-	info, exists := vrfRoutes[prefix]
-	if !exists {
-		e.mu.RUnlock()
-		return nil // Not exported, nothing to do
-	}
-	route := info.Route
+	tracked := slices.Clone(e.exported[vrfName][prefix])
 	e.mu.RUnlock()
 
-	// Delete the route.
-	//
-	// ESRCH/ENOENT mean the route is already gone from the kernel, which is the
-	// state we are trying to reach. Treating it as fatal would skip the tracking
-	// removal below, and the stale entry would then make exportRoute's
-	// idempotency check refuse to ever reinstall the prefix. Fall through and
-	// reconcile our own bookkeeping instead. Any other errno stays an error.
-	err := e.client.RouteDel(route)
-	if err != nil && (errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.ENOENT)) {
-		e.logger.Info("Route already absent from kernel, clearing tracking",
-			slog.String("Topic", "netlink"),
-			slog.String("Prefix", prefix),
-			slog.String("VRF", vrfName),
-			slog.Any("Error", err))
-		err = nil
-	}
-	if err != nil {
-		e.statsMu.Lock()
-		e.stats.Errors++
-		e.stats.LastError = time.Now()
-		e.stats.LastErrorMsg = fmt.Sprintf("RouteDel failed for %s: %v", prefix, err)
-		e.statsMu.Unlock()
-
-		e.logger.Warn("Failed to withdraw route",
-			slog.String("Topic", "netlink"),
-			slog.String("Prefix", prefix),
-			slog.String("VRF", vrfName),
-			slog.Any("Error", err))
-		return fmt.Errorf("failed to delete route %s: %w", prefix, err)
+	if len(tracked) == 0 {
+		return nil // Not exported, nothing to do
 	}
 
-	// Remove from tracking
-	e.mu.Lock()
-	delete(e.exported[vrfName], prefix)
-	if len(e.exported[vrfName]) == 0 {
-		delete(e.exported, vrfName)
+	var errs []error
+	for _, info := range tracked {
+		// ESRCH/ENOENT mean the route is already gone from the kernel, which is
+		// the state we are trying to reach. Treating it as fatal would skip the
+		// tracking removal below, and the stale entry would then make
+		// exportRoute's idempotency check refuse to ever reinstall the prefix.
+		// Reconcile our own bookkeeping instead.
+		err := e.client.RouteDel(info.Route)
+		if err != nil && isRouteAbsent(err) {
+			e.logger.Info("Route already absent from kernel, clearing tracking",
+				slog.String("Topic", "netlink"),
+				slog.String("Prefix", prefix),
+				slog.String("VRF", vrfName),
+				slog.String("Rule", info.RuleName),
+				slog.Any("Error", err))
+			err = nil
+		}
+		if err != nil {
+			e.statsMu.Lock()
+			e.stats.Errors++
+			e.stats.LastError = time.Now()
+			e.stats.LastErrorMsg = fmt.Sprintf("RouteDel failed for %s: %v", prefix, err)
+			e.statsMu.Unlock()
+
+			e.logger.Warn("Failed to withdraw route",
+				slog.String("Topic", "netlink"),
+				slog.String("Prefix", prefix),
+				slog.String("VRF", vrfName),
+				slog.String("Rule", info.RuleName),
+				slog.Any("Error", err))
+			errs = append(errs, err)
+			continue
+		}
+
+		e.mu.Lock()
+		e.untrackExportedLocked(vrfName, prefix, info.RuleName)
+		e.mu.Unlock()
 	}
-	e.mu.Unlock()
+
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to delete route %s: %w", prefix, errors.Join(errs...))
+	}
 
 	e.statsMu.Lock()
 	e.stats.Withdrawn++
@@ -1032,6 +1192,54 @@ func (e *netlinkExportClient) scheduleUpdate(path *table.Path) {
 	}
 }
 
+// withdrawTargets returns the tracking buckets a path is entitled to withdraw
+// from.
+//
+// Withdrawal used to scan every bucket for the prefix and delete from all of
+// them, with no check that the withdrawing path had anything to do with the
+// route it was removing. Because the RD is stripped before that scan, a peer
+// advertising and then withdrawing an unmapped RD for prefix P would delete
+// P from a completely different VRF; and a peer withdrawing a prefix it never
+// advertised still reached this code, because TableManager.Update returns a
+// destination either way.
+//
+// A path may only withdraw from where it could have installed: a VPN path from
+// its own RD's VRF, a unicast path from the buckets its rules target.
+func (e *netlinkExportClient) withdrawTargets(path *table.Path) []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	switch path.GetFamily() {
+	case bgp.RF_IPv4_VPN, bgp.RF_IPv6_VPN:
+		vpnNlri, ok := path.GetNlri().(*bgp.LabeledVPNIPAddrPrefix)
+		if !ok {
+			return nil
+		}
+		vrfName, known := e.rdToVrf[vpnNlri.RD.String()]
+		if !known {
+			// An RD we do not map is not ours to withdraw.
+			return nil
+		}
+		vrfExport, enabled := e.vrfRules[vrfName]
+		if !enabled {
+			return nil
+		}
+		return []string{vrfExport.LinuxVrf}
+
+	default:
+		seen := make(map[string]struct{}, len(e.rules))
+		targets := make([]string, 0, len(e.rules))
+		for _, rule := range e.rules {
+			if _, dup := seen[rule.VrfName]; dup {
+				continue
+			}
+			seen[rule.VrfName] = struct{}{}
+			targets = append(targets, rule.VrfName)
+		}
+		return targets
+	}
+}
+
 // processUpdate processes a route update (export or withdrawal)
 func (e *netlinkExportClient) processUpdate(path *table.Path) {
 	family := path.GetFamily()
@@ -1044,27 +1252,15 @@ func (e *netlinkExportClient) processUpdate(path *table.Path) {
 		slog.Bool("IsWithdraw", path.IsWithdraw))
 
 	if path.IsWithdraw {
-		// Withdraw from all VRFs where this route was exported
-		// For VPN families, extract just the IP prefix without RD
-		var prefix string
-		if family == bgp.RF_IPv4_VPN || family == bgp.RF_IPv6_VPN {
-			if vpnNlri, ok := nlri.(*bgp.LabeledVPNIPAddrPrefix); ok {
-				prefix = vpnNlri.IPPrefix()
-			} else {
-				prefix = nlri.String()
-			}
-		} else {
-			prefix = nlri.String()
+		prefix, err := exportPrefixKey(path)
+		if err != nil {
+			e.logger.Warn("Skipping withdrawal with unusable prefix",
+				slog.String("Topic", "netlink"),
+				slog.Any("Error", err))
+			return
 		}
 
-		e.mu.RLock()
-		vrfsToWithdraw := make([]string, 0)
-		for vrfName, vrfRoutes := range e.exported {
-			if _, exists := vrfRoutes[prefix]; exists {
-				vrfsToWithdraw = append(vrfsToWithdraw, vrfName)
-			}
-		}
-		e.mu.RUnlock()
+		vrfsToWithdraw := e.withdrawTargets(path)
 
 		e.logger.Debug("Processing withdrawal",
 			slog.String("Topic", "netlink"),
@@ -1084,109 +1280,14 @@ func (e *netlinkExportClient) processUpdate(path *table.Path) {
 		return
 	}
 
-	// Determine if this is a VPN family path (VRF route)
-	isVpnPath := family == bgp.RF_IPv4_VPN || family == bgp.RF_IPv6_VPN
-
-	if isVpnPath {
-		// VPN family paths should only be processed by per-VRF export rules
-		e.processVrfExport(path)
-	} else {
-		// Regular unicast paths are processed by global export rules
-		e.mu.RLock()
-		rules := make([]*exportRule, len(e.rules))
-		copy(rules, e.rules)
-		e.mu.RUnlock()
-
-		nlri := path.GetNlri()
-		prefix := nlri.String()
-		communities := path.GetCommunities()
-
-		e.logger.Debug("Processing unicast path for export",
-			slog.String("Topic", "netlink"),
-			slog.String("Prefix", prefix),
-			slog.Any("Communities", communities),
-			slog.Int("RuleCount", len(rules)))
-
-		for _, rule := range rules {
-			matches := e.matchesRule(path, rule)
-			e.logger.Debug("Checking export rule",
-				slog.String("Topic", "netlink"),
-				slog.String("Prefix", prefix),
-				slog.String("Rule", rule.Name),
-				slog.Bool("Matches", matches))
-			if matches {
-				if err := e.exportRoute(path, rule); err != nil {
-					e.logger.Warn("Failed to export route",
-						slog.String("Topic", "netlink"),
-						slog.String("Prefix", prefix),
-						slog.String("Rule", rule.Name),
-						slog.Any("Error", err))
-				}
-			}
-		}
-	}
-}
-
-// processVrfExport handles per-VRF export for VPN family paths
-func (e *netlinkExportClient) processVrfExport(path *table.Path) {
-	// Extract RD and prefix from VPN NLRI
-	nlri := path.GetNlri()
-
-	var rd string
-	var prefix string
-
-	// Handle VPN NLRI (unified type for IPv4 and IPv6)
-	vpnNlri, ok := nlri.(*bgp.LabeledVPNIPAddrPrefix)
-	if !ok {
-		// Not a VPN NLRI we handle
-		return
-	}
-	rd = vpnNlri.RD.String()
-	prefix = vpnNlri.IPPrefix()
-
-	// Lookup VRF name from RD
-	e.mu.RLock()
-	vrfName, vrfExists := e.rdToVrf[rd]
-	if !vrfExists {
-		e.mu.RUnlock()
-		return
-	}
-
-	// Get VRF export config
-	vrfExport, exportEnabled := e.vrfRules[vrfName]
-	e.mu.RUnlock()
-
-	if !exportEnabled {
-		return
-	}
-
-	// Check if route matches VRF export filters (if any)
-	if !e.matchesVrfExportFilters(path, vrfExport) {
-		return
-	}
-
-	// Create an export rule from VRF config and export the route
-	rule := &exportRule{
-		Name:            vrfName + "-vrf-export",
-		VrfName:         vrfExport.LinuxVrf,
-		TableId:         vrfExport.LinuxTableId,
-		Metric:          vrfExport.Metric,
-		ValidateNexthop: vrfExport.ValidateNexthop,
-	}
-
-	e.logger.Debug("Exporting VPN path with rule",
+	// Steady-state export goes through the same dispatch as re-evaluation, so
+	// the two cannot disagree about which rules apply to a path.
+	applied := e.exportPathToRules(path)
+	e.logger.Debug("Processed path for export",
 		slog.String("Topic", "netlink"),
-		slog.String("Prefix", prefix),
-		slog.String("VRF", vrfName),
-		slog.Bool("ValidateNexthop", rule.ValidateNexthop))
-
-	if err := e.exportRoute(path, rule); err != nil {
-		e.logger.Warn("Failed to export route to VRF",
-			slog.String("Topic", "netlink"),
-			slog.String("Prefix", prefix),
-			slog.String("VRF", vrfName),
-			slog.Any("Error", err))
-	}
+		slog.String("Family", family.String()),
+		slog.String("NLRI", nlri.String()),
+		slog.Int("RulesApplied", len(applied)))
 }
 
 // matchesVrfExportFilters checks if a path matches VRF export community filters
@@ -1238,20 +1339,24 @@ func (e *netlinkExportClient) getStats() exportStats {
 }
 
 // listExported returns all currently exported routes
-func (e *netlinkExportClient) listExported() map[string]map[string]*exportedRouteInfo {
+func (e *netlinkExportClient) listExported() map[string]map[string][]*exportedRouteInfo {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
 	// Deep copy to avoid race conditions
-	result := make(map[string]map[string]*exportedRouteInfo)
+	result := make(map[string]map[string][]*exportedRouteInfo)
 	for vrfName, vrfRoutes := range e.exported {
-		result[vrfName] = make(map[string]*exportedRouteInfo)
-		for prefix, info := range vrfRoutes {
-			result[vrfName][prefix] = &exportedRouteInfo{
-				Route:      info.Route,
-				RuleName:   info.RuleName,
-				ExportedAt: info.ExportedAt,
+		result[vrfName] = make(map[string][]*exportedRouteInfo)
+		for prefix, entries := range vrfRoutes {
+			copied := make([]*exportedRouteInfo, 0, len(entries))
+			for _, info := range entries {
+				copied = append(copied, &exportedRouteInfo{
+					Route:      info.Route,
+					RuleName:   info.RuleName,
+					ExportedAt: info.ExportedAt,
+				})
 			}
+			result[vrfName][prefix] = copied
 		}
 	}
 	return result
@@ -1311,8 +1416,10 @@ func (e *netlinkExportClient) flush() error {
 	e.mu.RLock()
 	routesToDelete := make([]*go_netlink.Route, 0)
 	for _, vrfRoutes := range e.exported {
-		for _, info := range vrfRoutes {
-			routesToDelete = append(routesToDelete, info.Route)
+		for _, entries := range vrfRoutes {
+			for _, info := range entries {
+				routesToDelete = append(routesToDelete, info.Route)
+			}
 		}
 	}
 	e.mu.RUnlock()
@@ -1330,7 +1437,7 @@ func (e *netlinkExportClient) flush() error {
 
 	// Clear tracking
 	e.mu.Lock()
-	e.exported = make(map[string]map[string]*exportedRouteInfo)
+	e.exported = make(map[string]map[string][]*exportedRouteInfo)
 	e.mu.Unlock()
 
 	e.logger.Info("Flushed all exported routes",
@@ -1382,14 +1489,17 @@ func (e *netlinkExportClient) flushVrf(vrfName string) error {
 
 	var errs []error
 	if vrfRoutes, ok := e.exported[vrfName]; ok {
-		for prefix, info := range vrfRoutes {
-			if err := e.client.RouteDel(info.Route); err != nil {
-				errs = append(errs, fmt.Errorf("failed to delete %s: %w", prefix, err))
-				e.logger.Warn("Failed to delete route during VRF flush",
-					slog.String("Topic", "netlink"),
-					slog.String("VRF", vrfName),
-					slog.String("Prefix", prefix),
-					slog.Any("Error", err))
+		for prefix, entries := range vrfRoutes {
+			for _, info := range entries {
+				if err := e.client.RouteDel(info.Route); err != nil && !isRouteAbsent(err) {
+					errs = append(errs, fmt.Errorf("failed to delete %s: %w", prefix, err))
+					e.logger.Warn("Failed to delete route during VRF flush",
+						slog.String("Topic", "netlink"),
+						slog.String("VRF", vrfName),
+						slog.String("Prefix", prefix),
+						slog.String("Rule", info.RuleName),
+						slog.Any("Error", err))
+				}
 			}
 		}
 		delete(e.exported, vrfName)

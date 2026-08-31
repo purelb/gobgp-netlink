@@ -20,7 +20,12 @@ package server
 import (
 	"errors"
 	"net"
+	"net/netip"
 	"testing"
+	"time"
+
+	"github.com/osrg/gobgp/v4/internal/pkg/table"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/stretchr/testify/assert"
 	go_netlink "github.com/vishvananda/netlink"
@@ -229,4 +234,189 @@ func mustCIDR(t *testing.T, s string) *net.IPNet {
 	_, n, err := net.ParseCIDR(s)
 	assert.NoError(t, err)
 	return n
+}
+
+// --- prefix keying and re-evaluation ---
+
+func testVpnPath(t *testing.T, rd, cidr, nexthop string) *table.Path {
+	t.Helper()
+	rdVal, err := bgp.ParseRouteDistinguisher(rd)
+	assert.NoError(t, err)
+	nlri, err := bgp.NewLabeledVPNIPAddrPrefix(netip.MustParsePrefix(cidr), *bgp.NewMPLSLabelStack(0), rdVal)
+	assert.NoError(t, err)
+	mpreach, err := bgp.NewPathAttributeMpReachNLRI(bgp.RF_IPv4_VPN,
+		[]bgp.PathNLRI{{NLRI: nlri}}, netip.MustParseAddr(nexthop))
+	assert.NoError(t, err)
+	p := table.NewPath(bgp.RF_IPv4_VPN, nil, bgp.PathNLRI{NLRI: nlri}, false,
+		[]bgp.PathAttributeInterface{
+			bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), mpreach,
+		}, time.Now(), false)
+	assert.NotNil(t, p)
+	return p
+}
+
+func testUnicastPath(t *testing.T, cidr, nexthop string) *table.Path {
+	t.Helper()
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(cidr))
+	assert.NoError(t, err)
+	nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr(nexthop))
+	assert.NoError(t, err)
+	p := table.NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false,
+		[]bgp.PathAttributeInterface{
+			bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), nh,
+		}, time.Now(), false)
+	assert.NotNil(t, p)
+	return p
+}
+
+// TestExportPrefixKeyStripsRD is the root of the VRF re-evaluation bug: two
+// derivations of "the prefix" disagreed, one including the RD and one not, and
+// were then compared against each other.
+func TestExportPrefixKeyStripsRD(t *testing.T) {
+	vpn, err := exportPrefixKey(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "10.0.0.0/24", vpn, "the RD must not be part of the tracking key")
+
+	uc, err := exportPrefixKey(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"))
+	assert.NoError(t, err)
+	assert.Equal(t, "10.0.0.0/24", uc)
+}
+
+// vrfExportClient wires up a client that exports one VRF, with no global rules -
+// the k8gobgp shape, and the configuration under which re-evaluation used to
+// withdraw everything.
+func vrfExportClient(t *testing.T, f *fakeNetlink) *netlinkExportClient {
+	t.Helper()
+	e, err := newNetlinkExportClientWithHandle(nil, logger, f, RTPROT_BGP, 0)
+	assert.NoError(t, err)
+	e.rdToVrf = map[string]string{"100:1": "vrf1"}
+	e.vrfRules = map[string]*vrfExportConfig{
+		"vrf1": {VrfName: "vrf1", LinuxVrf: "vrf1", LinuxTableId: 100, Metric: 20},
+	}
+	return e
+}
+
+// TestReEvaluateKeepsVrfRoutes is the headline fix. Re-evaluation consulted only
+// the global rule set, so a VRF-exported route could never appear in the
+// should-export set and every one of them was withdrawn - on a deployment with
+// no global rules at all, which is exactly how the controller configures this.
+func TestReEvaluateKeepsVrfRoutes(t *testing.T) {
+	f := newFakeNetlink()
+	e := vrfExportClient(t, f)
+	path := testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")
+
+	e.processUpdate(path)
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"), "the VRF route should be installed")
+
+	// Re-evaluating with unchanged configuration must be a no-op.
+	e.reEvaluateAllRoutes([]*table.Path{path})
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
+		"re-evaluation with unchanged rules must not withdraw VRF routes")
+}
+
+// TestReEvaluateDoesNotLeakVpnIntoUnicastRules is the same disagreement in the
+// other direction: re-evaluation applied global rules to VPN paths, so a rule
+// with no community filter absorbed every VRF route into its own table.
+func TestReEvaluateDoesNotLeakVpnIntoUnicastRules(t *testing.T) {
+	f := newFakeNetlink()
+	e := vrfExportClient(t, f)
+	e.rules = []*exportRule{{Name: "catch-all", TableId: 254, Metric: 20}}
+
+	e.reEvaluateAllRoutes([]*table.Path{testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")})
+
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"), "VPN path belongs in its VRF table")
+	assert.False(t, f.hasRoute(254, "10.0.0.0/24"),
+		"a VPN path must not be exported through a unicast rule")
+}
+
+// TestReEvaluateWithdrawsUnmatchedRoutes: the withdrawal half must still work.
+func TestReEvaluateWithdrawsUnmatchedRoutes(t *testing.T) {
+	f := newFakeNetlink()
+	e := vrfExportClient(t, f)
+	path := testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")
+
+	e.processUpdate(path)
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"))
+
+	// The VRF is no longer exported, so its route should go.
+	e.vrfRules = map[string]*vrfExportConfig{}
+	e.reEvaluateAllRoutes([]*table.Path{path})
+	assert.False(t, f.hasRoute(100, "10.0.0.0/24"),
+		"a route no longer matching any rule should be withdrawn")
+}
+
+// --- per-prefix rule tracking ---
+
+// TestTwoGlobalRulesBothTracked: every global rule shares the "" bucket, so a
+// single entry per prefix meant the second rule silently overwrote the first's
+// bookkeeping and the first's kernel route leaked with nothing able to reclaim
+// it. Two rules, two tables, two routes, both tracked.
+func TestTwoGlobalRulesBothTracked(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "a", TableId: 100, Metric: 20},
+		&exportRule{Name: "b", TableId: 200, Metric: 20},
+	)
+
+	e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"))
+
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"))
+	assert.True(t, f.hasRoute(200, "10.0.0.0/24"))
+
+	e.mu.RLock()
+	tracked := len(e.exported[""]["10.0.0.0/24"])
+	e.mu.RUnlock()
+	assert.Equal(t, 2, tracked, "both rules' routes must be tracked, not just the last")
+}
+
+// TestWithdrawRemovesEveryRulesRoute: a withdrawal must reclaim all of them.
+func TestWithdrawRemovesEveryRulesRoute(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "a", TableId: 100, Metric: 20},
+		&exportRule{Name: "b", TableId: 200, Metric: 20},
+	)
+
+	path := testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")
+	e.processUpdate(path)
+	assert.Equal(t, 2, f.routeCount())
+
+	e.processUpdate(path.Clone(true))
+	assert.Equal(t, 0, f.routeCount(), "withdrawal must remove every rule's route")
+}
+
+// --- withdrawal ownership ---
+
+// TestWithdrawDoesNotCrossVrfs: the RD is stripped from the tracking key, so a
+// path carrying an RD this daemon does not map used to match a prefix exported
+// under a different VRF and delete it. A peer could blackhole another VRF's
+// route by advertising and withdrawing an unmapped RD.
+func TestWithdrawDoesNotCrossVrfs(t *testing.T) {
+	f := newFakeNetlink()
+	e := vrfExportClient(t, f)
+
+	e.processUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1"))
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"))
+
+	// Same prefix, an RD we have no mapping for.
+	e.processUpdate(testVpnPath(t, "999:1", "10.0.0.0/24", "192.168.1.1").Clone(true))
+
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
+		"a withdrawal for an unmapped RD must not delete another VRF's route")
+}
+
+// TestUnicastWithdrawDoesNotTouchVrfBuckets: a unicast path can only ever have
+// installed into the buckets its own rules target.
+func TestUnicastWithdrawDoesNotTouchVrfBuckets(t *testing.T) {
+	f := newFakeNetlink()
+	e := vrfExportClient(t, f)
+	e.rules = []*exportRule{{Name: "global", TableId: 254, Metric: 20}}
+
+	e.processUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1"))
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"))
+
+	e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1").Clone(true))
+
+	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
+		"a unicast withdrawal must not reach a VRF export bucket")
 }

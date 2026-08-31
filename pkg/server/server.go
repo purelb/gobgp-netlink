@@ -2346,18 +2346,24 @@ func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkE
 			continue
 		}
 
-		for prefix, info := range vrfRoutes {
-			route := &api.ListNetlinkExportResponse_ExportedRoute{
-				Prefix:     prefix,
-				Nexthop:    info.Route.Gw.String(),
-				Vrf:        vrfName,
-				TableId:    int32(info.Route.Table),
-				Metric:     uint32(info.Route.Priority),
-				RuleName:   info.RuleName,
-				ExportedAt: info.ExportedAt.Unix(),
+		// One response per installed route. A prefix can carry more than one
+		// when several rules export it to different tables; previously only the
+		// last rule's entry survived in tracking, so the others were invisible
+		// here as well as unreclaimable.
+		for prefix, entries := range vrfRoutes {
+			for _, info := range entries {
+				fn(&api.ListNetlinkExportResponse{
+					Route: &api.ListNetlinkExportResponse_ExportedRoute{
+						Prefix:     prefix,
+						Nexthop:    info.Route.Gw.String(),
+						Vrf:        vrfName,
+						TableId:    int32(info.Route.Table),
+						Metric:     uint32(info.Route.Priority),
+						RuleName:   info.RuleName,
+						ExportedAt: info.ExportedAt.Unix(),
+					},
+				})
 			}
-
-			fn(&api.ListNetlinkExportResponse{Route: route})
 		}
 	}
 
