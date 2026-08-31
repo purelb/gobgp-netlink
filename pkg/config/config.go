@@ -281,9 +281,10 @@ func InitialConfig(ctx context.Context, bgpServer *server.BgpServer, newConfig *
 		}
 	}
 
-	bgpServer.GetBgpConfig().Netlink = newConfig.Netlink
-	bgpServer.GetBgpConfig().Vrfs = newConfig.Vrfs
-	if err := bgpServer.StartNetlink(ctx); err != nil {
+	// Assign and apply in one locked operation. Writing through GetBgpConfig
+	// here races the import scan and buildVrfMappings, which read these same
+	// fields from the server's own goroutines.
+	if err := bgpServer.StartNetlinkWithConfig(ctx, &newConfig.Netlink, newConfig.Vrfs); err != nil {
 		bgpServer.Log().Error("failed to start netlink",
 			slog.String("Topic", "config"), slog.Any("Error", err))
 	}
@@ -474,16 +475,33 @@ func UpdateConfig(ctx context.Context, bgpServer *server.BgpServer, c, newConfig
 		}
 	}
 
-	// Update netlink configuration
-	if !newConfig.Netlink.Equal(&c.Netlink) {
+	// Update netlink configuration.
+	//
+	// Vrfs is carried too, not just Netlink: UpdateConfig never refreshed it, so
+	// a SIGHUP that changed a VRF's netlink-import or netlink-export block never
+	// reached buildVrfMappings and was silently ignored.
+	if !newConfig.Netlink.Equal(&c.Netlink) || !vrfsEqual(newConfig.Vrfs, c.Vrfs) {
 		bgpServer.Log().Info("netlink config changed, updating",
 			slog.String("Topic", "config"))
-		bgpServer.GetBgpConfig().Netlink = newConfig.Netlink
-		if err := bgpServer.StartNetlink(ctx); err != nil {
+		if err := bgpServer.StartNetlinkWithConfig(ctx, &newConfig.Netlink, newConfig.Vrfs); err != nil {
 			bgpServer.Log().Warn("failed to update netlink config",
 				slog.String("Topic", "config"), slog.Any("Error", err))
 		}
 	}
 
 	return newConfig, nil
+}
+
+// vrfsEqual reports whether two VRF lists are equivalent, using the generated
+// per-VRF comparison so netlink-import and netlink-export blocks are included.
+func vrfsEqual(a, b []oc.Vrf) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !a[i].Equal(&b[i]) {
+			return false
+		}
+	}
+	return true
 }

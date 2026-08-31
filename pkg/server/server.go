@@ -1943,12 +1943,52 @@ func (s *BgpServer) netlinkImportEnabled() bool {
 	return false
 }
 
+// StartNetlink applies the current netlink configuration.
+//
+// It acquires the server lock, so it must NOT be called from inside a
+// mgmtOperation; internal callers that already hold the lock use startNetlink
+// instead. mgmtOperation is not reentrant - it posts to a size-1 channel and
+// waits for a reply only the Serve goroutine can send - so calling this with the
+// lock held deadlocks the daemon.
 func (s *BgpServer) StartNetlink(ctx context.Context) error {
+	return s.mgmtOperation(func() error {
+		return s.startNetlink(ctx)
+	}, false)
+}
+
+// StartNetlinkWithConfig assigns netlink configuration and applies it as one
+// atomic operation.
+//
+// The config goroutine used to write bgpConfig.Netlink and bgpConfig.Vrfs
+// directly and then call StartNetlink, leaving the writes unsynchronised against
+// the import scan and buildVrfMappings, which read exactly those fields. Passing
+// the config in closes that window. A nil section is left unchanged, which is
+// what UpdateConfig needs when only the netlink block changed.
+func (s *BgpServer) StartNetlinkWithConfig(ctx context.Context, netlinkConf *oc.Netlink, vrfs []oc.Vrf) error {
+	return s.mgmtOperation(func() error {
+		if netlinkConf != nil {
+			s.bgpConfig.Netlink = *netlinkConf
+		}
+		if vrfs != nil {
+			s.bgpConfig.Vrfs = vrfs
+		}
+		return s.startNetlink(ctx)
+	}, false)
+}
+
+// startNetlink is the unlocked body. Caller MUST hold shared.mu.
+func (s *BgpServer) startNetlink(ctx context.Context) error {
 	s.logger.Debug("start netlink", slog.Any("start config", s.bgpConfig.Netlink))
 	// Only create the import client when import is actually configured. It starts
 	// a 5s ticker that scans interfaces and mutates the RIB; creating it
 	// unconditionally ran that loop on every gobgpd, including export-only and
 	// netlink-free deployments.
+	if s.netlinkClient != nil && !s.netlinkImportEnabled() {
+		// Import was turned off. Without this the scan goroutine kept running
+		// against configuration that no longer asks for it.
+		s.netlinkClient.stopLocked(true)
+		s.netlinkClient = nil
+	}
 	if s.netlinkClient == nil && s.netlinkImportEnabled() {
 		n, err := newNetlinkClient(s)
 		if err != nil {
@@ -2071,7 +2111,7 @@ func (s *BgpServer) EnableNetlinkImport(ctx context.Context, r *api.EnableNetlin
 			slog.Any("Interfaces", s.bgpConfig.Netlink.Import.InterfaceList))
 
 		// Start/restart netlink with new config
-		return s.StartNetlink(ctx)
+		return s.startNetlink(ctx)
 	}, false)
 }
 
@@ -2127,7 +2167,7 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 			slog.Int("RuleCount", len(s.bgpConfig.Netlink.Export.Rules)))
 
 		// Start/restart netlink with new config
-		return s.StartNetlink(ctx)
+		return s.startNetlink(ctx)
 	}, false)
 }
 
@@ -2143,7 +2183,7 @@ func (s *BgpServer) DisableNetlinkImport(ctx context.Context, r *api.DisableNetl
 		// keep_routes=false (default) means withdraw routes
 		// keep_routes=true means don't withdraw
 		withdrawRoutes := !r.KeepRoutes
-		s.netlinkClient.stop(withdrawRoutes)
+		s.netlinkClient.stopLocked(withdrawRoutes)
 		s.bgpConfig.Netlink.Import.Enabled = false
 		s.netlinkClient = nil
 		s.logger.Info("Disabled netlink import via gRPC",
@@ -2222,7 +2262,7 @@ func (s *BgpServer) DisableVrfNetlinkImport(ctx context.Context, r *api.DisableV
 				s.bgpConfig.Vrfs[i].NetlinkImport.Enabled = false
 				// keep_routes=false (default) means withdraw
 				if !r.KeepRoutes && s.netlinkClient != nil {
-					s.netlinkClient.withdrawVrf(r.Vrf)
+					s.netlinkClient.withdrawVrfLocked(r.Vrf)
 				}
 				s.logger.Info("Disabled VRF netlink import via gRPC",
 					slog.String("Topic", "netlink"),
@@ -2554,6 +2594,24 @@ func (s *BgpServer) StopBgp(ctx context.Context, r *api.StopBgpRequest) error {
 	}
 	err := s.mgmtOperation(func() error {
 		defer s.runningCancel()
+
+		// Stop netlink first, and inside this closure so shared.mu is held.
+		//
+		// It cannot go after mgmtOperation returns: runningCancel above fires on
+		// exit, Serve() then returns, and nothing drains mgmtCh again. Work done
+		// out there holds no lock, so withdrawing routes would mutate the RIB
+		// unsynchronised - the exact defect the import locking work removes.
+		//
+		// Without this the scan goroutine outlives the server entirely, ticking
+		// against a torn-down RIB.
+		if s.netlinkClient != nil {
+			s.netlinkClient.stopLocked(false)
+			s.netlinkClient = nil
+		}
+		if s.netlinkExportClient != nil {
+			_ = s.netlinkExportClient.stop(false)
+			s.netlinkExportClient = nil
+		}
 
 		for address, neighbor := range s.neighborMap {
 			c := &oc.Neighbor{Config: oc.NeighborConfig{
@@ -4143,7 +4201,9 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 		if err != nil {
 			return false, fmt.Errorf("failed to set peer policy: %w", err)
 		}
+		peer.fsm.lock.Lock()
 		peer.fsm.pConf.ApplyPolicy = c.ApplyPolicy
+		peer.fsm.lock.Unlock()
 		needsSoftResetIn = true
 	}
 	original := peer.fsm.pConf
@@ -4195,7 +4255,9 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 	if err != nil {
 		peer.fsm.logger.Error("failed to update prefixLimit", slog.String("Err", err.Error()))
 		// rollback to original state
+		peer.fsm.lock.Lock()
 		peer.fsm.pConf = original
+		peer.fsm.lock.Unlock()
 		return needsSoftResetIn, err
 	}
 
