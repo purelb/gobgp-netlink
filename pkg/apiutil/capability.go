@@ -32,6 +32,12 @@ func NewRouteRefreshCapability(a *bgp.CapRouteRefresh) *api.RouteRefreshCapabili
 	return &api.RouteRefreshCapability{}
 }
 
+// NewExtendedMessageCapability mirrors RFC 8654's empty TLV. There is no
+// payload; the consumer only needs to know the peer advertised it.
+func NewExtendedMessageCapability(a *bgp.CapExtendedMessage) *api.ExtendedMessageCapability {
+	return &api.ExtendedMessageCapability{}
+}
+
 func NewCarryingLabelInfoCapability(a *bgp.CapCarryingLabelInfo) *api.CarryingLabelInfoCapability {
 	return &api.CarryingLabelInfoCapability{}
 }
@@ -152,6 +158,8 @@ func MarshalCapability(value bgp.ParameterCapabilityInterface) (*api.Capability,
 		m.Cap = &api.Capability_Fqdn{Fqdn: NewFQDNCapability(n)}
 	case *bgp.CapSoftwareVersion:
 		m.Cap = &api.Capability_SoftwareVersion{SoftwareVersion: NewSoftwareVersionCapability(n)}
+	case *bgp.CapExtendedMessage:
+		m.Cap = &api.Capability_ExtendedMessage{ExtendedMessage: NewExtendedMessageCapability(n)}
 	case *bgp.CapUnknown:
 		m.Cap = &api.Capability_Unknown{Unknown: NewUnknownCapability(n)}
 	default:

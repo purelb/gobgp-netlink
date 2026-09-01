@@ -3972,6 +3972,17 @@ func (s *BgpServer) ListPeer(ctx context.Context, r *api.ListPeerRequest, fn fun
 			}
 			// FIXME: should remove toConfig() conversion
 			p := oc.NewPeerFromConfigStruct(s.toConfig(peer, getAdvertised))
+			// NewPeerFromConfigStruct returns nil when a capability fails to
+			// marshal, and this loop used to dereference the result
+			// immediately. One unmarshalable capability from one peer therefore
+			// killed the daemon on any ListPeer - which k8gobgp calls on every
+			// reconcile. Skip the peer and say so rather than crash.
+			if p == nil {
+				s.logger.Error("Failed to convert peer for ListPeer; skipping",
+					slog.String("Topic", "Peer"),
+					slog.String("Key", k.String()))
+				continue
+			}
 			// ListPeer is a read API and was returning the TCP-MD5 key in clear
 			// to any client that can reach the gRPC socket. Redact here rather
 			// than in the converter: InitialConfig reuses it to build AddPeer
