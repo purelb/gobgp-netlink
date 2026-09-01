@@ -2347,7 +2347,10 @@ func unmarshalExComm(a *api.ExtendedCommunitiesAttribute) (*bgp.PathAttributeExt
 			community = bgp.NewTrafficRemarkExtended(uint8(v.Dscp))
 		case *api.ExtendedCommunity_Mup:
 			v := comm.Mup
-			community = bgp.NewMUPExtended(uint16(v.SegmentId2), v.SegmentId4)
+			// NewMUPExtended gained an explicit sub-type upstream; it previously
+			// hard-coded EC_SUBTYPE_MUP_DIRECT_SEG, so pass that to keep the
+			// behaviour this fork's api.ExtendedCommunity_Mup already implies.
+			community = bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, uint16(v.SegmentId2), v.SegmentId4)
 		case *api.ExtendedCommunity_Vpls:
 			v := comm.Vpls
 			community = bgp.NewVPLSExtended(uint8(v.ControlFlags), uint16(v.Mtu))

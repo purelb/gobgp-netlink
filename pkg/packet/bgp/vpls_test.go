@@ -55,7 +55,69 @@ func Test_VPLSNLRI(t *testing.T) {
 	t.Logf("%s", n1)
 	t.Logf("%s", n2)
 
-	assert.Equal(n1, n1)
+	assert.Equal(n1, n2)
+}
+
+func Test_VPLSNLRI_decodeRejectsUnsupportedLength(t *testing.T) {
+	// Len() reports a fixed 19 bytes to the MP_(UN)REACH framing loop, so a
+	// VPLS NLRI whose length field is not 17 must be rejected. Before the fix
+	// the 12-byte BGP-AD form decoded successfully into a VPLSNLRI with a nil
+	// RD, which both mis-framed the following NLRI and panicked on re-serialize.
+	adNLRI := &VPLSNLRI{}
+	// length = 12 (BGP-AD) followed by a 12-byte body.
+	err := adNLRI.decodeFromBytes([]byte{0x00, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
+	require.Error(t, err)
+	assert.Nil(t, adNLRI.rd)
+
+	// length = 32 (oversized) with a body long enough to get past the
+	// len(data) >= length+2 check.
+	longNLRI := &VPLSNLRI{}
+	buf := make([]byte, 2+32)
+	buf[1] = 0x20
+	err = longNLRI.decodeFromBytes(buf)
+	require.Error(t, err)
+}
+
+func Test_VPLSNLRI_mpReachRejectsBGPADNLRI(t *testing.T) {
+	// A 12-byte RFC 6074 BGP-AD NLRI plus 5 trailing bytes is exactly the 19
+	// bytes that VPLSNLRI.Len() reports, so the MP_REACH framing loop consumed
+	// it without complaint. Before the fix, DecodeFromBytes returned no error
+	// and left one VPLS route with a nil RD, which panicked on re-serialize.
+	buf := []byte{
+		0x90, 0x0e, 0x00, 0x1c, // MP_REACH_NLRI, extended length, 28 bytes
+		0x00, 0x19, 0x41, // AFI 25 (L2VPN), SAFI 65 (VPLS)
+		0x04, 0xc0, 0x00, 0x02, 0x07, // next hop 192.0.2.7
+		0x00,       // SNPA count
+		0x00, 0x0c, // NLRI length = 12 (BGP-AD)
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // RD
+		0x01, 0x02, 0x03, 0x04, // VSI-ID
+		0x00, 0x00, 0x00, 0x00, 0x00, // padding up to Len()
+	}
+	m := &PathAttributeMpReachNLRI{}
+	err := m.DecodeFromBytes(buf)
+	require.Error(t, err)
+	require.Empty(t, m.Value)
+}
+
+func Test_VPLSNLRI_serializeKeepsBottomOfStack(t *testing.T) {
+	// The decoder keeps only the 20-bit label value, so the serializer has to
+	// put the bottom-of-stack bit back. Without it gobgp re-advertises a Label
+	// Base that does not match the one it received.
+	wire := []byte{
+		0x00, 0x11, // NLRI length = 17
+		0x00, 0x00, 0xfd, 0xf9, 0x00, 0x00, 0x00, 0x68, // RD 65017:104
+		0x00, 0x01, // VE ID
+		0x00, 0x01, // VE Block Offset
+		0x00, 0x08, // VE Block Size
+		0xc3, 0x50, 0x01, // Label Base 800000, bottom of stack
+	}
+	n := &VPLSNLRI{}
+	require.NoError(t, n.decodeFromBytes(wire))
+	assert.Equal(t, uint32(800000), n.LabelBlockBase)
+
+	buf, err := n.Serialize()
+	require.NoError(t, err)
+	assert.Equal(t, wire, buf)
 }
 
 func Test_VPLSNLRI_decoding(t *testing.T) {

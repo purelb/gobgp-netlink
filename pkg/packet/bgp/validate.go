@@ -2,7 +2,6 @@ package bgp
 
 import (
 	"fmt"
-	"math"
 	"net"
 	"net/netip"
 	"slices"
@@ -160,6 +159,9 @@ func ValidateAttribute(a PathAttributeInterface, rfs map[Family]BGPAddPathMode, 
 	case *PathAttributeAsPath:
 		if isEBGP {
 			if isConfed {
+				if len(p.Value) == 0 {
+					return false, NewMessageError(eCode, eSubCodeMalformedAspath, nil, "empty AS_PATH for confederation eBGP")
+				}
 				if segType := p.Value[0].GetType(); segType != BGP_ASPATH_ATTR_TYPE_CONFED_SEQ {
 					return false, NewMessageError(eCode, eSubCodeMalformedAspath, nil, fmt.Sprintf("segment type is not confederation seq (%d)", segType))
 				}
@@ -230,50 +232,52 @@ func validatePathAttributeFlags(t BGPAttrType, flags BGPAttrFlag) string {
 	return ""
 }
 
-func validateAsPathValueBytes(data []byte) (bool, error) {
+func validateAsPathValueBytes(data []byte, options ...*MarshallingOption) (bool, error) {
 	eCode := uint8(BGP_ERROR_UPDATE_MESSAGE_ERROR)
 	eSubCode := uint8(BGP_ERROR_SUB_MALFORMED_AS_PATH)
 	if len(data)%2 != 0 {
 		return false, NewMessageError(eCode, eSubCode, nil, "AS PATH length is not odd")
 	}
 
-	tryParse := func(data []byte, use4byte bool) (bool, error) {
-		for len(data) > 0 {
-			if len(data) < 2 {
-				return false, NewMessageError(eCode, eSubCode, nil, "AS PATH header is short")
-			}
-			segType := data[0]
-			if segType == 0 || segType > 4 {
-				return false, NewMessageError(eCode, eSubCode, nil, "unknown AS_PATH seg type")
-			}
-			asNum := data[1]
-			data = data[2:]
-			if asNum == 0 || int(asNum) > math.MaxUint8 {
-				return false, NewMessageError(eCode, eSubCode, nil, "AS PATH the number of AS is incorrect")
-			}
-			segLength := int(asNum)
-			if use4byte {
-				segLength *= 4
-			} else {
-				segLength *= 2
-			}
-			if segLength > len(data) {
-				return false, NewMessageError(eCode, eSubCode, nil, "seg length is short")
-			}
-			data = data[segLength:]
+	// Determine AS encoding format
+	// Default: 4-byte AS (modern standard)
+	// Use2ByteAS=true: 2-byte AS (legacy peers without 4-byte AS capability)
+	use2ByteAS := false
+	for _, opt := range options {
+		if opt != nil && opt.Use2ByteAS {
+			use2ByteAS = true
+			break
 		}
-		return true, nil
 	}
-	_, err := tryParse(data, true)
-	if err == nil {
-		return true, nil
-	}
+	use4ByteAS := !use2ByteAS
 
-	_, err = tryParse(data, false)
-	if err == nil {
-		return false, nil
+	// Validate AS_PATH structure
+	d := data
+	for len(d) > 0 {
+		if len(d) < 2 {
+			return false, NewMessageError(eCode, eSubCode, nil, "AS PATH header is short")
+		}
+		segType := d[0]
+		if segType == 0 || segType > 4 {
+			return false, NewMessageError(eCode, eSubCode, nil, "unknown AS_PATH seg type")
+		}
+		asNum := d[1]
+		d = d[2:]
+		if asNum == 0 {
+			return false, NewMessageError(eCode, eSubCode, nil, "AS PATH segment has zero AS count")
+		}
+		segLength := int(asNum)
+		if use4ByteAS {
+			segLength *= 4
+		} else {
+			segLength *= 2
+		}
+		if segLength > len(d) {
+			return false, NewMessageError(eCode, eSubCode, nil, "seg length is short")
+		}
+		d = d[segLength:]
 	}
-	return false, NewMessageError(eCode, eSubCode, nil, "can't parse AS_PATH")
+	return use4ByteAS, nil
 }
 
 func ValidateOpenMsg(m *BGPOpen, expectedAS uint32, myAS uint32, myId netip.Addr) (uint32, error) {

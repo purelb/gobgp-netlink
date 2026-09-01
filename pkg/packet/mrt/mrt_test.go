@@ -108,11 +108,60 @@ func TestMrtPeerIndexTable(t *testing.T) {
 	assert.Equal(t, reflect.DeepEqual(pt1, pt2), true)
 }
 
+func TestParsePeerIndexTable_LargeViewNameDoesNotPanic(t *testing.T) {
+	// Regression: viewLen is uint16 in the wire format. Using uint16 arithmetic
+	// in slice indices can wrap (e.g., 6+0xffff == 5), causing a panic even when
+	// the buffer is large enough.
+	viewLen := 0xffff
+
+	data := make([]byte, 0, 4+2+viewLen+2)
+	data = append(data, 192, 0, 2, 1) // CollectorBgpId
+	data = append(data, 0xff, 0xff)   // ViewName length
+	data = append(data, bytes.Repeat([]byte{'a'}, viewLen)...)
+	data = append(data, 0x00, 0x00) // PeerNum
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("parsePeerIndexTable must not panic: %v", r)
+		}
+	}()
+
+	tbl, err := parsePeerIndexTable(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tbl.ViewName) != viewLen {
+		t.Fatalf("unexpected view name length: got %d want %d", len(tbl.ViewName), viewLen)
+	}
+}
+
+func TestParseRibEntry_OversizedAttrLengthRejected(t *testing.T) {
+	// Regression: p.Len() is an int, and an extended-length path attribute can
+	// be up to 65539 bytes. Casting it to uint16 before the "exceeds remaining
+	// attribute length" check wraps the value (65539 -> 3), letting an attribute
+	// that overruns the declared attribute region slip past the bound. The parser
+	// then consumes bytes past the region (belonging to following records) and
+	// mis-frames every subsequent RIB entry.
+	valueLen := 0xffff // p.Len() == 4 + 0xffff == 65539
+
+	var data []byte
+	data = append(data, 0x00, 0x01)             // PeerIndex
+	data = append(data, 0x00, 0x00, 0x00, 0x00) // OriginatedTime
+	data = append(data, 0x00, 0x03)             // Attribute Length: region declared as 3 bytes
+	// optional extended-length unknown attribute overrunning the 3-byte region
+	data = append(data, 0x90, 0xff, 0xff, 0xff) // flags(OPTIONAL|EXTENDED_LENGTH), type, length=0xffff
+	data = append(data, bytes.Repeat([]byte{0}, valueLen)...)
+
+	if _, _, err := parseRibEntry(data, bgp.RF_IPv4_UC, false); err == nil {
+		t.Fatal("parseRibEntry accepted an attribute overrunning the declared attribute length")
+	}
+}
+
 func TestMrtRibEntry(t *testing.T) {
 	aspath1 := []bgp.AsPathParamInterface{
-		bgp.NewAsPathParam(2, []uint16{1000}),
-		bgp.NewAsPathParam(1, []uint16{1001, 1002}),
-		bgp.NewAsPathParam(2, []uint16{1003, 1004}),
+		bgp.NewAs4PathParam(2, []uint32{1000}),
+		bgp.NewAs4PathParam(1, []uint32{1001, 1002}),
+		bgp.NewAs4PathParam(2, []uint32{1003, 1004}),
 	}
 	panh, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("129.1.1.2"))
 	p := []bgp.PathAttributeInterface{
@@ -139,9 +188,9 @@ func TestMrtRibEntry(t *testing.T) {
 
 func TestMrtRibEntryWithAddPath(t *testing.T) {
 	aspath1 := []bgp.AsPathParamInterface{
-		bgp.NewAsPathParam(2, []uint16{1000}),
-		bgp.NewAsPathParam(1, []uint16{1001, 1002}),
-		bgp.NewAsPathParam(2, []uint16{1003, 1004}),
+		bgp.NewAs4PathParam(2, []uint32{1000}),
+		bgp.NewAs4PathParam(1, []uint32{1001, 1002}),
+		bgp.NewAs4PathParam(2, []uint32{1003, 1004}),
 	}
 	panh, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("129.1.1.2"))
 	p := []bgp.PathAttributeInterface{
@@ -167,9 +216,9 @@ func TestMrtRibEntryWithAddPath(t *testing.T) {
 
 func TestMrtRib(t *testing.T) {
 	aspath1 := []bgp.AsPathParamInterface{
-		bgp.NewAsPathParam(2, []uint16{1000}),
-		bgp.NewAsPathParam(1, []uint16{1001, 1002}),
-		bgp.NewAsPathParam(2, []uint16{1003, 1004}),
+		bgp.NewAs4PathParam(2, []uint32{1000}),
+		bgp.NewAs4PathParam(1, []uint32{1001, 1002}),
+		bgp.NewAs4PathParam(2, []uint32{1003, 1004}),
 	}
 	panh, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("129.1.1.2"))
 	p := []bgp.PathAttributeInterface{
@@ -199,9 +248,9 @@ func TestMrtRib(t *testing.T) {
 
 func TestMrtRibWithAddPath(t *testing.T) {
 	aspath1 := []bgp.AsPathParamInterface{
-		bgp.NewAsPathParam(2, []uint16{1000}),
-		bgp.NewAsPathParam(1, []uint16{1001, 1002}),
-		bgp.NewAsPathParam(2, []uint16{1003, 1004}),
+		bgp.NewAs4PathParam(2, []uint32{1000}),
+		bgp.NewAs4PathParam(1, []uint32{1001, 1002}),
+		bgp.NewAs4PathParam(2, []uint32{1003, 1004}),
 	}
 	panh, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("129.1.1.2"))
 	p := []bgp.PathAttributeInterface{

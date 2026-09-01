@@ -115,6 +115,76 @@ func Test_RTRErrorReport(t *testing.T) {
 	verifyRTRMessage(t, NewRTRErrorReport(CORRUPT_DATA, errPDU, errText2))
 }
 
+func Test_ParseRTR_ErrorReportRejectsOversizedTextLen(t *testing.T) {
+	// Regression for OSS-Fuzz OOM: RTRErrorReport.DecodeFromBytes used TextLen
+	// from the input without validating against available bytes, causing huge
+	// allocations.
+	//
+	// Build a minimal ErrorReport with PDULen=0 and an absurd TextLen, while the
+	// buffer itself is tiny.
+	data := make([]byte, 21)
+	data[0] = 0
+	data[1] = RTR_ERROR_REPORT
+	// ErrorCode (2 bytes) left as 0
+	// Len (4 bytes) = 21
+	putUint32BE(data[4:8], uint32(len(data)))
+	// PDULen (4 bytes) = 0
+	putUint32BE(data[8:12], 0)
+	// TextLen (4 bytes) = very large
+	putUint32BE(data[12:16], 0xfffffff0)
+
+	_, err := ParseRTR(data)
+	require.Error(t, err)
+}
+
+func Test_ParseRTR_IPPrefixRejectsOutOfRangeLength(t *testing.T) {
+	// RFC8210 5.1 bounds Prefix Length and Max Length to the address
+	// family maximum (0..32 for IPv4, 0..128 for IPv6) and requires Max
+	// Length to be no less than Prefix Length. A length past the maximum
+	// reaches net.CIDRMask via table.NewROA, which returns a nil mask, so
+	// the ROA is stored with a bogus default-route network.
+	ipv4PDU := func(prefixLen, maxLen uint8) []byte {
+		data := make([]byte, RTR_IPV4_PREFIX_LEN)
+		data[1] = RTR_IPV4_PREFIX
+		putUint32BE(data[4:8], RTR_IPV4_PREFIX_LEN)
+		data[9] = prefixLen
+		data[10] = maxLen
+		return data
+	}
+	ipv6PDU := func(prefixLen, maxLen uint8) []byte {
+		data := make([]byte, RTR_IPV6_PREFIX_LEN)
+		data[1] = RTR_IPV6_PREFIX
+		putUint32BE(data[4:8], RTR_IPV6_PREFIX_LEN)
+		data[9] = prefixLen
+		data[10] = maxLen
+		return data
+	}
+
+	_, err := ParseRTR(ipv4PDU(33, 32))
+	require.Error(t, err)
+	_, err = ParseRTR(ipv4PDU(24, 33))
+	require.Error(t, err)
+	_, err = ParseRTR(ipv6PDU(129, 128))
+	require.Error(t, err)
+
+	// Max Length must not be less than Prefix Length.
+	_, err = ParseRTR(ipv4PDU(24, 16))
+	require.Error(t, err)
+	_, err = ParseRTR(ipv6PDU(64, 48))
+	require.Error(t, err)
+
+	// A prefix within range still decodes.
+	_, err = ParseRTR(ipv4PDU(24, 32))
+	require.NoError(t, err)
+}
+
+func putUint32BE(b []byte, v uint32) {
+	b[0] = byte(v >> 24)
+	b[1] = byte(v >> 16)
+	b[2] = byte(v >> 8)
+	b[3] = byte(v)
+}
+
 //nolint:errcheck
 func FuzzParseRTR(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {

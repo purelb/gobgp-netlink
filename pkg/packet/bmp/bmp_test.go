@@ -25,11 +25,17 @@ import (
 )
 
 func verify(t *testing.T, m1 *BMPMessage) {
-	buf1, _ := m1.Serialize()
+	buf1, err := m1.Serialize()
+	require.NoError(t, err)
 	m2, err := ParseBMPMessage(buf1)
 	require.NoError(t, err)
 
-	assert.Equal(t, m1, m2)
+	// Compare the wire form, not the two structs. A decoded message keeps
+	// the length fields it read off the wire, and a message built in memory
+	// does not, so the structs do not match.
+	buf2, err := m2.Serialize()
+	require.NoError(t, err)
+	assert.Equal(t, buf1, buf2)
 }
 
 func Test_Initiation(t *testing.T) {
@@ -59,11 +65,76 @@ func Test_PeerUpNotification(t *testing.T) {
 	verify(t, NewBMPPeerUpNotification(*p1, netip.MustParseAddr("fe80::6e40:8ff:feab:2c2a"), 10, 100, m, m))
 }
 
+func Test_PeerUpNotificationWithInfoTLVs(t *testing.T) {
+	m := bgp.NewTestBGPOpenMessage()
+	p0 := NewBMPPeerHeader(0, 0, 1000, netip.MustParseAddr("10.0.0.1"), 70000, netip.MustParseAddr("10.0.0.2"), 1)
+	verify(t, NewBMPPeerUpNotification(
+		*p0,
+		netip.MustParseAddr("10.0.0.3"),
+		10,
+		100,
+		m,
+		m,
+		NewBMPInfoTLVString(BMP_INIT_TLV_TYPE_VRF_TABLE_NAME, "global"),
+		NewBMPInfoTLVString(BMP_INIT_TLV_TYPE_VRF_TABLE_NAME, "blue"),
+	))
+}
+
+func Test_NewBMPPeerHeader_LocalRIBDoesNotAutoSetVFlag(t *testing.T) {
+	p := NewBMPPeerHeader(
+		BMP_PEER_TYPE_LOCAL_RIB,
+		0,
+		1000,
+		netip.MustParseAddr("2001:db8::1"),
+		65000,
+		netip.MustParseAddr("10.0.0.2"),
+		1,
+	)
+	assert.Equal(t, BMP_PEER_TYPE_LOCAL_RIB, p.PeerType)
+	assert.Equal(t, uint8(0), p.Flags)
+}
+
+func Test_LocalRIBPeerHeader_FilteredFlagRoundTrip(t *testing.T) {
+	m := bgp.NewTestBGPUpdateMessage()
+	p := NewBMPPeerHeader(
+		BMP_PEER_TYPE_LOCAL_RIB,
+		BMP_PEER_FLAG_IPV6, // RFC9069: F flag (Filtered) for peer type 3
+		1000,
+		netip.Addr{},
+		0,
+		netip.MustParseAddr("10.0.0.2"),
+		1,
+	)
+	assert.True(t, p.isLocRIBInstancePeer())
+	assert.True(t, p.isFilteredLocRIB())
+	verify(t, NewBMPRouteMonitoring(*p, m))
+}
+
 func Test_PeerDownNotification(t *testing.T) {
 	p0 := NewBMPPeerHeader(0, 0, 1000, netip.MustParseAddr("10.0.0.1"), 70000, netip.MustParseAddr("10.0.0.2"), 1)
 	verify(t, NewBMPPeerDownNotification(*p0, BMP_PEER_DOWN_REASON_LOCAL_NO_NOTIFICATION, nil, []byte{0x3, 0xb}))
 	m := bgp.NewBGPNotificationMessage(1, 2, nil)
 	verify(t, NewBMPPeerDownNotification(*p0, BMP_PEER_DOWN_REASON_LOCAL_BGP_NOTIFICATION, m, nil))
+}
+
+func Test_PeerDownNotificationWithInfoTLVs(t *testing.T) {
+	p0 := NewBMPPeerHeader(
+		BMP_PEER_TYPE_LOCAL_RIB,
+		BMP_PEER_FLAG_IPV6,
+		1000,
+		netip.Addr{},
+		0,
+		netip.MustParseAddr("10.0.0.2"),
+		1,
+	)
+	verify(t, NewBMPPeerDownNotification(
+		*p0,
+		BMP_PEER_DOWN_REASON_TLV_FOLLOWS,
+		nil,
+		nil,
+		NewBMPInfoTLVString(BMP_INIT_TLV_TYPE_VRF_TABLE_NAME, "blue"),
+		NewBMPInfoTLVString(BMP_INIT_TLV_TYPE_VRF_TABLE_NAME, "global"),
+	))
 }
 
 func Test_RouteMonitoring(t *testing.T) {
@@ -103,7 +174,12 @@ func Test_RouteMonitoringAddPath(t *testing.T) {
 	u2 := m2.Body.(*BMPRouteMonitoring).BGPUpdate.Body.(*bgp.BGPUpdate).NLRI[0]
 	assert.Equal(t, u2.ID, uint32(10))
 
-	assert.Equal(t, m1, m2)
+	// Compare the wire form, not the two structs. The decoded BGP UPDATE
+	// keeps the length it read off the wire, and the one built in memory
+	// does not.
+	buf2, err := m2.Serialize(opt)
+	require.NoError(t, err)
+	assert.Equal(t, buf1, buf2)
 }
 
 func Test_StatisticsReport(t *testing.T) {
@@ -155,6 +231,27 @@ func Test_RouteMonitoringUnknownType(t *testing.T) {
 	data := []byte{0x03, 0x00, 0x00, 0x00, 0xe4, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x01, 0x04, 0x70, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x1b, 0x1b, 0xd8, 0xda, 0xfc, 0xa4, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x2b, 0xb5, 0x00, 0x08, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x2b, 0xb5, 0x7f, 0xff, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xe8, 0x80, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xeb, 0x80, 0x01, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x80, 0x02, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xeb, 0x80, 0x03, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x80, 0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x54, 0x80, 0x05, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc8, 0x80, 0x06, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0xa0}
 	_, err := ParseBMPMessage(data)
 	require.NoError(t, err)
+}
+
+func Test_TLV16RejectsShortLength(t *testing.T) {
+	// The Termination "Reason" and Route-Mirroring "Information" TLVs both
+	// carry a fixed 2-octet value, but their value parsers read those two
+	// octets without checking the declared TLV length. The enclosing loop
+	// only guarantees len(data) >= Length, so a TLV announcing a length
+	// below 2 made ParseValue read past its own value into the following
+	// TLV. Reject the mismatched length up front, like the Stats TLV parsers.
+
+	// type=Reason(1), length=1, then a String(0) TLV; the 2-octet read
+	// straddles the TLV boundary.
+	shortReason := []byte{0x00, 0x01, 0x00, 0x01, 0xaa, 0x00, 0x00, 0x00, 0x01, 0x58}
+	require.Error(t, (&BMPTermination{}).ParseBody(nil, shortReason))
+	// A correctly sized Reason still decodes.
+	require.NoError(t, (&BMPTermination{}).ParseBody(nil, []byte{0x00, 0x01, 0x00, 0x02, 0x00, 0x01}))
+
+	// type=Information(1), length=1, followed by another Information TLV.
+	shortInfo := []byte{0x00, 0x01, 0x00, 0x01, 0xaa, 0x00, 0x01, 0x00, 0x02, 0xbb, 0xcc}
+	require.Error(t, (&BMPRouteMirroring{}).ParseBody(nil, shortInfo))
+	require.NoError(t, (&BMPRouteMirroring{}).ParseBody(nil, []byte{0x00, 0x01, 0x00, 0x02, 0x00, 0x01}))
 }
 
 //nolint:errcheck

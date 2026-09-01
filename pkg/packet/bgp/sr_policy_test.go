@@ -1,9 +1,12 @@
 package bgp
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/go-test/deep"
@@ -26,7 +29,7 @@ func TestBindingSIDRoundTrip(t *testing.T) {
 					Length: 2,
 				},
 				Flags: 0x0,
-				BSID:  nil,
+				BSID:  &BSID{Value: make([]byte, 0)},
 			},
 			fail: false,
 		},
@@ -85,6 +88,62 @@ func TestBindingSIDRoundTrip(t *testing.T) {
 				t.Fatalf("expected: %+v does not match result: %+v", tt.input, result)
 			}
 		})
+	}
+}
+
+func TestSRv6BindingSIDRoundTrip(t *testing.T) {
+	input := &TunnelEncapSubTLVSRv6BSID{
+		TunnelEncapSubTLV: TunnelEncapSubTLV{
+			Type:   ENCAP_SUBTLV_TYPE_SRBINDING_SID,
+			Length: 18,
+		},
+		Flags: 0,
+		BSID: &BSID{
+			Value: net.ParseIP("2001:db8::1").To16(),
+		},
+	}
+	b, err := input.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize failed: %v", err)
+	}
+	// Type (13), Length (18), Flags, RESERVED, then the full 16-octet SID.
+	expected := append([]byte{0x0d, 0x12, 0x00, 0x00}, net.ParseIP("2001:db8::1").To16()...)
+	if !bytes.Equal(b, expected) {
+		t.Fatalf("wire mismatch:\ngot:  %x\nwant: %x", b, expected)
+	}
+	result := &TunnelEncapSubTLVSRv6BSID{}
+	if err := result.DecodeFromBytes(b); err != nil {
+		t.Fatalf("DecodeFromBytes failed: %v", err)
+	}
+	if !reflect.DeepEqual(input, result) {
+		t.Logf("Diffs: %+v", deep.Equal(input, result))
+		t.Fatalf("expected: %+v does not match result: %+v", input, result)
+	}
+}
+
+func TestSRBSIDNoBSIDRendering(t *testing.T) {
+	// A length-2 SR Binding SID sub-TLV has flags and reserved byte but no
+	// BSID value. String() and MarshalJSON() must not panic when BSID is absent.
+	tlv := &TunnelEncapSubTLVSRBSID{
+		TunnelEncapSubTLV: TunnelEncapSubTLV{Type: 1, Length: 2},
+		Flags:             0x80,
+	}
+	b, err := tlv.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize failed: %v", err)
+	}
+	result := &TunnelEncapSubTLVSRBSID{}
+	if err := result.DecodeFromBytes(b); err != nil {
+		t.Fatalf("DecodeFromBytes failed: %v", err)
+	}
+
+	s := result.String()
+	if !strings.Contains(s, "n/a") {
+		t.Errorf("String() should contain \"n/a\" for absent BSID, got: %s", s)
+	}
+
+	if _, err := json.Marshal(result); err != nil {
+		t.Errorf("MarshalJSON() returned error: %v", err)
 	}
 }
 
@@ -282,5 +341,39 @@ func TestSegmentListRoundTrip(t *testing.T) {
 				t.Fatalf("expected: %+v does not match result: %+v", tt.input, result)
 			}
 		})
+	}
+}
+
+func Test_SRPolicyNLRIEndpointClampedToLength(t *testing.T) {
+	// Two SR Policy IPv4 NLRIs packed in one MP_REACH buffer. Each NLRI is
+	// 13 bytes: length(1) + distinguisher(4) + color(4) + endpoint(4).
+	mkV4 := func(ep [4]byte) []byte {
+		b := []byte{SRPolicyIPv4NLRILen, 0, 0, 0, 1, 0, 0, 0, 2}
+		return append(b, ep[:]...)
+	}
+	buf := append(mkV4([4]byte{10, 0, 0, 1}), mkV4([4]byte{10, 0, 0, 2})...)
+
+	n, err := NLRIFromSlice(RF_SR_POLICY_IPv4, buf)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	s := n.(*SRPolicyNLRI)
+	if len(s.Endpoint) != 4 {
+		t.Fatalf("endpoint absorbed sibling NLRI bytes: got %d bytes (%x), want 4", len(s.Endpoint), s.Endpoint)
+	}
+	if got := net.IP(s.Endpoint).To4().String(); got != "10.0.0.1" {
+		t.Fatalf("endpoint mismatch: got %s, want 10.0.0.1", got)
+	}
+
+	// IPv6 endpoint is 16 bytes.
+	v6 := []byte{SRPolicyIPv6NLRILen, 0, 0, 0, 1, 0, 0, 0, 2}
+	v6 = append(v6, net.ParseIP("2001:db8::1").To16()...)
+	v6 = append(v6, 0xde, 0xad) // trailing bytes from a following NLRI
+	n, err = NLRIFromSlice(RF_SR_POLICY_IPv6, v6)
+	if err != nil {
+		t.Fatalf("decode v6 failed: %v", err)
+	}
+	if got := len(n.(*SRPolicyNLRI).Endpoint); got != 16 {
+		t.Fatalf("v6 endpoint absorbed trailing bytes: got %d bytes, want 16", got)
 	}
 }
