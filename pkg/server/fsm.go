@@ -1208,7 +1208,16 @@ func (h *fsmHandler) recvMessageWithError(conn net.Conn, stateReasonCh chan<- fs
 
 	m, err := bgp.ParseBGPBody(hd, bodyBuf, &bgp.MarshallingOption{AddPath: h.fsm.familyMap.Load().(map[bgp.Family]bgp.BGPAddPathMode)})
 	if err != nil {
-		handling = h.handlingError(m, err, useRevisedError)
+		// ParseBGPBody returns a nil message for a header-level failure - an
+		// unknown message type, for one - and handlingError dereferences
+		// m.Header.Type unconditionally. That path is reachable in OPENSENT,
+		// before any OPEN has been validated, so a peer could kill the process
+		// with a ~19-byte payload and no credentials.
+		if m == nil {
+			handling = bgp.ERROR_HANDLING_SESSION_RESET
+		} else {
+			handling = h.handlingError(m, err, useRevisedError)
+		}
 		h.fsm.bgpMessageStateUpdate(0, true)
 	} else {
 		h.fsm.bgpMessageStateUpdate(m.Header.Type, true)
