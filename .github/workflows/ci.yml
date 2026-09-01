@@ -25,9 +25,16 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
+      # buf-setup-action still declares node20 and there is no release that
+      # does not - v1.50.0 (Jan 2025) is the latest and GitHub forces it onto
+      # node24 - so that deprecation warning cannot be cleared here.
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: latest
+          # It resolves the buf release through the GitHub API; without a token
+          # that is the anonymous rate limit, which this job now leans on for
+          # three steps rather than two.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: buf lint
         run: buf lint proto/
@@ -64,7 +71,7 @@ jobs:
         with:
           go-version: "stable"
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           skip-cache: true
 
