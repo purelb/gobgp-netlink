@@ -1124,6 +1124,14 @@ func (s *BgpServer) propagateUpdate(peer *peer, pathList []*table.Path) {
 			}
 		}
 
+		// RFC 4271: LOCAL_PREF is iBGP-only. It was stripped on egress but not
+		// on ingress, so an eBGP peer could set it and outrank every other
+		// source of a prefix in best-path selection - and best path is what
+		// drives RouteReplace into this node's kernel FIB.
+		if peer != nil && !peer.isIBGPPeer() && !peer.isRouteServerClient() {
+			path.RemoveLocalPref()
+		}
+
 		policyOptions := &table.PolicyOptions{
 			Validate: s.roaTable.Validate,
 		}
@@ -1404,6 +1412,9 @@ func (s *BgpServer) propagateUpdateToNeighbors(rib *table.TableManager, source *
 func (s *BgpServer) stopNeighbor(peer *peer, oldState bgp.FSMState, e *fsmMsg) {
 	peer.stopPeerRestarting()
 	delete(s.neighborMap, netip.MustParseAddr(peer.ID()))
+	// peer.ID() is always an address, so it cannot collide with the global RIB
+	// name; only route server clients actually hold an assignment.
+	s.policy.DeletePeerPolicy(peer.ID())
 	peer.stopFSM()
 	s.broadcastPeerState(peer, bgp.BGP_FSM_IDLE, oldState, e)
 }
@@ -3921,6 +3932,12 @@ func (s *BgpServer) ListPeerGroup(ctx context.Context, r *api.ListPeerGroupReque
 				continue
 			}
 			pg := oc.NewPeerGroupFromConfigStruct(group.Conf)
+			// ListPeerGroup is a read API; the TCP-MD5 key is not part of the
+			// answer. The converter itself cannot strip it because InitialConfig
+			// reuses it to build AddPeerGroup requests, where the key is needed.
+			if pg.Conf != nil {
+				pg.Conf.AuthPassword = ""
+			}
 			l = append(l, pg)
 		}
 		return nil
@@ -3955,6 +3972,15 @@ func (s *BgpServer) ListPeer(ctx context.Context, r *api.ListPeerRequest, fn fun
 			}
 			// FIXME: should remove toConfig() conversion
 			p := oc.NewPeerFromConfigStruct(s.toConfig(peer, getAdvertised))
+			// ListPeer is a read API and was returning the TCP-MD5 key in clear
+			// to any client that can reach the gRPC socket. Redact here rather
+			// than in the converter: InitialConfig reuses it to build AddPeer
+			// requests, and grpc_server reads Conf.AuthPassword back out of
+			// those, so stripping it there would silently disable MD5 for every
+			// TOML-configured session.
+			if p.Conf != nil {
+				p.Conf.AuthPassword = ""
+			}
 			for _, family := range peer.configuredRFlist() {
 				for i, afisafi := range p.AfiSafis {
 					if !afisafi.Config.Enabled {
