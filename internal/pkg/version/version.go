@@ -59,3 +59,8 @@ func Version() string {
 func ShortVersion() string {
 	return fmt.Sprintf("%s:%02d.%02d.%02d", FORK_NAME, FORK_MAJOR, FORK_MINOR, FORK_PATCH)
 }
+
+// BaseVersion returns the upstream GoBGP release this fork is based on.
+func BaseVersion() string {
+	return fmt.Sprintf("gobgp-%d.%d.%d", MAJOR, MINOR, PATCH)
+}

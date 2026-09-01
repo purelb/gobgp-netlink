@@ -257,6 +257,7 @@ func main() {
 	prometheus.MustRegister(metrics.NewBgpCollector(bgpServer))
 	prometheus.MustRegister(metrics.NewNetlinkCollector(bgpServer))
 	prometheus.MustRegister(fsmTimingCollector)
+	prometheus.MustRegister(metrics.NewBuildInfoCollector())
 	go bgpServer.Serve()
 
 	if opts.UseSdNotify {

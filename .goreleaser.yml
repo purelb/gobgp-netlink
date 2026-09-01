@@ -12,7 +12,7 @@ builds:
     flags:
       - -a
       - -tags=netgo
-    ldflags: -s
+    ldflags: -s -X github.com/osrg/gobgp/v4/internal/pkg/version.COMMIT={{.FullCommit}}
     goos:
       - linux
     goarch:
@@ -27,7 +27,7 @@ builds:
     flags:
       - -a
       - -tags=netgo
-    ldflags: -s
+    ldflags: -s -X github.com/osrg/gobgp/v4/internal/pkg/version.COMMIT={{.FullCommit}}
     goos:
       - linux
     goarch:
