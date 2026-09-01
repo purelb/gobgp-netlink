@@ -134,18 +134,25 @@ func ValidateAttribute(a PathAttributeInterface, rfs map[Family]BGPAddPathMode, 
 	case *PathAttributeNextHop:
 
 		isZero := func(ip net.IP) bool {
+			if len(ip) == 0 {
+				return false
+			}
 			res := ip[0] & 0xff
 			return res == 0x00
 		}
 
 		isClassDorE := func(ip net.IP) bool {
-			if ip.To4() == nil {
+			if len(ip) == 0 || ip.To4() == nil {
 				// needs to verify ipv6 too?
 				return false
 			}
 			res := ip[0] & 0xe0
 			return res == 0xe0
 		}
+		// DecodeFromBytes returns before assigning Value when the attribute
+		// length is neither 4 nor 16, and treat-as-withdraw (the default) keeps
+		// the attribute rather than discarding it, so an invalid Value reaches
+		// here and AsSlice() yields an empty slice.
 		addr := net.IP(p.Value.AsSlice())
 		// check IP address represents host address
 		if !loopbackNextHopAllowed && p.Value.IsLoopback() || isZero(addr) || isClassDorE(addr) {
