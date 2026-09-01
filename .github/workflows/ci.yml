@@ -35,6 +35,26 @@ jobs:
       - name: buf format check
         run: buf format --diff --exit-code
 
+      # proto/buf.yaml has declared `breaking: use: [FILE]` since the config was
+      # written, but nothing ever ran it. A wire-breaking change - a reused field
+      # number, a changed type - reached main unremarked.
+      - name: buf breaking
+        run: buf breaking proto/ --against "https://github.com/purelb/gobgp-netlink.git#branch=main,subdir=proto"
+        # A deliberate wire break (the planned field renumbering) fails here by
+        # design; that PR removes this step for one commit and restores it.
+
+      # api/*.pb.go is generated and committed. Nothing checked that it still
+      # matches the .proto, so a hand edit or a stale regeneration was invisible.
+      - name: buf generate is up to date
+        working-directory: proto
+        run: |
+          buf generate
+          cd ..
+          if ! git diff --exit-code -- api/; then
+            echo "::error::api/ is stale - run 'buf generate proto/' and commit the result"
+            exit 1
+          fi
+
   golangci:
     name: lint
     runs-on: ubuntu-22.04
