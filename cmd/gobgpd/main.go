@@ -118,9 +118,13 @@ func main() {
 		}
 	}
 
-	if opts.CPUs == 0 {
-		runtime.GOMAXPROCS(runtime.NumCPU())
-	} else {
+	// Only override GOMAXPROCS when the operator asked for a specific value.
+	// Setting it to NumCPU() defeated the cgroup CPU limit: in a container
+	// limited to 500m on a 64-core node the runtime started 64 Ps, burned the
+	// quota in well under a millisecond and then throttled for the rest of the
+	// period. Since the go directive moved to 1.25 the runtime derives the
+	// default from the cgroup limit itself, so leaving it alone is correct.
+	if opts.CPUs != 0 {
 		if runtime.NumCPU() < opts.CPUs {
 			logger.Error("invalid number of CPUs", slog.Int("Available", runtime.NumCPU()), slog.Int("Specified", opts.CPUs))
 			os.Exit(1)
