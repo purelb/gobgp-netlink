@@ -1218,7 +1218,15 @@ func (h *fsmHandler) recvMessageWithError(conn net.Conn, stateReasonCh chan<- fs
 
 	useRevisedError := h.fsm.isTreatAsWithdraw
 
-	m, err := bgp.ParseBGPBody(hd, bodyBuf, &bgp.MarshallingOption{AddPath: h.fsm.familyMap.Load().(map[bgp.Family]bgp.BGPAddPathMode)})
+	// Use2ByteAS is not optional here. The merge-base decoder guessed the AS
+	// width with a try-4-byte-then-try-2-byte heuristic; v4.9.0's replaces that
+	// with an explicit option (validate.go: `if opt != nil && opt.Use2ByteAS`),
+	// so taking pkg/packet without passing it makes every AS_PATH from a peer
+	// that did not negotiate 4-byte AS fail to parse.
+	m, err := bgp.ParseBGPBody(hd, bodyBuf, &bgp.MarshallingOption{
+		AddPath:    h.fsm.familyMap.Load().(map[bgp.Family]bgp.BGPAddPathMode),
+		Use2ByteAS: h.fsm.twoByteAsTrans,
+	})
 	if err != nil {
 		// ParseBGPBody returns a nil message for a header-level failure - an
 		// unknown message type, for one - and handlingError dereferences
