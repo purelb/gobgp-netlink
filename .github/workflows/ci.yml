@@ -744,8 +744,6 @@ jobs:
         with:
           name: artifact
           path: artifact
-        with:
-          path: artifact
       - name: test
         run: |
           docker load < artifact/gobgp.tar
