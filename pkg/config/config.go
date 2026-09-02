@@ -421,6 +421,14 @@ func InitialConfig(ctx context.Context, bgpServer *server.BgpServer, newConfig *
 	if err := addNeighbors(ctx, bgpServer, added, stopOnConfigError); err != nil {
 		return nil, err
 	}
+	// Assign and apply in one locked operation. Writing through GetBgpConfig
+	// here races the import scan and buildVrfMappings, which read these same
+	// fields from the server's own goroutines.
+	if err := bgpServer.StartNetlinkWithConfig(ctx, &newConfig.Netlink, newConfig.Vrfs); err != nil {
+		bgpServer.Log().Error("failed to start netlink",
+			slog.String("Topic", "config"), slog.Any("Error", err))
+	}
+
 	return newConfig, nil
 }
 
