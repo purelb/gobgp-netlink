@@ -134,3 +134,5 @@ class GoBGPTestBase(unittest.TestCase):
 
         wait_for_completion(lambda: len(self.g3.get_global_rib(rf="vpnv4")) == 1)
         wait_for_completion(lambda: len(self.g2.get_global_rib()) == 0)
+
+

@@ -55,12 +55,16 @@ Try [a binary release](https://github.com/purelb/gobgp-netlink/releases/latest).
 - [Dynamic Neighbor](docs/sources/dynamic-neighbor.md)
 - [eBGP Multihop](docs/sources/ebgp-multihop.md)
 - [TTL Security](docs/sources/ttl-security.md)
+- [BFD](docs/sources/bfd.md)
 - [Confederation](docs/sources/bgp-confederation.md)
 - Data Center Networking
   - [Unnumbered BGP](docs/sources/unnumbered-bgp.md)
 - [Sentry](docs/sources/sentry.md)
 
 ### Externals
+
+- [Tutorial: Using GoBGP as an IXP connecting router](http://www.slideshare.net/shusugimoto1986/tutorial-using-gobgp-as-an-ixp-connecting-router)
+- [GoBGP.nix: A NixOS module for GoBGP. Containing a working FRR implementation and a rich set of Options](https://github.com/wavelens/gobgp.nix)
 
 ## Community, discussion and support
 

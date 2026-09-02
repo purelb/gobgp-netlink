@@ -693,12 +693,71 @@ jobs:
             -c "/test/scenario_test/netlink_test.sh"
 
   # Summary job for branch protection - reports single "ci" status
+  crossbuild:
+    name: crossbuild
+    strategy:
+      matrix:
+        GOOS: ["freebsd", "openbsd", "darwin", "windows"]
+        GOARCH: ["amd64"]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+      - run: |
+          go env
+          go build ./cmd/gobgp
+          go build ./cmd/gobgpd
+        env:
+          GOOS: ${{ matrix.GOOS }}
+          GOARCH: ${{ matrix.GOARCH }}
+  tcp-md5:
+    name: tcp-md5
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: artifact
+          path: artifact
+        with:
+          path: artifact
+      - name: test
+        run: |
+          docker load < artifact/gobgp.tar
+          sudo apt-get update
+          sudo apt-get install -y linux-modules-extra-$(uname -r)
+          sudo modprobe vrf
+          sudo pip3 install -r test/pip-requires.txt
+          PYTHONPATH=test python3 -m pytest test/scenario_test/tcp_md5_test.py --gobgp-image gobgp -x -s
+  unit386:
+    name: unit386
+    runs-on: ubuntu-24.04
+    env:
+      GOARCH: 386
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+      - run: |
+          sudo apt update
+          sudo apt install -y gcc-multilib g++-multilib
+          go env GOARCH CGO_ENABLED
+          go test -v -timeout 240s ./...
+
   ci:
     name: ci
     runs-on: ubuntu-22.04
     if: always()
     needs:
       - unit
+      - unit386
+      - crossbuild
+      - tcp-md5
       - protobuf-check
       - yang-check
       - golangci

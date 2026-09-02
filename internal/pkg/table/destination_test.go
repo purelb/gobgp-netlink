@@ -31,31 +31,28 @@ import (
 func TestDestinationNewIPv4(t *testing.T) {
 	peerD := DestCreatePeer()
 	pathD := DestCreatePath(peerD)
-	ipv4d := NewDestination(pathD[0].GetNlri(), 0)
+	ipv4d := newDestination(pathD[0].GetNlri(), 0)
 	assert.NotNil(t, ipv4d)
 }
 
 func TestDestinationNewIPv6(t *testing.T) {
 	peerD := DestCreatePeer()
 	pathD := DestCreatePath(peerD)
-	ipv6d := NewDestination(pathD[0].GetNlri(), 0)
+	ipv6d := newDestination(pathD[0].GetNlri(), 0)
 	assert.NotNil(t, ipv6d)
 }
 
-func TestDestinationSetNlri(t *testing.T) {
-	dd := &Destination{}
-	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("13.2.3.1/24"))
-	dd.setNlri(nlri)
-	r_nlri := dd.GetNlri()
-	assert.Equal(t, r_nlri, nlri)
-}
-
 func TestDestinationGetNlri(t *testing.T) {
-	dd := &Destination{}
+	dd := &destination{}
 	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.110.123.1/24"))
-	dd.setNlri(nlri)
+	dd.nlri = nlri
 	r_nlri := dd.GetNlri()
 	assert.Equal(t, r_nlri, nlri)
+
+	nlri2, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.110.123.2/24"))
+	dd2 := newDestination(nlri2, 0)
+	r_nlri2 := dd2.GetNlri()
+	assert.Equal(t, r_nlri2, nlri2)
 }
 
 func TestCalculate2(t *testing.T) {
@@ -72,7 +69,7 @@ func TestCalculate2(t *testing.T) {
 	peer1 := &PeerInfo{AS: 1, Address: netip.MustParseAddr("1.1.1.1")}
 	path1 := ProcessMessage(update1, peer1, time.Now(), false)[0]
 
-	d := NewDestination(nlri, 0)
+	d := newDestination(nlri, 0)
 	d.Calculate(logger, path1)
 
 	// suppose peer2 sends grammaatically correct but semantically flawed update message
@@ -201,7 +198,7 @@ func TestTimeTieBreaker(t *testing.T) {
 	peer2 := &PeerInfo{AS: 2, LocalAS: 1, Address: netip.MustParseAddr("2.2.2.2"), ID: netip.MustParseAddr("2.2.2.2")} // weaker router-id
 	path2 := ProcessMessage(updateMsg, peer2, time.Now().Add(-1*time.Hour), false)[0]                                  // older than path1
 
-	d := NewDestination(nlri, 0)
+	d := newDestination(nlri, 0)
 	d.Calculate(logger, path1)
 	d.Calculate(logger, path2)
 
@@ -210,7 +207,7 @@ func TestTimeTieBreaker(t *testing.T) {
 
 	// this option disables tie breaking by age
 	SelectionOptions.ExternalCompareRouterId = true
-	d = NewDestination(nlri, 0)
+	d = newDestination(nlri, 0)
 	d.Calculate(logger, path1)
 	d.Calculate(logger, path2)
 
@@ -334,17 +331,18 @@ func TestMultipath(t *testing.T) {
 	updateMsg = bgp.NewBGPUpdateMessage(nil, pathAttributes, []bgp.PathNLRI{{NLRI: nlri}})
 	path2 := ProcessMessage(updateMsg, peer2, time.Now(), false)[0]
 
-	d := NewDestination(nlri, 0)
+	d := newDestination(nlri, 0)
 	d.Calculate(logger, path2)
 
-	best, old, multi := d.Calculate(logger, path1).GetChanges(GLOBAL_RIB_NAME, 0, false)
+	dd, _ := d.Calculate(logger, path1)
+	best, old, multi := dd.GetChanges(GLOBAL_RIB_NAME, 0, false)
 	assert.NotNil(t, best)
 	assert.Equal(t, old, path2)
 	assert.Equal(t, len(multi), 2)
 	assert.Equal(t, len(d.GetKnownPathList(GLOBAL_RIB_NAME, 0)), 2)
 
 	path3 := path2.Clone(true)
-	dd := d.Calculate(logger, path3)
+	dd, _ = d.Calculate(logger, path3)
 	best, old, multi = dd.GetChanges(GLOBAL_RIB_NAME, 0, false)
 	assert.Nil(t, best)
 	assert.Equal(t, old, path1)
@@ -362,7 +360,7 @@ func TestMultipath(t *testing.T) {
 	}
 	updateMsg = bgp.NewBGPUpdateMessage(nil, pathAttributes, []bgp.PathNLRI{{NLRI: nlri}})
 	path4 := ProcessMessage(updateMsg, peer3, time.Now(), false)[0]
-	dd = d.Calculate(logger, path4)
+	dd, _ = d.Calculate(logger, path4)
 	best, _, multi = dd.GetChanges(GLOBAL_RIB_NAME, 0, false)
 	assert.NotNil(t, best)
 	assert.Equal(t, len(multi), 1)
@@ -377,7 +375,8 @@ func TestMultipath(t *testing.T) {
 	}
 	updateMsg = bgp.NewBGPUpdateMessage(nil, pathAttributes, []bgp.PathNLRI{{NLRI: nlri}})
 	path5 := ProcessMessage(updateMsg, peer2, time.Now(), false)[0]
-	best, _, multi = d.Calculate(logger, path5).GetChanges(GLOBAL_RIB_NAME, 0, false)
+	dd, _ = d.Calculate(logger, path5)
+	best, _, multi = dd.GetChanges(GLOBAL_RIB_NAME, 0, false)
 	assert.NotNil(t, best)
 	assert.Equal(t, len(multi), 2)
 	assert.Equal(t, len(d.GetKnownPathList(GLOBAL_RIB_NAME, 0)), 3)
@@ -387,7 +386,7 @@ func TestMultipath(t *testing.T) {
 
 func TestIdMap(t *testing.T) {
 	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.10.0.101/24"))
-	d := NewDestination(nlri, 64)
+	d := newDestination(nlri, 64)
 	for i := 0; ; i++ {
 		if id, err := d.localIdMap.FindandSetZeroBit(); err == nil {
 			assert.Equal(t, uint(i+1), id)
@@ -440,14 +439,19 @@ func TestDestination_Calculate_ExplicitWithdraw(t *testing.T) {
 	p1 := NewPath(bgp.RF_IPv4_UC, peer1, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
 	p2 := NewPath(bgp.RF_IPv4_UC, peer2, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
 
-	d := NewDestination(nlri, 1, p1, p2)
+	d := newDestination(nlri, 1, p1, p2)
 
 	// Test explicit withdraw
 	withdrawPath := NewPath(bgp.RF_IPv4_UC, peer1, bgp.PathNLRI{NLRI: nlri}, true, attrs, time.Now(), false)
-	update := d.Calculate(logger, withdrawPath)
+	dd, oldPath := d.Calculate(logger, withdrawPath)
+	update := dd
 
+	assert.Same(t, p1, oldPath)
 	assert.Len(t, update.KnownPathList, 1)
 	assert.Equal(t, peer2.Address.String(), update.KnownPathList[0].GetSource().Address.String())
+
+	_, oldPath = d.Calculate(logger, withdrawPath)
+	assert.Nil(t, oldPath)
 }
 
 func TestDestination_Calculate_ImplicitWithdraw(t *testing.T) {
@@ -458,9 +462,10 @@ func TestDestination_Calculate_ImplicitWithdraw(t *testing.T) {
 	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.0.0.0/24"))
 	peer1 := &PeerInfo{AS: 65001, Address: netip.MustParseAddr("1.1.1.1")}
 
-	// Create initial path
 	p1 := NewPath(bgp.RF_IPv4_UC, peer1, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
-	d := NewDestination(nlri, 0, p1)
+	d := newDestination(nlri, 0)
+	_, oldPath := d.Calculate(logger, p1)
+	assert.Nil(t, oldPath)
 
 	// Send new path from same peer (should trigger implicit withdraw)
 	newAttrs := []bgp.PathAttributeInterface{
@@ -468,8 +473,10 @@ func TestDestination_Calculate_ImplicitWithdraw(t *testing.T) {
 		bgp.NewPathAttributeMultiExitDisc(100),
 	}
 	p2 := NewPath(bgp.RF_IPv4_UC, peer1, bgp.PathNLRI{NLRI: nlri}, false, newAttrs, time.Now(), false)
-	update := d.Calculate(logger, p2)
+	dd, oldPath := d.Calculate(logger, p2)
+	update := dd
 
+	assert.Same(t, p1, oldPath)
 	assert.Len(t, update.KnownPathList, 1)
 	assert.Equal(t, uint32(100), update.KnownPathList[0].getPathAttr(bgp.BGP_ATTR_TYPE_MULTI_EXIT_DISC).(*bgp.PathAttributeMultiExitDisc).Value)
 }
@@ -484,7 +491,7 @@ func TestDestination_GetBestPath_InvalidNexthop(t *testing.T) {
 
 	p1 := NewPath(bgp.RF_IPv4_UC, peer1, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
 
-	d := NewDestination(nlri, 0, p1)
+	d := newDestination(nlri, 0, p1)
 
 	p1.IsNexthopInvalid = false
 	bestPath := d.GetBestPath("", 0)
@@ -507,7 +514,7 @@ func TestDestination_Select_BestAndMultiPath(t *testing.T) {
 	p1 := NewPath(bgp.RF_IPv4_UC, peer1, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
 	p2 := NewPath(bgp.RF_IPv4_UC, peer2, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
 
-	d := NewDestination(nlri, 0, p1, p2)
+	d := newDestination(nlri, 0, p1, p2)
 
 	// Test best path selection
 	selected := d.Select(DestinationSelectOption{Best: true})
@@ -653,7 +660,7 @@ func BenchmarkMultiPath(b *testing.B) {
 
 	b.Run("Benchmark Calculate", func(b *testing.B) {
 		for range b.N {
-			d := NewDestination(nlri, 0)
+			d := newDestination(nlri, 0)
 			b.StartTimer()
 			for j := range pathList {
 				d.Calculate(logger, pathList[j])
@@ -663,7 +670,7 @@ func BenchmarkMultiPath(b *testing.B) {
 	})
 
 	b.Run("Benchmark GetMultiBestPath", func(b *testing.B) {
-		d := NewDestination(nlri, 0)
+		d := newDestination(nlri, 0)
 		for j := range pathList {
 			d.Calculate(logger, pathList[j])
 		}
@@ -685,11 +692,12 @@ func TestDestination_Calculate_AddAndWithdrawPath(t *testing.T) {
 	p2 := NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("13.2.5.0/24"))
 	p3 := NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
-	d := NewDestination(nlri, 0, p1, p2, p3)
+	d := newDestination(nlri, 0, p1, p2, p3)
 
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("13.2.6.0/24"))
 	p4 := NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
-	update := d.Calculate(logger, p4)
+	dd, _ := d.Calculate(logger, p4)
+	update := dd
 	assert.Len(t, update.KnownPathList, 3)
 	assert.Len(t, update.KnownPathList, 3)
 	assert.NotEqualValues(t, update.OldKnownPathList, update.KnownPathList)
@@ -699,8 +707,8 @@ func TestDestination_Calculate_AddAndWithdrawPath(t *testing.T) {
 	// p1 is no implecit withdrawn
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("13.2.3.0/24"))
 	p1 = NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), true)
-	d = NewDestination(nlri, 0, p1, p2, p3)
-	update = d.Calculate(logger, p4)
+	d = newDestination(nlri, 0, p1, p2, p3)
+	update, _ = d.Calculate(logger, p4)
 	assert.Len(t, update.KnownPathList, 3)
 	assert.Len(t, update.KnownPathList, 3)
 	assert.NotEqualValues(t, update.OldKnownPathList, update.KnownPathList)
@@ -711,8 +719,8 @@ func TestDestination_Calculate_AddAndWithdrawPath(t *testing.T) {
 
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("13.2.8.0/24"))
 	p5 := NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
-	d = NewDestination(nlri, 0, p1, p2, p3, p5)
-	update = d.Calculate(logger, p4)
+	d = newDestination(nlri, 0, p1, p2, p3, p5)
+	update, _ = d.Calculate(logger, p4)
 
 	assert.Len(t, update.KnownPathList, 4)
 	assert.Len(t, update.KnownPathList, 4)
@@ -721,4 +729,230 @@ func TestDestination_Calculate_AddAndWithdrawPath(t *testing.T) {
 	assert.Equal(t, "13.2.3.0/24", update.KnownPathList[1].GetNlri().String())
 	assert.Equal(t, "13.2.5.0/24", update.KnownPathList[2].GetNlri().String())
 	assert.Equal(t, "13.2.8.0/24", update.KnownPathList[3].GetNlri().String())
+}
+
+// TestNHT_InvalidateNewPathWithoutMED reproduces the zebra-nht flaky failure:
+// a locally-added path (no MED) whose nexthop is already unreachable must
+// produce a withdrawal when the nexthop-invalidated clone is fed back through
+// Calculate/GetChanges.
+func TestNHT_InvalidateNewPathWithoutMED(t *testing.T) {
+	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.3.2.0/24"))
+
+	// Step 1: local path added via CLI — no MED, no source (nil → localSource)
+	attrs := []bgp.PathAttributeInterface{
+		bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_INCOMPLETE),
+	}
+	nh, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("10.3.1.1"))
+	attrs = append(attrs, nh)
+
+	original := NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+
+	// Step 2: path is added to destination (first time — no old entry)
+	d := &destination{nlri: nlri, localIdMap: NewBitmap(64)}
+	d.localIdMap.Flag(0)
+	update1, _ := d.Calculate(logger, original)
+
+	best1, old1, _ := update1.GetChanges(GLOBAL_RIB_NAME, 0, false)
+	assert.NotNil(t, best1, "new path should become best")
+	assert.Nil(t, old1, "no old path expected")
+	assert.False(t, best1.IsWithdraw, "new path should not be a withdrawal")
+	assert.False(t, best1.IsNexthopInvalid, "new path should be valid")
+
+	// Step 3: clone with IsNexthopInvalid=true (what applyToPathList does)
+	invalidClone := original.Clone(false)
+	invalidClone.IsNexthopInvalid = true
+
+	// Step 4: feed the invalidated clone into Calculate (what updatePath does)
+	update2, _ := d.Calculate(logger, invalidClone)
+
+	best2, old2, _ := update2.GetChanges(GLOBAL_RIB_NAME, 0, false)
+	assert.NotNil(t, best2, "invalidation should produce a change")
+	assert.NotNil(t, old2, "old path should exist")
+	assert.True(t, best2.IsWithdraw, "invalidated path must produce a withdrawal")
+}
+
+// TestNHT_InvalidateExistingPathWithMED tests the case where a path that
+// already has a MED (from a previous NHT metric) becomes unreachable.
+func TestNHT_InvalidateExistingPathWithMED(t *testing.T) {
+	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.3.1.0/24"))
+
+	attrs := []bgp.PathAttributeInterface{
+		bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_INCOMPLETE),
+		bgp.NewPathAttributeMultiExitDisc(20),
+	}
+	nh, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("10.3.1.1"))
+	attrs = append(attrs, nh)
+
+	original := NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+
+	d := &destination{nlri: nlri, localIdMap: NewBitmap(64)}
+	d.localIdMap.Flag(0)
+	d.Calculate(logger, original)
+
+	// Invalidate
+	invalidClone := original.Clone(false)
+	invalidClone.IsNexthopInvalid = true
+
+	update, _ := d.Calculate(logger, invalidClone)
+	best, old, _ := update.GetChanges(GLOBAL_RIB_NAME, 0, false)
+
+	assert.NotNil(t, best, "invalidation should produce a change")
+	assert.NotNil(t, old, "old path should exist")
+	assert.True(t, best.IsWithdraw, "invalidated path must produce a withdrawal")
+}
+
+// TestNHT_RevalidatePath tests that a path that was invalid becomes valid
+// again when the nexthop is restored.
+func TestNHT_RevalidatePath(t *testing.T) {
+	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.3.1.0/24"))
+
+	attrs := []bgp.PathAttributeInterface{
+		bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_INCOMPLETE),
+		bgp.NewPathAttributeMultiExitDisc(20),
+	}
+	nh, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("10.3.1.1"))
+	attrs = append(attrs, nh)
+
+	original := NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+
+	d := &destination{nlri: nlri, localIdMap: NewBitmap(64)}
+	d.localIdMap.Flag(0)
+	d.Calculate(logger, original)
+
+	// Invalidate
+	invalidClone := original.Clone(false)
+	invalidClone.IsNexthopInvalid = true
+	d.Calculate(logger, invalidClone)
+
+	// Revalidate with new MED
+	validClone := invalidClone.Clone(false)
+	validClone.IsNexthopInvalid = false
+	err := validClone.SetMed(30, true)
+	assert.NoError(t, err)
+
+	update, _ := d.Calculate(logger, validClone)
+	best, _, _ := update.GetChanges(GLOBAL_RIB_NAME, 0, false)
+
+	assert.NotNil(t, best, "revalidation should produce a change")
+	assert.False(t, best.IsWithdraw, "revalidated path should not be a withdrawal")
+	assert.False(t, best.IsNexthopInvalid, "revalidated path should be valid")
+	med, err := best.GetMed()
+	assert.NoError(t, err)
+	assert.Equal(t, uint32(30), med)
+}
+
+// TestNHT_NewPathWithInvalidNexthop tests that a newly added path with
+// IsNexthopInvalid=true is not treated as the best path. This covers the
+// scenario where a path is added via API while its nexthop is already
+// unreachable in the nexthop cache.
+func TestNHT_NewPathWithInvalidNexthop(t *testing.T) {
+	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.3.2.0/24"))
+
+	attrs := []bgp.PathAttributeInterface{
+		bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_INCOMPLETE),
+	}
+	nh, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("10.3.1.1"))
+	attrs = append(attrs, nh)
+
+	// First-time path that is already nexthop-invalid.
+	newPath := NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+	newPath.IsNexthopInvalid = true
+
+	d := &destination{nlri: nlri, localIdMap: NewBitmap(64)}
+	d.localIdMap.Flag(0)
+
+	update, _ := d.Calculate(logger, newPath)
+	best, old, _ := update.GetChanges(GLOBAL_RIB_NAME, 0, false)
+
+	// No old path, new path is invalid -> no change should be emitted.
+	assert.Nil(t, best, "invalid new path must not be advertised as best")
+	assert.Nil(t, old, "no old path expected")
+}
+
+func makeDeltaTestPath(t *testing.T, prefix, nexthop, src string, srcAS uint32, remoteID uint32) *Path {
+	t.Helper()
+
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(prefix))
+	assert.NoError(t, err)
+	nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr(nexthop))
+	assert.NoError(t, err)
+	attrs := []bgp.PathAttributeInterface{
+		bgp.NewPathAttributeOrigin(0),
+		bgp.NewPathAttributeAsPath([]bgp.AsPathParamInterface{
+			bgp.NewAsPathParam(2, []uint16{uint16(srcAS)}),
+		}),
+		nh,
+	}
+	source := &PeerInfo{
+		AS:      srcAS,
+		ID:      netip.MustParseAddr(src),
+		Address: netip.MustParseAddr(src),
+	}
+	return NewPath(
+		bgp.RF_IPv4_UC,
+		source,
+		bgp.PathNLRI{NLRI: nlri, ID: remoteID},
+		false,
+		attrs,
+		time.Unix(100, 0),
+		false,
+	)
+}
+
+func TestUpdateGetMultiBestPathDiff(t *testing.T) {
+	oldA := makeDeltaTestPath(t, "10.10.0.0/24", "192.0.2.1", "198.51.100.1", 65001, 1)
+	oldB := makeDeltaTestPath(t, "10.10.0.0/24", "192.0.2.2", "198.51.100.2", 65002, 2)
+	newC := makeDeltaTestPath(t, "10.10.0.0/24", "192.0.2.3", "198.51.100.3", 65003, 3)
+
+	u := &Update{
+		OldKnownPathList: []*Path{oldA, oldB},
+		KnownPathList:    []*Path{oldB, newC},
+	}
+
+	update, withdraw := u.GetMultiBestPathDiff(GLOBAL_RIB_NAME)
+	assert.Len(t, update, 1)
+	assert.Len(t, withdraw, 1)
+	assert.Equal(t, newC.GetNexthop(), update[0].GetNexthop())
+	assert.Equal(t, oldA.GetNexthop(), withdraw[0].GetNexthop())
+	assert.True(t, withdraw[0].IsWithdraw)
+}
+
+// TestGetChanges_NonKeyNlriOrNexthopOnlyChange reproduces update suppression
+// for a locally re-added path whose route key is unchanged but whose NLRI
+// payload (MUP TEID) or MP_REACH nexthop is: such a change must be
+// re-advertised, even though the attributes hash (which excludes
+// MP_REACH_NLRI) stays the same.
+func TestGetChanges_NonKeyNlriOrNexthopOnlyChange(t *testing.T) {
+	newPath := func(teid, nexthop netip.Addr) *Path {
+		p := mupT1stPath(t, teid, nexthop)
+		p.SetHash(attrsHashLikeEagerSites(p))
+		return p
+	}
+
+	p1 := newPath(netip.MustParseAddr("0.0.0.100"), netip.MustParseAddr("10.0.0.1"))
+	d := &destination{nlri: p1.GetNlri(), localIdMap: NewBitmap(64)}
+	d.localIdMap.Flag(0)
+
+	u1, _ := d.Calculate(logger, p1)
+	best1, _, _ := u1.GetChanges(GLOBAL_RIB_NAME, 0, false)
+	assert.NotNil(t, best1, "initial add should be advertised")
+
+	// same route key and nexthop, TEID changed
+	p2 := newPath(netip.MustParseAddr("0.0.0.200"), netip.MustParseAddr("10.0.0.1"))
+	assert.Equal(t, p1.GetHash(), p2.GetHash())
+	u2, _ := d.Calculate(logger, p2)
+	best2, _, _ := u2.GetChanges(GLOBAL_RIB_NAME, 0, false)
+	assert.NotNil(t, best2, "TEID-only change should be advertised")
+
+	// same route key and TEID, nexthop changed
+	p3 := newPath(netip.MustParseAddr("0.0.0.200"), netip.MustParseAddr("10.0.0.2"))
+	u3, _ := d.Calculate(logger, p3)
+	best3, _, _ := u3.GetChanges(GLOBAL_RIB_NAME, 0, false)
+	assert.NotNil(t, best3, "nexthop-only change should be advertised")
+
+	// unchanged re-add stays suppressed
+	p4 := newPath(netip.MustParseAddr("0.0.0.200"), netip.MustParseAddr("10.0.0.2"))
+	u4, _ := d.Calculate(logger, p4)
+	best4, _, _ := u4.GetChanges(GLOBAL_RIB_NAME, 0, false)
+	assert.Nil(t, best4, "identical re-add should stay suppressed")
 }

@@ -17,6 +17,7 @@ package apiutil
 
 import (
 	"bytes"
+	"encoding/binary"
 	"net/netip"
 	"testing"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_OriginAttribute(t *testing.T) {
@@ -39,6 +41,53 @@ func Test_OriginAttribute(t *testing.T) {
 
 	output, _ := NewOriginAttributeFromNative(n.(*bgp.PathAttributeOrigin))
 	assert.Equal(input.Origin, output.Origin)
+}
+
+func Test_LsAttributeDelayMetricRoundTrip(t *testing.T) {
+	assert := assert.New(t)
+
+	input := &api.LsAttribute{
+		Link: &api.LsAttributeLink{
+			UnidirectionalLinkDelayAnomalous:       true,
+			UnidirectionalLinkDelay:                8516,
+			MinMaxUnidirectionalLinkDelayAnomalous: true,
+			MinUnidirectionalLinkDelay:             8511,
+			MaxUnidirectionalLinkDelay:             8527,
+			UnidirectionalDelayVariation:           51,
+		},
+	}
+
+	native, err := UnmarshalLsAttribute(input)
+	assert.NoError(err)
+
+	if assert.NotNil(native.Link.UnidirectionalLinkDelay) {
+		assert.True(native.Link.UnidirectionalLinkDelay.Flags.Anomalous)
+		assert.Equal(uint32(8516), native.Link.UnidirectionalLinkDelay.Delay)
+	}
+
+	if assert.NotNil(native.Link.MinMaxUnidirectionalLinkDelay) {
+		assert.True(native.Link.MinMaxUnidirectionalLinkDelay.Flags.Anomalous)
+		assert.Equal(uint32(8511), native.Link.MinMaxUnidirectionalLinkDelay.MinDelay)
+		assert.Equal(uint32(8527), native.Link.MinMaxUnidirectionalLinkDelay.MaxDelay)
+	}
+
+	if assert.NotNil(native.Link.UnidirectionalDelayVariation) {
+		assert.Equal(uint32(51), *native.Link.UnidirectionalDelayVariation)
+	}
+
+	pathAttrLs := &bgp.PathAttributeLs{
+		TLVs: bgp.NewLsAttributeTLVs(native),
+	}
+	output, err := NewLsAttributeFromNative(pathAttrLs)
+	assert.NoError(err)
+	if assert.NotNil(output.Link) {
+		assert.True(output.Link.UnidirectionalLinkDelayAnomalous)
+		assert.Equal(uint32(8516), output.Link.UnidirectionalLinkDelay)
+		assert.True(output.Link.MinMaxUnidirectionalLinkDelayAnomalous)
+		assert.Equal(uint32(8511), output.Link.MinUnidirectionalLinkDelay)
+		assert.Equal(uint32(8527), output.Link.MaxUnidirectionalLinkDelay)
+		assert.Equal(uint32(51), output.Link.UnidirectionalDelayVariation)
+	}
 }
 
 func Test_AsPathAttribute(t *testing.T) {
@@ -454,6 +503,45 @@ func Test_MpReachNLRIAttribute_EVPN_MAC_IP_Route(t *testing.T) {
 			EthernetTag: 100,
 			MacAddress:  "aa:bb:cc:dd:ee:ff",
 			IpAddress:   "192.168.101.1",
+			Labels:      []uint32{200},
+		}}},
+	}
+	input := &api.MpReachNLRIAttribute{
+		Family: &api.Family{
+			Afi:  api.Family_AFI_L2VPN,
+			Safi: api.Family_SAFI_EVPN,
+		},
+		NextHops: []string{"192.168.1.1"},
+		Nlris:    nlris,
+	}
+
+	a := &api.Attribute{Attr: &api.Attribute_MpReach{MpReach: input}}
+	n, err := UnmarshalAttribute(a)
+	assert.NoError(err)
+
+	output, _ := NewMpReachNLRIAttributeFromNative(n.(*bgp.PathAttributeMpReachNLRI))
+	assert.True(proto.Equal(input, output))
+}
+
+func Test_MpReachNLRIAttribute_EVPN_MAC_IP_Route_MacOnly(t *testing.T) {
+	assert := assert.New(t)
+
+	rd := &api.RouteDistinguisher{Rd: &api.RouteDistinguisher_IpAddress{
+		IpAddress: &api.RouteDistinguisherIPAddress{
+			Admin:    "1.1.1.1",
+			Assigned: 100,
+		},
+	}}
+	nlris := []*api.NLRI{
+		{Nlri: &api.NLRI_EvpnMacadv{EvpnMacadv: &api.EVPNMACIPAdvertisementRoute{
+			Rd: rd,
+			Esi: &api.EthernetSegmentIdentifier{
+				Type:  0,
+				Value: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9},
+			},
+			EthernetTag: 100,
+			MacAddress:  "aa:bb:cc:dd:ee:ff",
+			IpAddress:   "",
 			Labels:      []uint32{200},
 		}}},
 	}
@@ -1044,6 +1132,23 @@ func Test_MpReachNLRIAttribute_MUPType1SessionTransformedRoute(t *testing.T) {
 				SourceAddress:         "10.0.0.2",
 			},
 		},
+		{
+			name: "IPv4_with_TLVs",
+			in: &api.MUPType1SessionTransformedRoute{
+				Rd:                    rd,
+				Prefix:                "192.168.100.1/32",
+				Teid:                  12345,
+				Qfi:                   9,
+				EndpointAddressLength: 32,
+				EndpointAddress:       "10.0.0.1",
+				Tlvs: []*api.MUPTLV{
+					{Tlv: &api.MUPTLV_Unknown{Unknown: &api.MUPUnknownTLV{
+						Type:  200,
+						Value: []byte{0xde, 0xad, 0xbe, 0xef},
+					}}},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		nlris := []*api.NLRI{{Nlri: &api.NLRI_MupType_1SessionTransformed{MupType_1SessionTransformed: tt.in}}}
@@ -1073,28 +1178,64 @@ func Test_MpReachNLRIAttribute_MUPType2SessionTransformedRoute(t *testing.T) {
 		Admin:    65000,
 		Assigned: 100,
 	}}}
-	nlris := []*api.NLRI{{Nlri: &api.NLRI_MupType_2SessionTransformed{MupType_2SessionTransformed: &api.MUPType2SessionTransformedRoute{
-		Rd:                    rd,
-		Teid:                  12345,
-		EndpointAddressLength: 64,
-		EndpointAddress:       "10.0.0.1",
-	}}}}
-
-	input := &api.MpReachNLRIAttribute{
-		Family: &api.Family{
-			Afi:  api.Family_AFI_IP,
-			Safi: api.Family_SAFI_MUP,
+	tests := []struct {
+		name string
+		in   *api.MUPType2SessionTransformedRoute
+	}{
+		{
+			name: "IPv4",
+			in: &api.MUPType2SessionTransformedRoute{
+				Rd:                    rd,
+				Teid:                  12345,
+				EndpointAddressLength: 64,
+				EndpointAddress:       "10.0.0.1",
+			},
 		},
-		NextHops: []string{"0.0.0.0"},
-		Nlris:    nlris,
+		{
+			name: "IPv4_with_TLVs",
+			in: &api.MUPType2SessionTransformedRoute{
+				Rd:                    rd,
+				Teid:                  12345,
+				EndpointAddressLength: 64,
+				EndpointAddress:       "10.0.0.1",
+				Tlvs: []*api.MUPTLV{
+					{Tlv: &api.MUPTLV_SessionParameters{SessionParameters: &api.MUPSessionParametersTLV{
+						Teid: 54321,
+						Qfi:  9,
+					}}},
+					{Tlv: &api.MUPTLV_InterworkEndpoint{InterworkEndpoint: &api.MUPInterworkEndpointTLV{
+						Address: "10.20.30.40",
+					}}},
+					{Tlv: &api.MUPTLV_SourceAddress{SourceAddress: &api.MUPSourceAddressTLV{
+						Address: "2001::100",
+					}}},
+					{Tlv: &api.MUPTLV_Unknown{Unknown: &api.MUPUnknownTLV{
+						Type:  200,
+						Value: []byte{0xde, 0xad, 0xbe, 0xef},
+					}}},
+				},
+			},
+		},
 	}
+	for _, tt := range tests {
+		nlris := []*api.NLRI{{Nlri: &api.NLRI_MupType_2SessionTransformed{MupType_2SessionTransformed: tt.in}}}
 
-	a := &api.Attribute{Attr: &api.Attribute_MpReach{MpReach: input}}
-	n, err := UnmarshalAttribute(a)
-	assert.NoError(err)
+		input := &api.MpReachNLRIAttribute{
+			Family: &api.Family{
+				Afi:  api.Family_AFI_IP,
+				Safi: api.Family_SAFI_MUP,
+			},
+			NextHops: []string{"0.0.0.0"},
+			Nlris:    nlris,
+		}
 
-	output, _ := NewMpReachNLRIAttributeFromNative(n.(*bgp.PathAttributeMpReachNLRI))
-	assert.True(proto.Equal(input, output))
+		a := &api.Attribute{Attr: &api.Attribute_MpReach{MpReach: input}}
+		n, err := UnmarshalAttribute(a)
+		assert.NoError(err)
+
+		output, _ := NewMpReachNLRIAttributeFromNative(n.(*bgp.PathAttributeMpReachNLRI))
+		assert.True(proto.Equal(input, output), tt.name)
+	}
 }
 
 func Test_MpUnreachNLRIAttribute_IPv4_UC(t *testing.T) {
@@ -1202,9 +1343,20 @@ func Test_ExtendedCommunitiesAttribute(t *testing.T) {
 		{Extcom: &api.ExtendedCommunity_TrafficRemark{TrafficRemark: &api.TrafficRemarkExtended{
 			Dscp: 0x0a, // AF11
 		}}},
-		{Extcom: &api.ExtendedCommunity_Mup{Mup: &api.MUPExtended{
-			SegmentId2: 10,
-			SegmentId4: 100,
+		{Extcom: &api.ExtendedCommunity_MupTwoOctetAsSpecific{MupTwoOctetAsSpecific: &api.MUPTwoOctetAsSpecificExtended{
+			SubType:    0x00, // Direct Segment
+			Asn:        10,
+			LocalAdmin: 100,
+		}}},
+		{Extcom: &api.ExtendedCommunity_MupIpv4AddressSpecific{MupIpv4AddressSpecific: &api.MUPIPv4AddressSpecificExtended{
+			SubType:    0x04, // Interwork Segment
+			Address:    "7.7.7.7",
+			LocalAdmin: 100,
+		}}},
+		{Extcom: &api.ExtendedCommunity_MupFourOctetAsSpecific{MupFourOctetAsSpecific: &api.MUPFourOctetAsSpecificExtended{
+			SubType:    0x05, // Interwork Segment
+			Asn:        65550,
+			LocalAdmin: 100,
 		}}},
 		{Extcom: &api.ExtendedCommunity_Unknown{Unknown: &api.UnknownExtended{
 			Type:  0xff, // Max of uint8
@@ -1335,6 +1487,45 @@ func Test_TunnelEncapAttribute(t *testing.T) {
 
 	output, _ := NewTunnelEncapAttributeFromNative(n.(*bgp.PathAttributeTunnelEncap))
 	assert.True(proto.Equal(input, output))
+}
+
+func Test_SRBSIDLabelRoundTrip(t *testing.T) {
+	// The API carries an SR-MPLS Binding SID as the plain label value.
+	// UnmarshalSRBSID shifts it into the high 20 bits of the 4-octet label
+	// stack entry (RFC 9830 Figure 6); MarshalSRBSID must undo that shift so
+	// the label survives an unmarshal/marshal round trip.
+	const label = 100
+	sid := make([]byte, 4)
+	binary.BigEndian.PutUint32(sid, label)
+
+	native, err := UnmarshalSRBSID(&api.TunnelEncapSubTLVSRBindingSID{
+		Bsid: &api.TunnelEncapSubTLVSRBindingSID_SrBindingSid{
+			SrBindingSid: &api.SRBindingSID{Sid: sid, SFlag: true},
+		},
+	})
+	require.NoError(t, err)
+
+	// The native wire value has the label in the high 20 bits.
+	srbsid := native.(*bgp.TunnelEncapSubTLVSRBSID)
+	require.Equal(t, uint32(label<<12), binary.BigEndian.Uint32(srbsid.BSID.Value))
+
+	out, err := MarshalSRBSID(srbsid)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(label), binary.BigEndian.Uint32(out.Sid))
+	assert.True(t, out.SFlag)
+}
+
+func Test_SRBSIDSRv6NotShifted(t *testing.T) {
+	// A 16-octet SRv6 SID carried in the Binding SID sub-TLV must be copied
+	// verbatim, without the SR-MPLS label shift.
+	sid := netip.MustParseAddr("2001:db8::1").AsSlice()
+	native := &bgp.TunnelEncapSubTLVSRBSID{
+		TunnelEncapSubTLV: bgp.TunnelEncapSubTLV{Type: bgp.ENCAP_SUBTLV_TYPE_SRBINDING_SID, Length: 18},
+		BSID:              &bgp.BSID{Value: sid},
+	}
+	out, err := MarshalSRBSID(native)
+	require.NoError(t, err)
+	assert.Equal(t, sid, out.Sid)
 }
 
 func Test_IP6ExtendedCommunitiesAttribute(t *testing.T) {
@@ -1477,6 +1668,118 @@ func TestFullCyclePrefixSID(t *testing.T) {
 	}
 }
 
+func TestUnmarshalSRSegments_NilFlags(t *testing.T) {
+	// Flags is an optional protobuf sub-message. A caller that builds
+	// api.SegmentTypeA or api.SegmentTypeB without setting Flags must
+	// not cause a nil pointer dereference; the result should be all-zero
+	// flag bits.
+	t.Run("SegmentTypeA_nil_flags", func(t *testing.T) {
+		segs := []*api.TunnelEncapSubTLVSRSegmentList_Segment{
+			{Segment: &api.TunnelEncapSubTLVSRSegmentList_Segment_A{
+				A: &api.SegmentTypeA{Label: 100},
+				// Flags intentionally omitted (nil)
+			}},
+		}
+		result, err := UnmarshalSRSegments(segs)
+		assert.NoError(t, err)
+		require.Len(t, result, 1)
+		seg, ok := result[0].(*bgp.SegmentTypeA)
+		require.True(t, ok)
+		assert.Equal(t, uint32(100), seg.Label)
+		assert.Equal(t, uint8(0), seg.Flags)
+	})
+
+	t.Run("SegmentTypeB_nil_flags", func(t *testing.T) {
+		sid := []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}
+		segs := []*api.TunnelEncapSubTLVSRSegmentList_Segment{
+			{Segment: &api.TunnelEncapSubTLVSRSegmentList_Segment_B{
+				B: &api.SegmentTypeB{Sid: sid},
+				// Flags intentionally omitted (nil)
+			}},
+		}
+		result, err := UnmarshalSRSegments(segs)
+		assert.NoError(t, err)
+		require.Len(t, result, 1)
+		seg, ok := result[0].(*bgp.SegmentTypeB)
+		require.True(t, ok)
+		assert.Equal(t, sid, seg.SID)
+		assert.Equal(t, uint8(0), seg.Flags)
+	})
+}
+
+func TestUnmarshalSRSegments_RoundTrip(t *testing.T) {
+	t.Run("SegmentTypeA", func(t *testing.T) {
+		orig := []bgp.TunnelEncapSubTLVInterface{
+			&bgp.SegmentTypeA{
+				TunnelEncapSubTLV: bgp.TunnelEncapSubTLV{Type: bgp.EncapSubTLVType(bgp.TypeA), Length: 6},
+				Label:             200,
+				Flags:             0x80 | 0x10, // VFlag + BFlag
+			},
+		}
+		marshaled, err := MarshalSRSegments(orig)
+		require.NoError(t, err)
+		result, err := UnmarshalSRSegments(marshaled)
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		seg, ok := result[0].(*bgp.SegmentTypeA)
+		require.True(t, ok)
+		assert.Equal(t, uint32(200), seg.Label)
+		assert.Equal(t, uint8(0x80|0x10), seg.Flags)
+	})
+
+	t.Run("SegmentTypeB", func(t *testing.T) {
+		sid := []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}
+		orig := []bgp.TunnelEncapSubTLVInterface{
+			&bgp.SegmentTypeB{
+				TunnelEncapSubTLV: bgp.TunnelEncapSubTLV{Type: bgp.EncapSubTLVType(bgp.TypeB), Length: 18},
+				SID:               sid,
+				Flags:             0x40 | 0x20, // AFlag + SFlag
+			},
+		}
+		marshaled, err := MarshalSRSegments(orig)
+		require.NoError(t, err)
+		result, err := UnmarshalSRSegments(marshaled)
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		seg, ok := result[0].(*bgp.SegmentTypeB)
+		require.True(t, ok)
+		assert.Equal(t, sid, seg.SID)
+		assert.Equal(t, uint8(0x40|0x20), seg.Flags)
+	})
+
+	t.Run("SegmentTypeB_with_SRv6EBS", func(t *testing.T) {
+		sid := []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02}
+		orig := []bgp.TunnelEncapSubTLVInterface{
+			&bgp.SegmentTypeB{
+				TunnelEncapSubTLV: bgp.TunnelEncapSubTLV{Type: bgp.EncapSubTLVType(bgp.TypeB), Length: 18},
+				SID:               sid,
+				Flags:             0x80,
+				SRv6EBS: &bgp.SRv6EndpointBehaviorStructure{
+					Behavior: bgp.END,
+					BlockLen: 40,
+					NodeLen:  24,
+					FuncLen:  16,
+					ArgLen:   0,
+				},
+			},
+		}
+		marshaled, err := MarshalSRSegments(orig)
+		require.NoError(t, err)
+		result, err := UnmarshalSRSegments(marshaled)
+		require.NoError(t, err)
+		require.Len(t, result, 1)
+		seg, ok := result[0].(*bgp.SegmentTypeB)
+		require.True(t, ok)
+		assert.Equal(t, sid, seg.SID)
+		assert.Equal(t, uint8(0x80), seg.Flags)
+		require.NotNil(t, seg.SRv6EBS)
+		assert.Equal(t, bgp.END, seg.SRv6EBS.Behavior)
+		assert.Equal(t, uint8(40), seg.SRv6EBS.BlockLen)
+		assert.Equal(t, uint8(24), seg.SRv6EBS.NodeLen)
+		assert.Equal(t, uint8(16), seg.SRv6EBS.FuncLen)
+	})
+}
+
 func TestFullCycleSRv6SIDStructureSubSubTLV(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1511,6 +1814,222 @@ func TestFullCycleSRv6SIDStructureSubSubTLV(t *testing.T) {
 	}
 }
 
+// TestFullCycleFlexAlgoDefAndFAPM exercises the api <-> packet
+// round-trip for the RFC 9351 Flex-Algorithm Definition (FAD) Node
+// Attribute TLV and the FAPM (Prefix Attribute TLV 1044). The packet
+// layer round-trip is covered in pkg/packet/bgp; here we confirm the
+// apiutil mapping preserves every field on the way from bgp.LsAttribute
+// down to api.LsAttribute and back.
+func TestFullCycleFlexAlgoDefAndFAPM(t *testing.T) {
+	srgbStart := uint32(16000)
+
+	// Build a synthetic PathAttributeLs whose Extract output already
+	// carries the FAD + multi-SID + FAPM fields we want to surface.
+	// We bypass the wire by hand-building the TLV slice; the goal is
+	// to drive NewLsAttributeFromNative and UnmarshalLsAttribute.
+	tlvs := []bgp.LsTLVInterface{
+		&bgp.LsTLVFlexAlgoDef{
+			LsTLV:       bgp.LsTLV{Type: bgp.LS_TLV_FLEX_ALGO_DEF},
+			Algorithm:   128,
+			MetricType:  1, // Min-Delay
+			CalcType:    0,
+			Priority:    200,
+			ExcludeAny:  []uint32{0x0F},
+			IncludeAny:  []uint32{0xF0},
+			IncludeAll:  []uint32{0xAA},
+			Flags:       []byte{0x80, 0x00, 0x00, 0x00},
+			ExcludeSRLG: []uint32{42, 43},
+		},
+		&bgp.LsTLVPrefixSID{
+			LsTLV:     bgp.LsTLV{Type: bgp.LS_TLV_PREFIX_SID},
+			Algorithm: 0,
+			Flags:     0,
+			SID:       srgbStart + 1,
+		},
+		&bgp.LsTLVPrefixSID{
+			LsTLV:     bgp.LsTLV{Type: bgp.LS_TLV_PREFIX_SID},
+			Algorithm: 128,
+			Flags:     0x08,
+			SID:       srgbStart + 128,
+		},
+		&bgp.LsTLVFADPrefixMetric{
+			LsTLV:     bgp.LsTLV{Type: bgp.LS_TLV_FAD_PREFIX_METRIC},
+			Algorithm: 128,
+			Flags:     0,
+			Metric:    10000,
+		},
+	}
+	pa := &bgp.PathAttributeLs{TLVs: tlvs}
+
+	apiAttr, err := NewLsAttributeFromNative(pa)
+	require.NoError(t, err)
+	require.NotNil(t, apiAttr)
+
+	require.Len(t, apiAttr.Node.FlexAlgoDefs, 1)
+	fad := apiAttr.Node.FlexAlgoDefs[0]
+	assert.Equal(t, uint32(128), fad.Algorithm)
+	assert.Equal(t, uint32(1), fad.MetricType)
+	assert.True(t, fad.MetricTypeKnown)
+	assert.Equal(t, uint32(200), fad.Priority)
+	assert.Equal(t, []uint32{0x0F}, fad.ExcludeAnyAffinity)
+	assert.Equal(t, []uint32{0xF0}, fad.IncludeAnyAffinity)
+	assert.Equal(t, []uint32{0xAA}, fad.IncludeAllAffinity)
+	assert.Equal(t, []byte{0x80, 0x00, 0x00, 0x00}, fad.DefinitionFlags)
+	assert.Equal(t, []uint32{42, 43}, fad.ExcludeSrlg)
+
+	require.Len(t, apiAttr.Prefix.SrPrefixSids, 2)
+	assert.Equal(t, uint32(0), apiAttr.Prefix.SrPrefixSids[0].Algorithm)
+	assert.Equal(t, srgbStart+1, apiAttr.Prefix.SrPrefixSids[0].Sid)
+	assert.Equal(t, uint32(128), apiAttr.Prefix.SrPrefixSids[1].Algorithm)
+	assert.Equal(t, uint32(0x08), apiAttr.Prefix.SrPrefixSids[1].Flags)
+	assert.Equal(t, srgbStart+128, apiAttr.Prefix.SrPrefixSids[1].Sid)
+	// Singular field still populated for the Algorithm-0 SID.
+	assert.Equal(t, srgbStart+1, apiAttr.Prefix.SrPrefixSid)
+
+	require.Len(t, apiAttr.Prefix.FadPrefixMetrics, 1)
+	assert.Equal(t, uint32(128), apiAttr.Prefix.FadPrefixMetrics[0].Algorithm)
+	assert.Equal(t, uint32(10000), apiAttr.Prefix.FadPrefixMetrics[0].Metric)
+
+	// proto round-trip: marshal + unmarshal must preserve byte-for-byte.
+	enc, err := proto.Marshal(apiAttr)
+	require.NoError(t, err)
+	clone := &api.LsAttribute{}
+	require.NoError(t, proto.Unmarshal(enc, clone))
+	assert.True(t, proto.Equal(apiAttr, clone))
+
+	// api -> bgp rehydration: every FAD / SID / FAPM field round-trips.
+	back, err := UnmarshalLsAttribute(clone)
+	require.NoError(t, err)
+	require.Len(t, back.Node.FlexAlgoDefs, 1)
+	assert.Equal(t, uint8(128), back.Node.FlexAlgoDefs[0].Algorithm)
+	assert.Equal(t, uint8(1), back.Node.FlexAlgoDefs[0].MetricType)
+	assert.Equal(t, []uint32{42, 43}, back.Node.FlexAlgoDefs[0].ExcludeSRLG)
+	require.Len(t, back.Prefix.SrPrefixSIDs, 2)
+	assert.Equal(t, uint8(128), back.Prefix.SrPrefixSIDs[1].Algorithm)
+	assert.Equal(t, srgbStart+128, back.Prefix.SrPrefixSIDs[1].SID)
+	require.Len(t, back.Prefix.FadPrefixMetrics, 1)
+	assert.Equal(t, uint32(10000), back.Prefix.FadPrefixMetrics[0].Metric)
+}
+
+// TestFlexAlgo_FullWirePath drives the full RFC 9351 / RFC 9085
+// path end-to-end:
+//
+//	wire bytes -> PathAttributeLs.DecodeFromBytes
+//	           -> Extract                 (structured fields)
+//	           -> NewLsAttributeFromNative (api projection)
+//	           -> proto.Marshal + proto.Unmarshal
+//	           -> UnmarshalLsAttribute     (rehydrate bgp.LsAttribute)
+//	           -> Serialize                (back to wire bytes)
+//
+// The fixture is a hand-built BGP-LS Attribute (MP_REACH stripped, we
+// only test the attribute payload) carrying a Flex-Algo Definition
+// (TLV 1039 with three nested sub-TLVs), two Prefix-SID TLVs (algo 0
+// and algo 128) and one FAPM (TLV 1044). Every structured field on
+// the way out matches the wire bytes on the way in.
+func TestFlexAlgo_FullWirePath(t *testing.T) {
+	const (
+		srgbStart = uint32(16000)
+	)
+
+	// MP_REACH_NLRI is omitted; we test PathAttributeLs payload only.
+	// Outer wrapper: flags 0x80 (Optional, Non-Transitive,
+	// non-extended), type 41 (BGP_ATTR_TYPE_LS), 1-byte length.
+	body := []byte{
+		// TLV 1039 FAD, length 28 (4-byte fixed header + three
+		// 8-byte sub-TLVs):
+		//   algo=128 metric=0 (IGP) calc=0 (SPF) prio=200
+		//   sub-TLV 1040 Exclude-Any 0x0000000F
+		//   sub-TLV 1041 Include-Any 0x000000F0
+		//   sub-TLV 1043 Definition Flags 0x80000000
+		0x04, 0x0F, 0x00, 0x1C,
+		0x80, 0x00, 0x00, 0xC8,
+		0x04, 0x10, 0x00, 0x04, 0x00, 0x00, 0x00, 0x0F,
+		0x04, 0x11, 0x00, 0x04, 0x00, 0x00, 0x00, 0xF0,
+		0x04, 0x13, 0x00, 0x04, 0x80, 0x00, 0x00, 0x00,
+
+		// TLV 1158 Prefix-SID algo 0 (default SPF), SID 16001 in
+		// 8-byte (4-byte SID) form: flags + algo + 2B reserved + 4B SID.
+		0x04, 0x86, 0x00, 0x08,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x3E, 0x81,
+
+		// TLV 1158 Prefix-SID algo 128, V-flag set (absolute label),
+		// SID 16128 in 8-byte form.
+		0x04, 0x86, 0x00, 0x08,
+		0x08, 0x80, 0x00, 0x00,
+		0x00, 0x00, 0x3F, 0x00,
+
+		// TLV 1044 FAPM (Flexible Algorithm Prefix Metric): algo 128
+		// metric 10000 (0x2710), flags 0, reserved 0.
+		0x04, 0x14, 0x00, 0x08,
+		0x80, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x27, 0x10,
+	}
+	hdr := []byte{0x80, 0x29, byte(len(body))}
+	wire := append([]byte{}, hdr...)
+	wire = append(wire, body...)
+
+	// Decode the wire bytes into the structured PathAttributeLs.
+	pa := &bgp.PathAttributeLs{}
+	require.NoError(t, pa.DecodeFromBytes(wire))
+
+	// Extract the structured LsAttribute and check every field.
+	ls := pa.Extract()
+	require.Len(t, ls.Node.FlexAlgoDefs, 1)
+	fad := ls.Node.FlexAlgoDefs[0]
+	assert.Equal(t, uint8(128), fad.Algorithm)
+	assert.Equal(t, uint8(0), fad.MetricType)
+	assert.True(t, fad.MetricTypeKnown)
+	assert.Equal(t, uint8(0), fad.CalcType)
+	assert.Equal(t, uint8(200), fad.Priority)
+	assert.Equal(t, []uint32{0x0F}, fad.ExcludeAny)
+	assert.Equal(t, []uint32{0xF0}, fad.IncludeAny)
+	assert.Equal(t, []byte{0x80, 0x00, 0x00, 0x00}, fad.Flags)
+
+	require.Len(t, ls.Prefix.SrPrefixSIDs, 2)
+	assert.Equal(t, uint8(0), ls.Prefix.SrPrefixSIDs[0].Algorithm)
+	assert.Equal(t, srgbStart+1, ls.Prefix.SrPrefixSIDs[0].SID)
+	assert.Equal(t, uint8(128), ls.Prefix.SrPrefixSIDs[1].Algorithm)
+	assert.Equal(t, uint8(0x08), ls.Prefix.SrPrefixSIDs[1].Flags)
+	assert.Equal(t, srgbStart+128, ls.Prefix.SrPrefixSIDs[1].SID)
+	require.NotNil(t, ls.Prefix.SrPrefixSID)
+	assert.Equal(t, srgbStart+1, *ls.Prefix.SrPrefixSID)
+
+	require.Len(t, ls.Prefix.FadPrefixMetrics, 1)
+	assert.Equal(t, uint8(128), ls.Prefix.FadPrefixMetrics[0].Algorithm)
+	assert.Equal(t, uint32(10000), ls.Prefix.FadPrefixMetrics[0].Metric)
+
+	// Cross the apiutil boundary in both directions.
+	apiAttr, err := NewLsAttributeFromNative(pa)
+	require.NoError(t, err)
+	require.Len(t, apiAttr.Node.FlexAlgoDefs, 1)
+	require.Len(t, apiAttr.Prefix.SrPrefixSids, 2)
+	require.Len(t, apiAttr.Prefix.FadPrefixMetrics, 1)
+
+	enc, err := proto.Marshal(apiAttr)
+	require.NoError(t, err)
+	clone := &api.LsAttribute{}
+	require.NoError(t, proto.Unmarshal(enc, clone))
+	assert.True(t, proto.Equal(apiAttr, clone))
+
+	back, err := UnmarshalLsAttribute(clone)
+	require.NoError(t, err)
+	require.Len(t, back.Node.FlexAlgoDefs, 1)
+	assert.Equal(t, uint8(128), back.Node.FlexAlgoDefs[0].Algorithm)
+	require.Len(t, back.Prefix.SrPrefixSIDs, 2)
+	assert.Equal(t, srgbStart+128, back.Prefix.SrPrefixSIDs[1].SID)
+	require.Len(t, back.Prefix.FadPrefixMetrics, 1)
+
+	// Re-serialise the original PathAttributeLs (its TLV slice still
+	// carries the original wire-shaped sub-TLVs) and confirm the
+	// byte sequence matches the input. This is the strongest
+	// regression signal against silent re-encoding drift.
+	out, err := pa.Serialize()
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(wire, out),
+		"wire bytes round-trip mismatch:\n  in: % x\n out: % x", wire, out)
+}
+
 func TestFullCycleSRv6InformationSubTLV(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1542,5 +2061,463 @@ func TestFullCycleSRv6InformationSubTLV(t *testing.T) {
 				t.Fatalf("round trip conversion test failed as expected prefix sid attribute %+v does not match actual: %+v", tt.input, recovered)
 			}
 		})
+	}
+}
+
+func Test_ExtendedCommunitiesAttribute_MUPInvalidSubType(t *testing.T) {
+	assert := assert.New(t)
+	tests := []struct {
+		name string
+		in   *api.ExtendedCommunity
+	}{
+		{
+			name: "two-octet AS with IPv4 sub type",
+			in: &api.ExtendedCommunity{Extcom: &api.ExtendedCommunity_MupTwoOctetAsSpecific{MupTwoOctetAsSpecific: &api.MUPTwoOctetAsSpecificExtended{
+				SubType:    0x01,
+				Asn:        10,
+				LocalAdmin: 100,
+			}}},
+		},
+		{
+			name: "IPv4 with two-octet AS sub type",
+			in: &api.ExtendedCommunity{Extcom: &api.ExtendedCommunity_MupIpv4AddressSpecific{MupIpv4AddressSpecific: &api.MUPIPv4AddressSpecificExtended{
+				SubType:    0x00,
+				Address:    "10.0.0.1",
+				LocalAdmin: 100,
+			}}},
+		},
+		{
+			name: "4-octet AS with IPv4 sub type",
+			in: &api.ExtendedCommunity{Extcom: &api.ExtendedCommunity_MupFourOctetAsSpecific{MupFourOctetAsSpecific: &api.MUPFourOctetAsSpecificExtended{
+				SubType:    0x04,
+				Asn:        65550,
+				LocalAdmin: 100,
+			}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &api.Attribute{Attr: &api.Attribute_ExtendedCommunities{ExtendedCommunities: &api.ExtendedCommunitiesAttribute{
+				Communities: []*api.ExtendedCommunity{tt.in},
+			}}}
+			_, err := UnmarshalAttribute(a)
+			assert.ErrorContains(err, "sub type")
+		})
+	}
+}
+
+// A Link-State NLRI whose mandatory sub-messages are omitted must be rejected
+// with an error rather than nil-dereferencing while it is unmarshalled.
+func Test_UnmarshalLsNLRIMissingSubMessages(t *testing.T) {
+	localNode := &api.LsNodeDescriptor{Asn: 65000, IgpRouterId: "10.0.0.1"}
+	prefixDesc := &api.LsPrefixDescriptor{IpReachability: []string{"10.1.0.0/24"}}
+	srv6SIDInfo := &api.LsSrv6SIDInformation{Sids: []string{"fd00::1"}}
+
+	tests := []struct {
+		name    string
+		nlri    *api.LsAddrPrefix_LsNLRI
+		errWant string
+	}{
+		{
+			name:    "node without local_node",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Node{Node: &api.LsNodeNLRI{}}},
+			errWant: "local_node",
+		},
+		{
+			name:    "node without payload",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Node{}},
+			errWant: "local_node",
+		},
+		{
+			name:    "link without local_node",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Link{Link: &api.LsLinkNLRI{RemoteNode: localNode}}},
+			errWant: "local_node",
+		},
+		{
+			name:    "link without remote_node",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Link{Link: &api.LsLinkNLRI{LocalNode: localNode}}},
+			errWant: "remote_node",
+		},
+		{
+			name: "link without link_descriptor",
+			nlri: &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Link{Link: &api.LsLinkNLRI{
+				LocalNode:  localNode,
+				RemoteNode: localNode,
+			}}},
+		},
+		{
+			name:    "prefix v4 without local_node",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_PrefixV4{PrefixV4: &api.LsPrefixV4NLRI{PrefixDescriptor: prefixDesc}}},
+			errWant: "local_node",
+		},
+		{
+			name:    "prefix v4 without prefix_descriptor",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_PrefixV4{PrefixV4: &api.LsPrefixV4NLRI{LocalNode: localNode}}},
+			errWant: "prefix_descriptor",
+		},
+		{
+			name:    "prefix v6 without local_node",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_PrefixV6{PrefixV6: &api.LsPrefixV6NLRI{PrefixDescriptor: prefixDesc}}},
+			errWant: "local_node",
+		},
+		{
+			name:    "prefix v6 without prefix_descriptor",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_PrefixV6{PrefixV6: &api.LsPrefixV6NLRI{LocalNode: localNode}}},
+			errWant: "prefix_descriptor",
+		},
+		{
+			name:    "srv6 sid without local_node",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Srv6Sid{Srv6Sid: &api.LsSrv6SIDNLRI{Srv6SidInformation: srv6SIDInfo}}},
+			errWant: "local_node",
+		},
+		{
+			name:    "srv6 sid without srv6_sid_information",
+			nlri:    &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Srv6Sid{Srv6Sid: &api.LsSrv6SIDNLRI{LocalNode: localNode}}},
+			errWant: "srv6_sid_information",
+		},
+		{
+			name: "srv6 sid without multi_topo_id",
+			nlri: &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Srv6Sid{Srv6Sid: &api.LsSrv6SIDNLRI{
+				LocalNode:          localNode,
+				Srv6SidInformation: srv6SIDInfo,
+			}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &api.NLRI{Nlri: &api.NLRI_LsAddrPrefix{LsAddrPrefix: &api.LsAddrPrefix{
+				ProtocolId: api.LsProtocolID_LS_PROTOCOL_ID_ISIS_L2,
+				Nlri:       tt.nlri,
+			}}}
+
+			got, err := UnmarshalNLRI(bgp.RF_LS, n)
+			if tt.errWant == "" {
+				assert.NoError(t, err)
+				assert.NotNil(t, got)
+				return
+			}
+			assert.ErrorContains(t, err, tt.errWant)
+		})
+	}
+}
+
+// An SRv6 SID NLRI received without the optional Multi-Topology Identifier TLV
+// (RFC 9514, Section 6) must survive a native -> API -> native round-trip
+// without gaining a zero-length TLV, which would change the NLRI key.
+func Test_LsSrv6SIDNLRIMultiTopoIDRoundTrip(t *testing.T) {
+	// Every node descriptor sub-TLV that the API path emits is present, so the
+	// only round-trip difference this exercises is the Multi-Topology ID.
+	base := []byte{
+		0x00, 0x06, // NLRI Type: SRv6 SID
+		0x00, 0x41, // Length
+		0x02,                                           // Protocol ID: IS-IS Level 2
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Identifier
+		0x01, 0x00, 0x00, 0x20, // TLV Local Node Descriptor
+		0x02, 0x00, 0x00, 0x04, // Sub-TLV Autonomous System
+		0x00, 0x00, 0xfd, 0xe8, // AS: 65000
+		0x02, 0x01, 0x00, 0x04, // Sub-TLV BGP-LS Identifier
+		0x00, 0x00, 0x00, 0x00, // BGP-LS Identifier: 0
+		0x02, 0x02, 0x00, 0x04, // Sub-TLV OSPF Area ID
+		0x00, 0x00, 0x00, 0x00, // OSPF Area ID: 0
+		0x02, 0x03, 0x00, 0x04, // Sub-TLV IGP Router ID
+		0x0a, 0x00, 0x00, 0x01, // IGP Router ID: 10.0.0.1
+		0x02, 0x06, 0x00, 0x10, // TLV SRv6 SID Information
+		0xfd, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // SID: fd00::1
+	}
+	withMultiTopoID := append(append([]byte{}, base...), []byte{
+		0x01, 0x07, 0x00, 0x02, // TLV Multi-Topology Identifier
+		0x00, 0x02, // Multi-Topology ID: 2
+	}...)
+	withMultiTopoID[3] += 6 // Length
+
+	tests := []struct {
+		name    string
+		nlri    []byte
+		present bool
+	}{
+		{"without Multi-Topology ID", base, false},
+		{"with Multi-Topology ID", withMultiTopoID, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			native, err := bgp.NLRIFromSlice(bgp.RF_LS, tt.nlri)
+			require.NoError(t, err)
+
+			marshalled, err := MarshalNLRI(native)
+			require.NoError(t, err)
+
+			srv6 := marshalled.GetLsAddrPrefix().GetNlri().GetSrv6Sid()
+			require.NotNil(t, srv6)
+			if tt.present {
+				assert.Equal(t, []uint32{2}, srv6.GetMultiTopoId().GetMultiTopoIds())
+			} else {
+				assert.Nil(t, srv6.MultiTopoId)
+			}
+
+			back, err := UnmarshalNLRI(bgp.RF_LS, marshalled)
+			require.NoError(t, err)
+
+			inner := back.(*bgp.LsAddrPrefix).NLRI.(*bgp.LsSrv6SIDNLRI)
+			if tt.present {
+				assert.NotNil(t, inner.MultiTopoID)
+			} else {
+				assert.Nil(t, inner.MultiTopoID)
+			}
+
+			got, err := back.Serialize()
+			require.NoError(t, err)
+			assert.Equal(t, tt.nlri, got)
+		})
+	}
+}
+
+// The exported Link-State helpers are part of the public API, so each must
+// reject or default an absent message instead of panicking.
+func Test_UnmarshalLsHelpersNilArgs(t *testing.T) {
+	t.Run("UnmarshalLsNodeDescriptor", func(t *testing.T) {
+		_, err := UnmarshalLsNodeDescriptor(nil)
+		assert.Error(t, err)
+	})
+	t.Run("UnmarshalPrefixDescriptor", func(t *testing.T) {
+		_, err := UnmarshalPrefixDescriptor(nil)
+		assert.Error(t, err)
+	})
+	t.Run("UnmarshalLsTLVSrv6SIDInfo", func(t *testing.T) {
+		_, err := UnmarshalLsTLVSrv6SIDInfo(nil)
+		assert.Error(t, err)
+	})
+	t.Run("MarshalLsTLVSrv6SIDInfo", func(t *testing.T) {
+		_, err := MarshalLsTLVSrv6SIDInfo(nil)
+		assert.Error(t, err)
+	})
+	t.Run("UnmarshalLsLinkDescriptor", func(t *testing.T) {
+		got, err := UnmarshalLsLinkDescriptor(nil)
+		require.NoError(t, err)
+		empty, err := UnmarshalLsLinkDescriptor(&api.LsLinkDescriptor{})
+		require.NoError(t, err)
+		assert.Equal(t, empty, got)
+	})
+	t.Run("UnmarshalLsTLVMultiTopoID", func(t *testing.T) {
+		got, err := UnmarshalLsTLVMultiTopoID(nil)
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+	t.Run("MarshalLsTLVMultiTopoID", func(t *testing.T) {
+		got, err := MarshalLsTLVMultiTopoID(nil)
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+	t.Run("UnmarshalLsBgpPeerSegmentSid", func(t *testing.T) {
+		got, err := UnmarshalLsBgpPeerSegmentSid(&api.LsBgpPeerSegmentSID{})
+		require.NoError(t, err)
+		assert.Equal(t, bgp.LsAttributeBgpPeerSegmentSIDFlags{}, got.Flags)
+	})
+}
+
+// The Link Local/Remote Identifiers TLV must appear only when the API request
+// carries an identifier. Its presence distinguishes a PeerAdj-SID Link NLRI from
+// a PeerNode-SID one (RFC 9086, Sections 5.1 and 5.2), so a fabricated TLV
+// changes the NLRI key.
+func Test_LsLinkNLRILinkIDPresence(t *testing.T) {
+	localNode := &api.LsNodeDescriptor{Asn: 65000, IgpRouterId: "10.0.0.1"}
+	remoteNode := &api.LsNodeDescriptor{Asn: 65000, IgpRouterId: "10.0.0.2"}
+
+	tests := []struct {
+		name string
+		desc *api.LsLinkDescriptor
+		want bool
+	}{
+		{"absent link descriptor", nil, false},
+		{"empty link descriptor", &api.LsLinkDescriptor{}, false},
+		{"addresses only", &api.LsLinkDescriptor{InterfaceAddrIpv4: "10.0.0.1"}, false},
+		{"explicit zero link local id", &api.LsLinkDescriptor{LinkLocalId: proto.Uint32(0)}, true},
+		{"link remote id only", &api.LsLinkDescriptor{LinkRemoteId: proto.Uint32(2)}, true},
+		{"both identifiers", &api.LsLinkDescriptor{LinkLocalId: proto.Uint32(1), LinkRemoteId: proto.Uint32(2)}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &api.NLRI{Nlri: &api.NLRI_LsAddrPrefix{LsAddrPrefix: &api.LsAddrPrefix{
+				ProtocolId: api.LsProtocolID_LS_PROTOCOL_ID_ISIS_L2,
+				Nlri: &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Link{Link: &api.LsLinkNLRI{
+					LocalNode:      localNode,
+					RemoteNode:     remoteNode,
+					LinkDescriptor: tt.desc,
+				}}},
+			}}}
+
+			got, err := UnmarshalNLRI(bgp.RF_LS, n)
+			require.NoError(t, err)
+
+			link := got.(*bgp.LsAddrPrefix).NLRI.(*bgp.LsLinkNLRI)
+			hasLinkID := false
+			for _, tlv := range link.LinkDesc {
+				if _, ok := tlv.(*bgp.LsTLVLinkID); ok {
+					hasLinkID = true
+				}
+			}
+			assert.Equal(t, tt.want, hasLinkID)
+		})
+	}
+}
+
+// An absent link identifier must stay absent on the way out too: 0 is a valid
+// Link Remote Identifier meaning "unknown" (RFC 5307, Section 1.1), so it cannot
+// double as "not set".
+func Test_MarshalLsLinkDescriptorLinkIDPresence(t *testing.T) {
+	absent, err := MarshalLsLinkDescriptor(&bgp.LsLinkDescriptor{})
+	require.NoError(t, err)
+	assert.Nil(t, absent.LinkLocalId)
+	assert.Nil(t, absent.LinkRemoteId)
+
+	zero := uint32(0)
+	present, err := MarshalLsLinkDescriptor(&bgp.LsLinkDescriptor{LinkLocalID: &zero, LinkRemoteID: &zero})
+	require.NoError(t, err)
+	if assert.NotNil(t, present.LinkLocalId) {
+		assert.Equal(t, uint32(0), present.GetLinkLocalId())
+	}
+	assert.NotNil(t, present.LinkRemoteId)
+}
+
+// A malformed address or prefix must be reported, not silently dropped or kept
+// as the zero value: every one of these fields takes part in the NLRI key, and
+// an invalid ip_reachability used to reach NewLsPrefixTLVs, which cannot build a
+// TLV for it.
+func Test_UnmarshalLsInvalidAddresses(t *testing.T) {
+	localNode := &api.LsNodeDescriptor{Asn: 65000, IgpRouterId: "10.0.0.1"}
+
+	tests := []struct {
+		name    string
+		nlri    *api.LsAddrPrefix_LsNLRI
+		errWant string
+	}{
+		{
+			name: "invalid bgp_router_id",
+			nlri: &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Node{Node: &api.LsNodeNLRI{
+				LocalNode: &api.LsNodeDescriptor{Asn: 65000, BgpRouterId: "not-an-address"},
+			}}},
+			errWant: `invalid bgp_router_id "not-an-address"`,
+		},
+		{
+			name: "empty bgp_router_id",
+			nlri: &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Node{Node: &api.LsNodeNLRI{
+				LocalNode: localNode,
+			}}},
+		},
+		{
+			name: "invalid ip_reachability",
+			nlri: &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_PrefixV4{PrefixV4: &api.LsPrefixV4NLRI{
+				LocalNode:        localNode,
+				PrefixDescriptor: &api.LsPrefixDescriptor{IpReachability: []string{"10.0.0.0/33"}},
+			}}},
+			errWant: `invalid ip_reachability "10.0.0.0/33"`,
+		},
+		{
+			name: "invalid interface_addr_ipv4",
+			nlri: &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Link{Link: &api.LsLinkNLRI{
+				LocalNode:      localNode,
+				RemoteNode:     localNode,
+				LinkDescriptor: &api.LsLinkDescriptor{InterfaceAddrIpv4: "10.0.0.256"},
+			}}},
+			errWant: `invalid interface_addr_ipv4 "10.0.0.256"`,
+		},
+		{
+			name: "invalid neighbor_addr_ipv6",
+			nlri: &api.LsAddrPrefix_LsNLRI{Nlri: &api.LsAddrPrefix_LsNLRI_Link{Link: &api.LsLinkNLRI{
+				LocalNode:      localNode,
+				RemoteNode:     localNode,
+				LinkDescriptor: &api.LsLinkDescriptor{NeighborAddrIpv6: "fd00::/64"},
+			}}},
+			errWant: `invalid neighbor_addr_ipv6 "fd00::/64"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := &api.NLRI{Nlri: &api.NLRI_LsAddrPrefix{LsAddrPrefix: &api.LsAddrPrefix{
+				ProtocolId: api.LsProtocolID_LS_PROTOCOL_ID_ISIS_L2,
+				Nlri:       tt.nlri,
+			}}}
+
+			got, err := UnmarshalNLRI(bgp.RF_LS, n)
+			if tt.errWant == "" {
+				assert.NoError(t, err)
+				assert.NotNil(t, got)
+				return
+			}
+			assert.ErrorContains(t, err, tt.errWant)
+		})
+	}
+}
+
+// A node descriptor with no BGP Router-ID must marshal to an empty string. The
+// zero Addr renders as "invalid IP", which the unmarshal side would then reject,
+// breaking a plain read-then-reinject round-trip for every IGP-sourced NLRI.
+func Test_LsNodeNLRIWithoutBgpRouterIDRoundTrip(t *testing.T) {
+	data := []byte{
+		0x00, 0x01, // NLRI Type: Node
+		0x00, 0x1d, // Length
+		0x02,                                           // Protocol ID: IS-IS Level 2
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Identifier
+		0x01, 0x00, 0x00, 0x10, // TLV Local Node Descriptor
+		0x02, 0x00, 0x00, 0x04, // Sub-TLV Autonomous System
+		0x00, 0x00, 0xfd, 0xe8, // AS: 65000
+		0x02, 0x03, 0x00, 0x04, // Sub-TLV IGP Router ID
+		0x0a, 0x00, 0x00, 0x01, // IGP Router ID: 10.0.0.1
+	}
+
+	native, err := bgp.NLRIFromSlice(bgp.RF_LS, data)
+	require.NoError(t, err)
+
+	marshalled, err := MarshalNLRI(native)
+	require.NoError(t, err)
+	assert.Equal(t, "", marshalled.GetLsAddrPrefix().GetNlri().GetNode().GetLocalNode().GetBgpRouterId())
+
+	_, err = UnmarshalNLRI(bgp.RF_LS, marshalled)
+	assert.NoError(t, err)
+}
+
+func Test_ExtendedCommunitiesAttribute_FlowSpecRedirectToIP(t *testing.T) {
+	assert := assert.New(t)
+
+	for _, isCopy := range []bool{false, true} {
+		input := &api.ExtendedCommunitiesAttribute{
+			Communities: []*api.ExtendedCommunity{
+				{Extcom: &api.ExtendedCommunity_FlowSpecRedirectToIpv4{FlowSpecRedirectToIpv4: &api.FlowSpecRedirectToIPv4Extended{
+					Address: "198.51.100.11",
+					Copy:    isCopy,
+				}}},
+			},
+		}
+
+		a := &api.Attribute{Attr: &api.Attribute_ExtendedCommunities{ExtendedCommunities: input}}
+		n, err := UnmarshalAttribute(a)
+		assert.NoError(err)
+
+		output, err := NewExtendedCommunitiesAttributeFromNative(n.(*bgp.PathAttributeExtendedCommunities))
+		assert.NoError(err)
+		assert.True(proto.Equal(input, output))
+	}
+}
+
+func Test_IP6ExtendedCommunitiesAttribute_FlowSpecRedirectToIP(t *testing.T) {
+	assert := assert.New(t)
+
+	for _, isCopy := range []bool{false, true} {
+		input := &api.IP6ExtendedCommunitiesAttribute{
+			Communities: []*api.IP6ExtendedCommunitiesAttribute_Community{
+				{Extcom: &api.IP6ExtendedCommunitiesAttribute_Community_FlowSpecRedirectToIpv6{FlowSpecRedirectToIpv6: &api.FlowSpecRedirectToIPv6Extended{
+					Address: "2001:db8::1",
+					Copy:    isCopy,
+				}}},
+			},
+		}
+
+		a := &api.Attribute{Attr: &api.Attribute_Ip6ExtendedCommunities{Ip6ExtendedCommunities: input}}
+		n, err := UnmarshalAttribute(a)
+		assert.NoError(err)
+
+		output, err := NewIP6ExtendedCommunitiesAttributeFromNative(n.(*bgp.PathAttributeIP6ExtendedCommunities))
+		assert.NoError(err)
+		assert.True(proto.Equal(input, output))
 	}
 }

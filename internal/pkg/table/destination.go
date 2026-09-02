@@ -1,5 +1,4 @@
 // Copyright (C) 2014 Nippon Telegraph and Telephone Corporation.
-// Copyright (C) 2025 Acnodal Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -80,26 +79,53 @@ func (r *BestPathReason) String() string {
 	return BestPathReasonStringMap[*r]
 }
 
+// PeerInfo contains a chunk of peer configuration that is used by table code to determine
+// how to handle path attributes. PeerInfo struct can be used both for individual peers
+// and peer groups when peer group is in shared policy mode and handles paths in bulk.
+//
+// It is also used to identify source of path to determine best path, but in that case it
+// can only be a peer, not a peer group.
+//
+// Zero PeerInfo value denotes localSource (paths originated locally) - use localSource
 type PeerInfo struct {
-	AS                      uint32
-	LocalAS                 uint32
-	ID                      netip.Addr
-	LocalID                 netip.Addr
-	Address                 netip.Addr
-	LocalAddress            netip.Addr
-	IPv4Nexthop             net.IP
-	IPv6Nexthop             net.IP
-	IPv6LinkLocalNexthop    net.IP
-	RouteReflectorClusterID netip.Addr
+	// PeerType: INTERNAL for iBGP peers or EXTERNAL for eBGP peers. Computed from
+	// a state based on AS/LocalAS Comparison
+	PeerType oc.PeerType
+
+	// AS Number, Address and BGP Identifier (not specified for peer groups) of the remote peer
+	AS      uint32
+	ID      netip.Addr
+	Address netip.Addr
+
+	// Local AS Number, Address and BGP Identifier of local router.
+	//
+	// AS Number can be overridden using local-as config option on per-peer basis and
+	// used for AS_PATH prepending for eBGP peers and for path filtering
+	LocalAS      uint32
+	LocalID      netip.Addr
+	LocalAddress netip.Addr
+
+	// A view of peer/peer group configuration used to compute path attributes correctly
 	RouteReflectorClient    bool
+	RouteReflectorClusterID netip.Addr
+	RouteServerClient       bool
 	MultihopTtl             uint8
 	Confederation           bool
-	NetlinkIfName           string
-	IsNetlink               bool
-}
+	RemovePrivateAs         oc.RemovePrivateAsOption
 
-func (p *PeerInfo) GetNeighborInterface() string {
-	return p.NetlinkIfName
+	// PeerGroup contains name for peer group itself if this is PeerInfo for a peer group
+	// or the name of peer group this peer belongs to. Used for informational purposes.
+	PeerGroup string
+
+	// Netlink additions. The three nexthop fields are populated from the BGP
+	// peer's own PeerInfo when a session comes up and are read by
+	// UpdatePathAttrs to originate an RFC 2545 dual nexthop. They are
+	// deliberately not populated on a path's source - see NewNetlinkPeerInfo.
+	IPv4Nexthop          net.IP
+	IPv6Nexthop          net.IP
+	IPv6LinkLocalNexthop net.IP
+	NetlinkIfName        string
+	IsNetlink            bool
 }
 
 func (lhs *PeerInfo) Equal(rhs *PeerInfo) bool {
@@ -118,9 +144,11 @@ func (lhs *PeerInfo) Equal(rhs *PeerInfo) bool {
 }
 
 func (i *PeerInfo) String() string {
-	if !i.Address.IsValid() {
+	const peerTypeUnspecified = oc.PeerType("")
+	if i.PeerType == peerTypeUnspecified {
 		return "local"
 	}
+
 	s := bytes.NewBuffer(make([]byte, 0, 64))
 	fmt.Fprintf(s, "{ %s | ", i.Address)
 	fmt.Fprintf(s, "as: %d", i.AS)
@@ -134,17 +162,25 @@ func (i *PeerInfo) String() string {
 
 func NewPeerInfo(g *oc.Global, p *oc.Neighbor, AS, localAS uint32, ID, localID netip.Addr, addr, localAddr netip.Addr) *PeerInfo {
 	return &PeerInfo{
-		AS:                      AS,
-		LocalAS:                 localAS,
+		PeerType:                p.State.PeerType,
 		ID:                      ID,
-		LocalID:                 localID,
+		AS:                      AS,
 		Address:                 addr,
+		LocalAS:                 localAS,
+		LocalID:                 localID,
 		LocalAddress:            localAddr,
-		RouteReflectorClusterID: p.RouteReflector.State.RouteReflectorClusterId,
 		RouteReflectorClient:    p.RouteReflector.Config.RouteReflectorClient,
+		RouteReflectorClusterID: p.RouteReflector.State.RouteReflectorClusterId,
+		RouteServerClient:       p.RouteServer.Config.RouteServerClient,
 		MultihopTtl:             p.EbgpMultihop.Config.MultihopTtl,
-		Confederation:           p.IsConfederationMember(g),
+		Confederation:           g.IsConfederationMember(AS),
+		RemovePrivateAs:         p.State.RemovePrivateAs,
+		PeerGroup:               p.Config.PeerGroup,
 	}
+}
+
+func (p *PeerInfo) GetNeighborInterface() string {
+	return p.NetlinkIfName
 }
 
 // NewNetlinkPeerInfo builds the PeerInfo used as the source of a netlink-imported
@@ -166,14 +202,48 @@ func NewNetlinkPeerInfo(iface string) *PeerInfo {
 	}
 }
 
-type Destination struct {
-	nlri          bgp.NLRI
+func NewPeerGroupInfo(g *oc.Global, p *oc.PeerGroup) *PeerInfo {
+	localAddr := p.Transport.Config.LocalAddress
+	if !localAddr.IsValid() {
+		localAddr = g.Config.RouterId
+	}
+
+	return &PeerInfo{
+		PeerType:                p.State.PeerType,
+		AS:                      p.Config.PeerAs,
+		LocalAS:                 p.Config.LocalAs,
+		LocalID:                 g.Config.RouterId,
+		LocalAddress:            localAddr,
+		RouteReflectorClient:    p.RouteReflector.Config.RouteReflectorClient,
+		RouteReflectorClusterID: p.RouteReflector.State.RouteReflectorClusterId,
+		RouteServerClient:       p.RouteServer.Config.RouteServerClient,
+		MultihopTtl:             p.EbgpMultihop.Config.MultihopTtl,
+		Confederation:           g.IsConfederationMember(p.Config.PeerAs),
+		RemovePrivateAs:         p.State.RemovePrivateAs,
+		PeerGroup:               p.Config.PeerGroupName,
+	}
+}
+
+// destination represents a BGP destination (prefix) and its associated paths.
+//
+// LOCKING STRATEGY:
+//   - Active destinations (stored in table shards) require the appropriate shard lock
+//     to be held when accessing or modifying knownPathList or localIdMap.
+//   - Snapshot destinations (created via snapshot()) are immutable copies that can be
+//     safely used without locks. They are created while holding the shard lock and
+//     contain a copied knownPathList.
+//   - Methods document whether they require locks for active destinations. All methods
+//     that read knownPathList are safe on snapshots without locks.
+//   - Methods that modify state (e.g., Calculate) must NEVER be called on snapshots
+//     and ALWAYS require the caller to hold the shard lock.
+type destination struct {
+	nlri          bgp.NLRI // not mutable
 	knownPathList []*Path
 	localIdMap    *Bitmap
 }
 
-func NewDestination(nlri bgp.NLRI, mapSize int, known ...*Path) *Destination {
-	d := &Destination{
+func newDestination(nlri bgp.NLRI, mapSize int, known ...*Path) *destination {
+	d := &destination{
 		nlri:          nlri,
 		knownPathList: known,
 		localIdMap:    NewBitmap(mapSize),
@@ -185,16 +255,25 @@ func NewDestination(nlri bgp.NLRI, mapSize int, known ...*Path) *Destination {
 	return d
 }
 
-func (dd *Destination) GetNlri() bgp.NLRI {
+// no need to lock here as nlri is not mutable
+func (dd *destination) GetNlri() bgp.NLRI {
 	return dd.nlri
 }
 
-func (dd *Destination) setNlri(nlri bgp.NLRI) {
-	dd.nlri = nlri
+// snapshot returns a stable copy of the destination state.
+// Caller must hold the appropriate shard lock when calling this on an active destination.
+// The returned snapshot can be used safely without locks.
+func (dd *destination) snapshot() *destination {
+	return newDestination(dd.nlri, 0, dd.GetAllKnownPathList()...)
 }
 
-func (dd *Destination) GetAllKnownPathList() []*Path {
-	return dd.knownPathList
+// GetAllKnownPathList returns a copy of the known path list.
+// When called on an active (non-snapshot) destination, caller must hold the appropriate shard lock.
+// When called on a snapshot destination, no lock is required as the data is already a stable copy.
+func (dd *destination) GetAllKnownPathList() []*Path {
+	l := make([]*Path, len(dd.knownPathList))
+	copy(l, dd.knownPathList)
+	return l
 }
 
 func rsFilter(id string, as uint32, path *Path) bool {
@@ -205,7 +284,10 @@ func rsFilter(id string, as uint32, path *Path) bool {
 	return id != GLOBAL_RIB_NAME && (path.GetSource().Address.String() == id || isASLoop(as, path))
 }
 
-func (dd *Destination) GetKnownPathList(id string, as uint32) []*Path {
+// GetKnownPathList returns filtered path list.
+// When called on an active (non-snapshot) destination, caller must hold the appropriate shard lock.
+// When called on a snapshot destination, no lock is required as the data is already a stable copy.
+func (dd *destination) GetKnownPathList(id string, as uint32) []*Path {
 	list := make([]*Path, 0, len(dd.knownPathList))
 	for _, p := range dd.knownPathList {
 		if rsFilter(id, as, p) {
@@ -214,6 +296,13 @@ func (dd *Destination) GetKnownPathList(id string, as uint32) []*Path {
 		list = append(list, p)
 	}
 	return list
+}
+
+// GetKnownPathListLength returns the count of known paths.
+// When called on an active (non-snapshot) destination, caller must hold the appropriate shard lock.
+// When called on a snapshot destination, no lock is required as the data is already a stable copy.
+func (dd *destination) GetKnownPathListLength() int {
+	return len(dd.knownPathList)
 }
 
 func getBestPath(id string, as uint32, pathList []*Path) *Path {
@@ -226,7 +315,10 @@ func getBestPath(id string, as uint32, pathList []*Path) *Path {
 	return nil
 }
 
-func (dd *Destination) GetBestPath(id string, as uint32) *Path {
+// GetBestPath returns the best path for the given ID and AS.
+// When called on an active (non-snapshot) destination, caller must hold the appropriate shard lock.
+// When called on a snapshot destination, no lock is required as the data is already a stable copy.
+func (dd *destination) GetBestPath(id string, as uint32) *Path {
 	p := getBestPath(id, as, dd.knownPathList)
 	if p == nil || p.IsNexthopInvalid {
 		return nil
@@ -234,27 +326,32 @@ func (dd *Destination) GetBestPath(id string, as uint32) *Path {
 	return p
 }
 
-func (dd *Destination) GetMultiBestPath(id string) []*Path {
+// GetMultiBestPath returns multiple best paths.
+// When called on an active (non-snapshot) destination, caller must hold the appropriate shard lock.
+// When called on a snapshot destination, no lock is required as the data is already a stable copy.
+func (dd *destination) GetMultiBestPath(id string) []*Path {
 	return getMultiBestPath(id, dd.knownPathList)
 }
 
-// Calculates best-path among known paths for this destination.
-//
+// Calculate computes best-path among known paths for this destination.
 // Modifies destination's state related to stored paths. Removes withdrawn
 // paths from known paths. Also, adds new paths to known paths.
-func (dest *Destination) Calculate(logger *slog.Logger, newPath *Path) *Update {
+// INTERNAL USE ONLY: Caller MUST hold the appropriate shard lock.
+// This method must NEVER be called on snapshot destinations.
+func (dest *destination) Calculate(logger *slog.Logger, newPath *Path) (*Update, *Path) {
 	oldKnownPathList := make([]*Path, len(dest.knownPathList))
 	copy(oldKnownPathList, dest.knownPathList)
 
+	var oldPath *Path
 	if newPath.IsWithdraw {
-		p := dest.explicitWithdraw(logger, newPath)
-		if p != nil && newPath.IsDropped() {
-			if id := p.localID; id != 0 {
+		oldPath = dest.explicitWithdraw(logger, newPath)
+		if oldPath != nil && newPath.IsDropped() {
+			if id := oldPath.localID; id != 0 {
 				dest.localIdMap.Unflag(uint(id))
 			}
 		}
 	} else {
-		dest.implicitWithdraw(logger, newPath)
+		oldPath = dest.implicitWithdraw(logger, newPath)
 		dest.insertSort(newPath)
 	}
 
@@ -274,7 +371,7 @@ func (dest *Destination) Calculate(logger *slog.Logger, newPath *Path) *Update {
 	return &Update{
 		KnownPathList:    l,
 		OldKnownPathList: oldKnownPathList,
-	}
+	}, oldPath
 }
 
 // Removes withdrawn paths.
@@ -284,7 +381,8 @@ func (dest *Destination) Calculate(logger *slog.Logger, newPath *Path) *Update {
 // since not all paths get installed into the table due to bgp policy and
 // we can receive withdraws for such paths and withdrawals may not be
 // stopped by the same policies.
-func (dest *Destination) explicitWithdraw(logger *slog.Logger, withdraw *Path) *Path {
+// Returns the old path that was withdrawn.
+func (dest *destination) explicitWithdraw(logger *slog.Logger, withdraw *Path) *Path {
 	logger.Debug("Removing withdrawals",
 		slog.String("Topic", "Table"),
 		slog.String("Key", dest.GetNlri().String()))
@@ -308,9 +406,10 @@ func (dest *Destination) explicitWithdraw(logger *slog.Logger, withdraw *Path) *
 		}
 	}
 
-	// We do no have any match for this withdraw.
+	// We do not have any match for this withdraw.
+	// May be caused by bgp policy if not all paths got installed into the table.
 	if isFound == -1 {
-		logger.Warn("No matching path for withdraw found, may be path was not installed into table",
+		logger.Debug("No matching path for withdraw found, may be path was not installed into table",
 			slog.String("Topic", "Table"),
 			slog.String("Key", dest.GetNlri().String()),
 			slog.String("Path", withdraw.String()))
@@ -326,7 +425,8 @@ func (dest *Destination) explicitWithdraw(logger *slog.Logger, withdraw *Path) *
 //
 // Known paths will no longer have paths whose new version is present in
 // new paths.
-func (dest *Destination) implicitWithdraw(logger *slog.Logger, newPath *Path) {
+// Returns the old path that was withdrawn.
+func (dest *destination) implicitWithdraw(logger *slog.Logger, newPath *Path) *Path {
 	found := -1
 	for i, path := range dest.knownPathList {
 		if path.NoImplicitWithdraw() {
@@ -348,11 +448,14 @@ func (dest *Destination) implicitWithdraw(logger *slog.Logger, newPath *Path) {
 		}
 	}
 	if found != -1 {
+		withdrawnPath := dest.knownPathList[found]
 		dest.knownPathList = append(dest.knownPathList[:found], dest.knownPathList[found+1:]...)
+		return withdrawnPath
 	}
+	return nil
 }
 
-func (dest *Destination) insertSort(newPath *Path) {
+func (dest *destination) insertSort(newPath *Path) {
 	// Find the correct position for newPath
 	insertIdx := sort.Search(len(dest.knownPathList), func(i int) bool {
 		//Determine where in the array newPath belongs. The slice
@@ -461,6 +564,41 @@ type Update struct {
 	OldKnownPathList []*Path
 }
 
+// GetMultiBestPathDiff returns multipath delta as update and withdraw lists.
+// update includes both newly added and changed paths.
+func (u *Update) GetMultiBestPathDiff(id string) (update []*Path, withdraw []*Path) {
+	oldM := getMultiBestPath(id, u.OldKnownPathList)
+	newM := getMultiBestPath(id, u.KnownPathList)
+	if len(oldM) == 0 && len(newM) == 0 {
+		return nil, nil
+	}
+
+	matchedOld := make([]bool, len(oldM))
+	for _, n := range newM {
+		match := -1
+		for idx, o := range oldM {
+			if n.EqualBySourceAndPathID(o) {
+				match = idx
+				break
+			}
+		}
+		if match == -1 {
+			update = append(update, n)
+			continue
+		}
+		matchedOld[match] = true
+		if !n.Equal(oldM[match]) {
+			update = append(update, n)
+		}
+	}
+	for idx, o := range oldM {
+		if !matchedOld[idx] {
+			withdraw = append(withdraw, o.Clone(true))
+		}
+	}
+	return update, withdraw
+}
+
 func getMultiBestPath(id string, pathList []*Path) []*Path {
 	// The path list of destinations in the global RIB are sorted
 	// in descending order. One of the criteria for being a better
@@ -524,8 +662,8 @@ func (u *Update) GetChanges(id string, as uint32, peerDown bool) (*Path, *Path, 
 			}
 			return nil, old
 		}
-		if best == nil {
-			if old == nil {
+		if best == nil || best.IsNexthopInvalid {
+			if old == nil || old.IsNexthopInvalid {
 				return nil, nil
 			}
 			if peerDown {
@@ -833,7 +971,7 @@ func compareByAge(path1, path2 *Path) *Path {
 	return nil
 }
 
-func (dest *Destination) String() string {
+func (dest *destination) String() string {
 	return fmt.Sprintf("Destination NLRI: %s", dest.nlri.String())
 }
 
@@ -846,11 +984,15 @@ type DestinationSelectOption struct {
 	MultiPath bool
 }
 
-func (d *Destination) MarshalJSON() ([]byte, error) {
+func (d *destination) MarshalJSON() ([]byte, error) {
 	return json.Marshal(d.GetAllKnownPathList())
 }
 
-func (d *Destination) Select(option ...DestinationSelectOption) *Destination {
+// Select filters and returns a new destination with selected paths based on the given options.
+// When called on an active (non-snapshot) destination, caller must hold the appropriate shard lock.
+// When called on a snapshot destination, no lock is required as the data is already a stable copy.
+// Returns a newly created destination, never modifies the receiver.
+func (d *destination) Select(option ...DestinationSelectOption) *destination {
 	id := GLOBAL_RIB_NAME
 	var vrf *Vrf
 	adj := false
@@ -871,6 +1013,7 @@ func (d *Destination) Select(option ...DestinationSelectOption) *Destination {
 	}
 	var paths []*Path
 	if adj {
+		// adj mode: caller must hold lock if this is an active destination
 		paths = make([]*Path, len(d.knownPathList))
 		copy(paths, d.knownPathList)
 	} else {
@@ -905,5 +1048,5 @@ func (d *Destination) Select(option ...DestinationSelectOption) *Destination {
 			}
 		}
 	}
-	return NewDestination(d.nlri, 0, paths...)
+	return newDestination(d.nlri, 0, paths...)
 }

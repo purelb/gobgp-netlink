@@ -142,7 +142,7 @@ func (n *netlinkClient) collectWorkLocked() []importWork {
 	}
 
 	if n.server.globalRib != nil {
-		for vrfName := range n.server.globalRib.Vrfs {
+		for vrfName := range n.server.globalRib.GetAllVrfsMap() {
 			vrfConfig, hasConfig := vrfConfigMap[vrfName]
 			if !hasConfig || !vrfConfig.NetlinkImport.Enabled {
 				continue

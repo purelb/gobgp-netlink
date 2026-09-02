@@ -98,3 +98,5 @@ class GoBGPTestBase(unittest.TestCase):
             self.assertEqual(s.get('received'), None)  # means info['received'] == 0
 
         self.assertEqual(advertised, 1)
+
+

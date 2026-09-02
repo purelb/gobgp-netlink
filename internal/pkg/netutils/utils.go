@@ -21,18 +21,6 @@ import (
 	"syscall"
 )
 
-func setSockOptString(sc syscall.RawConn, level int, opt int, str string) error {
-	var opterr error
-	fn := func(s uintptr) {
-		opterr = syscall.SetsockoptString(int(s), level, opt, str)
-	}
-	err := sc.Control(fn)
-	if opterr == nil {
-		return err
-	}
-	return opterr
-}
-
 func setSockOptInt(sc syscall.RawConn, level, name, value int) error {
 	var opterr error
 	fn := func(s uintptr) {
@@ -58,5 +46,15 @@ func setSockOptIpTtl(sc syscall.RawConn, family int, value int) error {
 func setSockOptTcpMss(sc syscall.RawConn, family int, value uint16) error {
 	level := syscall.IPPROTO_TCP
 	name := syscall.TCP_MAXSEG
+	return setSockOptInt(sc, level, name, int(value))
+}
+
+func setSockOptIpTos(sc syscall.RawConn, family int, value uint8) error {
+	level := syscall.IPPROTO_IP
+	name := syscall.IP_TOS
+	if family == syscall.AF_INET6 {
+		level = syscall.IPPROTO_IPV6
+		name = syscall.IPV6_TCLASS
+	}
 	return setSockOptInt(sc, level, name, int(value))
 }

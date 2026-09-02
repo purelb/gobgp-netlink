@@ -31,7 +31,7 @@ const (
 	TCP_MAXSEG      = 0x2  // pulled from https://pkg.go.dev/syscall?GOOS=linux#TCP_MAXSEG
 )
 
-func SetTCPMD5SigSockopt(l *net.TCPListener, address string, key string) error {
+func SetTCPMD5SigSockopt(l *net.TCPListener, bindInterface string, address string, key string) error {
 	return fmt.Errorf("setting md5 is not supported")
 }
 
@@ -75,7 +75,26 @@ func SetTCPMSSSockopt(conn net.Conn, mss uint16) error {
 	return setSockOptInt(sc, level, name, int(mss))
 }
 
-func DialerControl(logger *slog.Logger, network, address string, c syscall.RawConn, ttl, ttlMin uint8, mss uint16, password string, bindInterface string) error {
+func SetIPTOSSockopt(conn net.Conn, tos uint8) error {
+	// MSFT advises "do not use" IP_TOS syscall option
+	// https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options
+	return fmt.Errorf("setting ip tos is not supported")
+}
+
+func SetUDPTTLSockopt(conn net.Conn, ttl int) error {
+	family := extractFamilyFromConn(conn)
+	sc, err := conn.(syscall.Conn).SyscallConn()
+	if err != nil {
+		return err
+	}
+	return setSockOptIpTtl(sc, family, ttl)
+}
+
+func SetReuseAddrSockopt(sc syscall.RawConn) error {
+	return setSockOptInt(sc, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+}
+
+func DialerControl(logger *slog.Logger, network, address string, c syscall.RawConn, ttl, ttlMin uint8, mss uint16, password string, bindInterface string, tos uint8) error {
 	if password != "" {
 		logger.Warn("setting md5 for active connection is not supported",
 			slog.String("Topic", "Peer"),
@@ -93,6 +112,11 @@ func DialerControl(logger *slog.Logger, network, address string, c syscall.RawCo
 	}
 	if mss != 0 {
 		logger.Warn("setting MSS for active connection is not supported",
+			slog.String("Topic", "Peer"),
+			slog.String("Key", address))
+	}
+	if tos != 0 {
+		logger.Warn("setting TOS for active connection is not supported",
 			slog.String("Topic", "Peer"),
 			slog.String("Key", address))
 	}

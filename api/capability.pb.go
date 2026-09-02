@@ -448,10 +448,10 @@ func (*RouteRefreshCapability) Descriptor() ([]byte, []int) {
 	return file_api_capability_proto_rawDescGZIP(), []int{2}
 }
 
-// ExtendedMessageCapability mirrors the empty TLV for the BGP Extended Message
-// Capability (Capability Code 6, Capability Length 0) defined by RFC 8654. The
-// presence of this oneof on a Capability signals that the peer advertised it;
-// there is no payload.
+// ExtendedMessageCapability mirrors the empty TLV for the BGP
+// Extended Message Capability (Capability Code 6, Capability Length 0)
+// defined by RFC 8654. The presence of this oneof on a Capability
+// signals that the peer advertised it; there is no payload.
 type ExtendedMessageCapability struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
