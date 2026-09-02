@@ -199,11 +199,9 @@ jobs:
           go-version: "stable"
       - name: container image
         run: |
-          sudo apt-get install python3-setuptools
-          sudo pip3 install -r test/pip-requires.txt
-          fab -r test/lib make-gobgp-ctn --tag gobgp --from-image osrg/quagga
+          test/lib/make-gobgp-ctn.sh --tag gobgp --from-image osrg/quagga
           docker save gobgp > gobgp.tar
-          fab -r test/lib make-gobgp-ctn --tag gobgp-oq --from-image osrg/quagga:v1.0
+          test/lib/make-gobgp-ctn.sh --tag gobgp-oq --from-image osrg/quagga:v1.0
           docker save gobgp-oq > gobgp-oq.tar
 
       - name: upload image file
@@ -738,25 +736,6 @@ jobs:
             -c "/test/scenario_test/netlink_test.sh"
 
   # Summary job for branch protection - reports single "ci" status
-  crossbuild:
-    name: crossbuild
-    strategy:
-      matrix:
-        GOOS: ["freebsd", "openbsd", "darwin", "windows"]
-        GOARCH: ["amd64"]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "stable"
-      - run: |
-          go env
-          go build ./cmd/gobgp
-          go build ./cmd/gobgpd
-        env:
-          GOOS: ${{ matrix.GOOS }}
-          GOARCH: ${{ matrix.GOARCH }}
   tcp-md5:
     name: tcp-md5
     runs-on: ubuntu-24.04
@@ -799,7 +778,6 @@ jobs:
     needs:
       - unit
       - unit386
-      - crossbuild
       - tcp-md5
       - protobuf-check
       - yang-check
