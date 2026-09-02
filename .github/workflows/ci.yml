@@ -158,6 +158,29 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+
+      # Nothing checked the files that define all 41 jobs. A workflow can be
+      # valid YAML and still be rejected by GitHub: a step with two `with:`
+      # blocks parses fine, because YAML keeps the last duplicate key, and the
+      # run then starts with zero jobs and a bare "workflow file issue" - which
+      # presents as an empty check list rather than a red one. actionlint
+      # rejects that, along with unknown keys, bad `needs:` references and
+      # undefined context expressions.
+      #
+      # Its shellcheck integration is off. It reports 33 findings here and all
+      # of them are false: 30 are SC2209 on lines like
+      #   PYTHONPATH=test python3 -m pytest ...
+      # where shellcheck reads `test` as the shell builtin rather than this
+      # repository's directory. Leaving it on would mean 33 permanent warnings
+      # and a check nobody reads.
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" -color -shellcheck=
+
       - run: |
           npm install markdownlint-cli
           ./node_modules/.bin/markdownlint $(find . -type d -name 'node_modules' -prune -o -type f -name '*.md' -print)
