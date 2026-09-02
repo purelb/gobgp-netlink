@@ -15,6 +15,7 @@
 
 from __future__ import print_function
 
+import re
 import sys
 from collections import namedtuple
 
@@ -269,12 +270,17 @@ def emit_class_def(ctx, stmt, struct_name, prefix, fd):
 
         if is_container(child):
             name = emit_type_name
-            if name.startswith(convert_to_golang(struct_name)) and name.endswith("Config"):
-                tag_name = 'config'
-                val_name_go = 'Config'
-            elif name.startswith(convert_to_golang(struct_name)) and name.endswith("State"):
-                tag_name = 'state'
-                val_name_go = 'State'
+            # A container whose type is exactly <parent><Suffix> is addressed by
+            # the short name: NetlinkConfig is Config/`config`, not
+            # NetlinkConfig/`netlink-config`. The match is exact rather than
+            # startswith+endswith so it does not fire on VrfNetlinkImport, which
+            # is Vrf plus NetlinkImport, not Vrf plus Import.
+            for suffix in ('Config', 'State', 'Import', 'Export',
+                           'NetlinkImport', 'NetlinkExport'):
+                if name == convert_to_golang(struct_name) + suffix:
+                    tag_name = convert_to_yang(suffix)
+                    val_name_go = suffix
+                    break
 
         emit_description(child, fd=fd)
         print('  {0}\t{1} `mapstructure:"{2}" json:"{2},omitempty"`'.format(val_name_go, emit_type_name, tag_name), file=fd)
@@ -381,6 +387,15 @@ def visit_children(ctx, mod, children):
 
         elif c.arg == 'graceful-restart' and prefix == 'bgp-mp':
             c.uniq_name = 'mp-graceful-restart'
+
+        # netlink appears in two places with different shapes: globally under
+        # /bgp, and per-VRF. Without disambiguation the VRF containers generate
+        # the same type names as the global ones and silently overwrite them.
+        elif c.arg in ('import', 'export') and c.parent.uniq_name == 'netlink':
+            c.uniq_name = 'netlink-' + c.arg
+
+        elif c.arg in ('netlink-import', 'netlink-export') and c.parent.uniq_name == 'vrf':
+            c.uniq_name = 'vrf-' + c.arg
 
         if is_leaf(c) and is_enum(c.search_one('type')):
             define_enum(ctx, mod, c)
@@ -756,6 +771,7 @@ _path_exclude = [
 _typedef_exclude = [
     "/gobgp:bgp-capability",
     "/gobgp:bgp-open-message",
+    "/gobgp:route-family",
 ]
 
 _union_translation_map = {
@@ -791,6 +807,11 @@ def translate_type(name, key):
         return _type_translation_map[key]
     else:
         return key
+
+
+# 'HogeHoge' -> 'hoge-hoge'
+def convert_to_yang(type_string):
+    return re.sub(r'(?<!^)(?=[A-Z])', '-', type_string).lower()
 
 
 # 'hoge-hoge' -> 'HogeHoge'

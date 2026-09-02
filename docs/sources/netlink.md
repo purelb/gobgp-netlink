@@ -236,7 +236,7 @@ The netlink export feature allows GoBGP to export BGP routes from the RIB to the
     vrf = "customer-a"
     table-id = 100
     metric = 20
-    validate-nexthop = true  # default: true
+    skip-nexthop-validation = false  # default: false (i.e. validation is on)
 ```
 
 ### Configuration Parameters
@@ -259,7 +259,7 @@ The netlink export feature allows GoBGP to export BGP routes from the RIB to the
 | `vrf` | string | No | VRF name (empty = global routing table) |
 | `table-id` | int | No | Linux routing table ID (0 = main table) |
 | `metric` | uint32 | 20 | Route metric/priority in Linux routing table |
-| `validate-nexthop` | bool | true | Validate nexthop reachability before exporting |
+| `skip-nexthop-validation` | bool | false | Skip the nexthop reachability check before exporting |
 
 **Note**: If neither `community-list` nor `large-community-list` is specified, the rule matches ALL routes.
 
@@ -273,7 +273,7 @@ Configure export within a VRF definition using `[vrfs.netlink-export]`:
 | `linux-vrf` | string | No | (same as GoBGP VRF) | Target Linux VRF name |
 | `linux-table-id` | int | No | (auto-lookup) | Target Linux routing table ID |
 | `metric` | uint32 | Yes | - | Route metric/priority in Linux |
-| `validate-nexthop` | bool | No | true | Validate nexthop reachability |
+| `skip-nexthop-validation` | bool | No | false | Skip the nexthop reachability check |
 | `community-list` | []string | No | [] | Filter by standard communities (empty = all routes) |
 | `large-community-list` | []string | No | [] | Filter by large communities |
 
@@ -393,7 +393,7 @@ For specific use cases where nexthop validation should be skipped:
     name = "export-without-validation"
     community-list = ["65000:999"]
     table-id = 400
-    validate-nexthop = false  # Skip nexthop validation
+    skip-nexthop-validation = true  # Skip nexthop validation
 ```
 
 ### Example 6: Zebra/FRR Coexistence
@@ -1359,7 +1359,7 @@ ip route get <nexthop-ip>
 Update config:
 ```toml
 [[netlink.export.rules]]
-  validate-nexthop = false
+  skip-nexthop-validation = true
 ```
 
 ### High Error Count

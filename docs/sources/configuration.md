@@ -354,7 +354,7 @@
   vrf = ""
   table-id = 0
   metric = 100
-  validate-nexthop = true
+  skip-nexthop-validation = false
   community-list = []
 
 # Per-VRF netlink import/export
@@ -376,7 +376,7 @@
     linux-vrf = "vrf-customer1"
     linux-table-id = 100
     metric = 50
-    validate-nexthop = false
+    skip-nexthop-validation = true
     community-list = []
 ```
 

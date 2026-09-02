@@ -234,7 +234,7 @@ gobgp netlink              # Overall status
     vrf = "customer-a"
     table-id = 100
     metric = 20
-    validate-nexthop = true  # default
+    skip-nexthop-validation = false  # default
 ```
 
 ### Community Matching

@@ -67,6 +67,45 @@ jobs:
             exit 1
           fi
 
+  yang-check:
+    name: yang regeneration is up to date
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+      - name: check out the pinned model and tool sources
+        run: |
+          set -eu
+          git clone -q https://github.com/osrg/public  /tmp/oc-public
+          git clone -q https://github.com/osrg/yang    /tmp/oc-yang
+          git clone -q https://github.com/osrg/pyang   /tmp/pyang
+          git -C /tmp/oc-public checkout -q 0d3376ef
+          git -C /tmp/oc-yang   checkout -q 63f9a356
+          git -C /tmp/pyang     checkout -q fc9a965c
+      - name: regenerate and diff
+        run: |
+          set -eu
+          python3 -m pip install --quiet "setuptools<82" lxml
+          cd /tmp/pyang
+          PYTHONPATH=. python3 ./bin/pyang \
+            --plugindir "$GITHUB_WORKSPACE/tools/pyang_plugins" \
+            -p /tmp/oc-yang/standard/ietf/RFC \
+            -p /tmp/oc-public/release/models \
+            -p /tmp/oc-public/release/models/bgp \
+            -p /tmp/oc-public/release/models/policy \
+            -f golang \
+            /tmp/oc-public/release/models/policy/openconfig-routing-policy.yang \
+            /tmp/oc-public/release/models/bgp/openconfig-bgp.yang \
+            "$GITHUB_WORKSPACE/tools/pyang_plugins/gobgp.yang" \
+            | gofmt > /tmp/bgp_configs.go
+          if ! diff -u "$GITHUB_WORKSPACE/pkg/config/oc/bgp_configs.go" /tmp/bgp_configs.go; then
+            echo "::error::pkg/config/oc/bgp_configs.go does not match what the YANG generates."
+            echo "::error::It is generated - edit tools/pyang_plugins/gobgp.yang and regenerate."
+            exit 1
+          fi
+
   golangci:
     name: lint
     runs-on: ubuntu-22.04
@@ -661,6 +700,7 @@ jobs:
     needs:
       - unit
       - protobuf-check
+      - yang-check
       - golangci
       - embedded
       - lintdoc

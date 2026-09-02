@@ -1933,7 +1933,7 @@ func (s *BgpServer) parseExportRule(ruleConfig *oc.NetlinkExportRule) (*exportRu
 	rule := &exportRule{
 		Name:    ruleConfig.Name,
 		VrfName: ruleConfig.Vrf,
-		TableId: ruleConfig.TableId,
+		TableId: int(ruleConfig.TableId),
 		Metric:  ruleConfig.Metric,
 	}
 
@@ -1942,11 +1942,8 @@ func (s *BgpServer) parseExportRule(ruleConfig *oc.NetlinkExportRule) (*exportRu
 		rule.Metric = 20
 	}
 
-	// Default nexthop validation is enabled
-	rule.ValidateNexthop = true
-	if ruleConfig.ValidateNexthop != nil {
-		rule.ValidateNexthop = *ruleConfig.ValidateNexthop
-	}
+	// skip-nexthop-validation: absent and explicit false both mean validate.
+	rule.ValidateNexthop = !ruleConfig.SkipNexthopValidation
 
 	// Parse standard communities (format: "AS:VALUE" or uint32)
 	rule.Communities = make([]uint32, 0)
@@ -2047,7 +2044,7 @@ func (s *BgpServer) startNetlink(ctx context.Context) error {
 			dampeningInterval := time.Duration(s.bgpConfig.Netlink.Export.DampeningInterval) * time.Millisecond
 			routeProtocol := s.bgpConfig.Netlink.Export.RouteProtocol
 
-			exportClient, err := newNetlinkExportClient(s, s.logger, routeProtocol, dampeningInterval)
+			exportClient, err := newNetlinkExportClient(s, s.logger, int(routeProtocol), dampeningInterval)
 			if err != nil {
 				return fmt.Errorf("failed to create netlink export client: %w", err)
 			}
@@ -2176,25 +2173,23 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 			if err := validateRouteProtocol(int(r.RouteProtocol)); err != nil {
 				return err
 			}
-			s.bgpConfig.Netlink.Export.RouteProtocol = int(r.RouteProtocol)
+			s.bgpConfig.Netlink.Export.RouteProtocol = r.RouteProtocol
 		}
 
 		// Only update rules if provided in the request
 		if len(r.Rules) > 0 {
 			rules := make([]oc.NetlinkExportRule, 0, len(r.Rules))
 			for _, ruleProto := range r.Rules {
-				validateNexthop := true // default to true
 				rule := oc.NetlinkExportRule{
 					Name:               ruleProto.Name,
 					CommunityList:      ruleProto.CommunityList,
 					LargeCommunityList: ruleProto.LargeCommunityList,
 					Vrf:                ruleProto.Vrf,
-					TableId:            int(ruleProto.TableId),
+					TableId:            ruleProto.TableId,
 					Metric:             ruleProto.Metric,
-					ValidateNexthop:    &validateNexthop,
-				}
-				if !ruleProto.ValidateNexthop {
-					validateNexthop = false
+					// The rule proto still says validate-; the config model says
+					// skip-, so it inverts here.
+					SkipNexthopValidation: !ruleProto.ValidateNexthop,
 				}
 				rules = append(rules, rule)
 			}
@@ -2206,7 +2201,7 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 		s.logger.Info("Enabling netlink export via gRPC",
 			slog.String("Topic", "netlink"),
 			slog.Uint64("DampeningInterval", uint64(s.bgpConfig.Netlink.Export.DampeningInterval)),
-			slog.Int("RouteProtocol", s.bgpConfig.Netlink.Export.RouteProtocol),
+			slog.Int("RouteProtocol", int(s.bgpConfig.Netlink.Export.RouteProtocol)),
 			slog.Int("RuleCount", len(s.bgpConfig.Netlink.Export.Rules)))
 
 		// Start/restart netlink with new config
@@ -2330,11 +2325,10 @@ func (s *BgpServer) EnableVrfNetlinkExport(ctx context.Context, r *api.EnableVrf
 		vrfConfig.NetlinkExport.Enabled = true
 		if r.Config != nil {
 			vrfConfig.NetlinkExport.LinuxVrf = r.Config.LinuxVrf
-			vrfConfig.NetlinkExport.LinuxTableId = int(r.Config.LinuxTableId)
+			vrfConfig.NetlinkExport.LinuxTableId = r.Config.LinuxTableId
 			vrfConfig.NetlinkExport.Metric = r.Config.Metric
-			// skip_nexthop_validation=false (default) means validate
-			validateNexthop := !r.Config.SkipNexthopValidation
-			vrfConfig.NetlinkExport.ValidateNexthop = &validateNexthop
+			// Both sides now say skip-, so this is a straight copy.
+			vrfConfig.NetlinkExport.SkipNexthopValidation = r.Config.SkipNexthopValidation
 			vrfConfig.NetlinkExport.CommunityList = r.Config.CommunityList
 			vrfConfig.NetlinkExport.LargeCommunityList = r.Config.LargeCommunityList
 		}

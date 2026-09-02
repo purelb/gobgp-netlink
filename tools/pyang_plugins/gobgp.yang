@@ -711,6 +711,18 @@ module gobgp {
         "Configured states of VRF.";
       uses gobgp-vrf-common;
     }
+
+    container netlink-import {
+      description
+        "Netlink import configuration for this VRF.";
+      uses netlink-common-config;
+    }
+
+    container netlink-export {
+      description
+        "Netlink export configuration for this VRF.";
+      uses vrf-netlink-export-config;
+    }
   }
 
   grouping gobgp-vrfs {
@@ -1274,6 +1286,141 @@ module gobgp {
 
   augment "/bgp:bgp" {
     uses zebra-set;
+  }
+
+  grouping netlink-common-config {
+    description
+      "Netlink route exchange with the Linux kernel. Used for the global
+      container, its operational state, and the import direction, which carry
+      the same fields.";
+    leaf enabled {
+      type boolean;
+      description
+        "Configure enabling netlink route exchange.";
+    }
+    leaf vrf {
+      type string;
+      description
+        "Name of the GoBGP VRF this applies to. Empty means the global RIB.";
+    }
+    leaf-list interface {
+      type string;
+      description
+        "Interfaces to read connected routes from. Shell-style globs are
+        expanded against the interfaces present on the system.";
+    }
+  }
+
+  grouping netlink-export-config {
+    description
+      "Export direction: BGP best paths programmed into the kernel FIB.";
+    leaf enabled {
+      type boolean;
+    }
+    leaf dampening-interval {
+      type uint32;
+      description
+        "Milliseconds to coalesce repeated updates for a prefix before
+        programming it.";
+    }
+    leaf route-protocol {
+      type int32;
+      description
+        "RTPROT_* value written on exported routes, and the value the startup
+        sweep matches on. 186 is RTPROT_BGP and is shared with other BGP
+        daemons; give this daemon a dedicated value or a dedicated table if
+        another one writes to the same table.";
+    }
+    container rules {
+      description
+        "Export rules. A path is exported if it matches any rule.";
+      list netlink-export-rule {
+        key "name";
+        leaf name {
+          type string;
+        }
+        leaf-list community {
+          type string;
+          description
+            "Match paths carrying any of these communities. Empty matches
+            every path.";
+        }
+        leaf-list large-community {
+          type string;
+        }
+        leaf vrf {
+          type string;
+        }
+        leaf table-id {
+          type int32;
+          description
+            "Linux routing table to program. 0 means the main table.";
+        }
+        leaf metric {
+          type uint32;
+        }
+        leaf skip-nexthop-validation {
+          type boolean;
+          description
+            "Skip the reachability check before programming a route. Stated as
+            skip- rather than validate- so that an absent value and an explicit
+            false mean the same safe thing: validate.";
+        }
+      }
+    }
+  }
+
+  grouping netlink-set {
+    container netlink {
+      container config {
+        uses netlink-common-config;
+      }
+      container state {
+        uses netlink-common-config;
+      }
+      container import {
+        uses netlink-common-config;
+      }
+      container export {
+        uses netlink-export-config;
+      }
+    }
+  }
+
+  augment "/bgp:bgp" {
+    uses netlink-set;
+  }
+
+  grouping vrf-netlink-export-config {
+    description
+      "Per-VRF export. Differs from a global rule: the target is a Linux VRF
+      device rather than an arbitrary table, and the table id is resolved from
+      that device when not given.";
+    leaf enabled {
+      type boolean;
+    }
+    leaf linux-vrf {
+      type string;
+      description
+        "Linux VRF device to program routes into.";
+    }
+    leaf linux-table-id {
+      type int32;
+      description
+        "Linux routing table id. Resolved from the VRF device when zero.";
+    }
+    leaf metric {
+      type uint32;
+    }
+    leaf skip-nexthop-validation {
+      type boolean;
+    }
+    leaf-list community {
+      type string;
+    }
+    leaf-list large-community {
+      type string;
+    }
   }
 
   grouping collector-config {
