@@ -45,10 +45,15 @@ jobs:
       # proto/buf.yaml has declared `breaking: use: [FILE]` since the config was
       # written, but nothing ever ran it. A wire-breaking change - a reused field
       # number, a changed type - reached main unremarked.
+      # Only meaningful on a pull request: the question is "what would merging
+      # this change for a consumer", and after it lands main is its own
+      # baseline. A deliberate break - the planned field renumbering - is
+      # allowed through by labelling the PR `proto-break`, which leaves the
+      # intent recorded on the PR rather than in a commit that edits this file
+      # twice.
       - name: buf breaking
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'proto-break')
         run: buf breaking proto/ --against "https://github.com/purelb/gobgp-netlink.git#branch=main,subdir=proto"
-        # A deliberate wire break (the planned field renumbering) fails here by
-        # design; that PR removes this step for one commit and restores it.
 
       # api/*.pb.go is generated and committed. Nothing checked that it still
       # matches the .proto, so a hand edit or a stale regeneration was invisible.

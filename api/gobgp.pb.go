@@ -9421,9 +9421,15 @@ type PeerState struct {
 	DisconnectReason  PeerState_DisconnectReason `protobuf:"varint,21,opt,name=disconnect_reason,json=disconnectReason,proto3,enum=api.PeerState_DisconnectReason" json:"disconnect_reason,omitempty"`
 	DisconnectMessage string                     `protobuf:"bytes,22,opt,name=disconnect_message,json=disconnectMessage,proto3" json:"disconnect_message,omitempty"`
 	// Netlink nexthop information
-	Ipv4Nexthop          string `protobuf:"bytes,23,opt,name=ipv4_nexthop,json=ipv4Nexthop,proto3" json:"ipv4_nexthop,omitempty"`
-	Ipv6Nexthop          string `protobuf:"bytes,24,opt,name=ipv6_nexthop,json=ipv6Nexthop,proto3" json:"ipv6_nexthop,omitempty"`
-	Ipv6LinkLocalNexthop string `protobuf:"bytes,25,opt,name=ipv6_link_local_nexthop,json=ipv6LinkLocalNexthop,proto3" json:"ipv6_link_local_nexthop,omitempty"`
+	// Moved out of 23-25 so this fork stops colliding with upstream's numbering:
+	// v4.9.0 uses PeerState field 23 for BfdPeerState, and both it and the
+	// string that was here are wire type 2, so protobuf offers no type-safety
+	// net - a decoder reading "192.168.1.1" as a nested message either rejects
+	// the whole message or produces a garbage struct. 200+ is reserved for
+	// fork-local fields and leaves upstream room to grow.
+	Ipv4Nexthop          string `protobuf:"bytes,200,opt,name=ipv4_nexthop,json=ipv4Nexthop,proto3" json:"ipv4_nexthop,omitempty"`
+	Ipv6Nexthop          string `protobuf:"bytes,201,opt,name=ipv6_nexthop,json=ipv6Nexthop,proto3" json:"ipv6_nexthop,omitempty"`
+	Ipv6LinkLocalNexthop string `protobuf:"bytes,202,opt,name=ipv6_link_local_nexthop,json=ipv6LinkLocalNexthop,proto3" json:"ipv6_link_local_nexthop,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -15178,7 +15184,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\fmultihop_ttl\x18\x02 \x01(\rR\vmultihopTtl\"\x83\x01\n" +
 	"\x0eRouteReflector\x124\n" +
 	"\x16route_reflector_client\x18\x01 \x01(\bR\x14routeReflectorClient\x12;\n" +
-	"\x1aroute_reflector_cluster_id\x18\x02 \x01(\tR\x17routeReflectorClusterId\"\xe5\x0e\n" +
+	"\x1aroute_reflector_cluster_id\x18\x02 \x01(\tR\x17routeReflectorClusterId\"\xee\x0e\n" +
 	"\tPeerState\x12#\n" +
 	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1b\n" +
@@ -15204,10 +15210,10 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\tlocal_cap\x18\x13 \x03(\v2\x0f.api.CapabilityR\blocalCap\x12\x1b\n" +
 	"\trouter_id\x18\x14 \x01(\tR\brouterId\x12L\n" +
 	"\x11disconnect_reason\x18\x15 \x01(\x0e2\x1f.api.PeerState.DisconnectReasonR\x10disconnectReason\x12-\n" +
-	"\x12disconnect_message\x18\x16 \x01(\tR\x11disconnectMessage\x12!\n" +
-	"\fipv4_nexthop\x18\x17 \x01(\tR\vipv4Nexthop\x12!\n" +
-	"\fipv6_nexthop\x18\x18 \x01(\tR\vipv6Nexthop\x125\n" +
-	"\x17ipv6_link_local_nexthop\x18\x19 \x01(\tR\x14ipv6LinkLocalNexthop\"\xd4\x01\n" +
+	"\x12disconnect_message\x18\x16 \x01(\tR\x11disconnectMessage\x12\"\n" +
+	"\fipv4_nexthop\x18\xc8\x01 \x01(\tR\vipv4Nexthop\x12\"\n" +
+	"\fipv6_nexthop\x18\xc9\x01 \x01(\tR\vipv6Nexthop\x126\n" +
+	"\x17ipv6_link_local_nexthop\x18\xca\x01 \x01(\tR\x14ipv6LinkLocalNexthop\"\xd4\x01\n" +
 	"\fSessionState\x12\x1d\n" +
 	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12SESSION_STATE_IDLE\x10\x01\x12\x19\n" +
@@ -15237,7 +15243,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x12 \n" +
 	"\x1cDISCONNECT_REASON_HARD_RESET\x10\v\x12\"\n" +
 	"\x1eDISCONNECT_REASON_DECONFIGURED\x10\f\x12!\n" +
-	"\x1dDISCONNECT_REASON_BAD_PEER_AS\x10\r\"V\n" +
+	"\x1dDISCONNECT_REASON_BAD_PEER_AS\x10\rJ\x04\b\x17\x10\x1a\"V\n" +
 	"\bMessages\x12(\n" +
 	"\breceived\x18\x01 \x01(\v2\f.api.MessageR\breceived\x12 \n" +
 	"\x04sent\x18\x02 \x01(\v2\f.api.MessageR\x04sent\"\x97\x02\n" +

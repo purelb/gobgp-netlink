@@ -1047,10 +1047,19 @@ message PeerState {
   }
   DisconnectReason disconnect_reason = 21;
   string disconnect_message = 22;
+  // Vacated by this fork; 23 is BfdPeerState upstream. Reserved so reusing them
+  // fails in protoc rather than silently on the wire.
+  reserved 23 to 25;
   // Netlink nexthop information
-  string ipv4_nexthop = 23;
-  string ipv6_nexthop = 24;
-  string ipv6_link_local_nexthop = 25;
+  // Moved out of 23-25 so this fork stops colliding with upstream's numbering:
+  // v4.9.0 uses PeerState field 23 for BfdPeerState, and both it and the
+  // string that was here are wire type 2, so protobuf offers no type-safety
+  // net - a decoder reading "192.168.1.1" as a nested message either rejects
+  // the whole message or produces a garbage struct. 200+ is reserved for
+  // fork-local fields and leaves upstream room to grow.
+  string ipv4_nexthop = 200;
+  string ipv6_nexthop = 201;
+  string ipv6_link_local_nexthop = 202;
 }
 
 message Messages {
