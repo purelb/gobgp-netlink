@@ -296,20 +296,32 @@ func (ocm *outgoingConnManager) run(ch chan<- outgoingConn) {
 			reasonCh := make(chan fsmStateReason, 1)
 			var wg sync.WaitGroup
 			wg.Add(1)
+			holdTimer := time.NewTimer(time.Second * time.Duration(fsm.opensentHoldTime))
 			go ocm.fsm.h.recvMessage(ocm.ctx, conn, recvCh, reasonCh, &wg)
 			select {
+			case <-holdTimer.C:
+				fsm.logger.Debug("outgoing connection closing due to hold timer expired in OPEN SENT state")
+				notif := bgp.NewBGPNotificationMessage(bgp.BGP_ERROR_HOLD_TIMER_EXPIRED, 0, nil)
+				// sendNotification closes the connection
+				_ = fsm.sendNotification(conn, notif)
+				wg.Wait()
+				ocm.state.Store(bgp.BGP_FSM_CONNECT)
+				continue
 			case <-ocm.ctx.Done():
+				holdTimer.Stop()
 				conn.SetReadDeadline(time.Now())
 				conn.Close()
 				wg.Wait()
 				return
 			case reason := <-reasonCh:
+				holdTimer.Stop()
 				fsm.logger.Debug("outgoing connection IO error", slog.String("reason", reason.String()))
 				conn.Close()
 				wg.Wait()
 				ocm.state.Store(bgp.BGP_FSM_CONNECT)
 				continue
 			case fmsg := <-recvCh:
+				holdTimer.Stop()
 				wg.Wait()
 				nextState, _, notif := ocm.fsm.handleOpen(fmsg)
 				if nextState != bgp.BGP_FSM_OPENCONFIRM {
@@ -1206,9 +1218,26 @@ func (h *fsmHandler) recvMessageWithError(conn net.Conn, stateReasonCh chan<- fs
 
 	useRevisedError := h.fsm.isTreatAsWithdraw
 
-	m, err := bgp.ParseBGPBody(hd, bodyBuf, &bgp.MarshallingOption{AddPath: h.fsm.familyMap.Load().(map[bgp.Family]bgp.BGPAddPathMode)})
+	// Use2ByteAS is not optional here. The merge-base decoder guessed the AS
+	// width with a try-4-byte-then-try-2-byte heuristic; v4.9.0's replaces that
+	// with an explicit option (validate.go: `if opt != nil && opt.Use2ByteAS`),
+	// so taking pkg/packet without passing it makes every AS_PATH from a peer
+	// that did not negotiate 4-byte AS fail to parse.
+	m, err := bgp.ParseBGPBody(hd, bodyBuf, &bgp.MarshallingOption{
+		AddPath:    h.fsm.familyMap.Load().(map[bgp.Family]bgp.BGPAddPathMode),
+		Use2ByteAS: h.fsm.twoByteAsTrans,
+	})
 	if err != nil {
-		handling = h.handlingError(m, err, useRevisedError)
+		// ParseBGPBody returns a nil message for a header-level failure - an
+		// unknown message type, for one - and handlingError dereferences
+		// m.Header.Type unconditionally. That path is reachable in OPENSENT,
+		// before any OPEN has been validated, so a peer could kill the process
+		// with a ~19-byte payload and no credentials.
+		if m == nil {
+			handling = bgp.ERROR_HANDLING_SESSION_RESET
+		} else {
+			handling = h.handlingError(m, err, useRevisedError)
+		}
 		h.fsm.bgpMessageStateUpdate(0, true)
 	} else {
 		h.fsm.bgpMessageStateUpdate(m.Header.Type, true)

@@ -50,7 +50,15 @@ func (s *SRPolicyNLRI) decodeFromBytes(data []byte, options ...*MarshallingOptio
 	p += 4
 	s.Color = binary.BigEndian.Uint32(data[p : p+4])
 	p += 4
-	s.Endpoint = data[p:]
+	// Endpoint is the remainder of the declared NLRI length (4 bytes for
+	// IPv4, 16 for IPv6), not the rest of the buffer. When several SR Policy
+	// NLRIs are packed in one MP_REACH, data still holds the trailing
+	// siblings here, so slicing to p: would fold them into this endpoint.
+	endpointLen := int(s.Length) - 8
+	if len(data) < p+endpointLen {
+		return NewMessageError(BGP_ERROR_UPDATE_MESSAGE_ERROR, BGP_ERROR_SUB_MALFORMED_ATTRIBUTE_LIST, nil, "Malformed SR Policy NLRI")
+	}
+	s.Endpoint = data[p : p+endpointLen]
 
 	return nil
 }
@@ -230,11 +238,16 @@ func (t *TunnelEncapSubTLVSRCandidatePathName) DecodeFromBytes(data []byte) erro
 	if err != nil {
 		return err
 	}
-	// Skip Reserved byte
-	if int(t.Length) < t.Len() {
+	// Body layout is one Reserved byte followed by the Candidate
+	// Path Name octet string (RFC 9012 Section 2.4.4 / IANA SR
+	// Policy Tunnel Encapsulation Sub-TLVs, type 129). value is
+	// the body slice with length t.Length; the previous code read
+	// value[1:t.Len()] which adds the 3-byte sub-TLV header onto
+	// the upper bound and over-reads into the next sub-TLV.
+	if t.Length < 1 {
 		return malformedAttrListErr("TunnelEncapSubTLVSRCandidatePathName length is too short")
 	}
-	t.CandidatePathName = string(value[1:t.Len()])
+	t.CandidatePathName = string(value[1:])
 	return nil
 }
 
@@ -414,7 +427,8 @@ func (t *TunnelEncapSubTLVSRBSID) DecodeFromBytes(data []byte) error {
 	}
 	// Check Sub TLV length, only 3 possible length are allowed
 	switch t.Length {
-	case 2: // No BSID, do not initializing BSID struct
+	case 2: // No BSID; initialize with empty value so String/MarshalJSON are safe
+		t.BSID = &BSID{Value: make([]byte, 0)}
 	case 6:
 		fallthrough
 	case 18:
@@ -486,7 +500,7 @@ func (t *TunnelEncapSubTLVSRv6BSID) DecodeFromBytes(data []byte) error {
 func (t *TunnelEncapSubTLVSRv6BSID) Serialize() ([]byte, error) {
 	buf := make([]byte, t.Length)
 	buf[0] = t.Flags
-	copy(buf[2:t.BSID.Len()], t.BSID.Serialize())
+	copy(buf[2:], t.BSID.Serialize())
 	return t.TunnelEncapSubTLV.Serialize(buf[:])
 }
 
@@ -797,8 +811,7 @@ func (t *TunnelEncapSubTLVSRSegmentList) DecodeFromBytes(data []byte) error {
 	// Skip reserved byte to access inner SubTLV type
 	value = value[1:]
 	var segments []TunnelEncapSubTLVInterface
-	p := 0
-	for p < t.Len()-4 {
+	for len(value) > 0 {
 		var segment TunnelEncapSubTLVInterface
 		switch SegmentType(value[0]) {
 		case SegmentListSubTLVWeight:
@@ -806,7 +819,6 @@ func (t *TunnelEncapSubTLVSRSegmentList) DecodeFromBytes(data []byte) error {
 			if err := t.Weight.DecodeFromBytes(value); err != nil {
 				return NewMessageError(BGP_ERROR_UPDATE_MESSAGE_ERROR, BGP_ERROR_SUB_MALFORMED_ATTRIBUTE_LIST, nil, err.Error())
 			}
-			p += t.Weight.Len()
 			value = value[t.Weight.Len():]
 			continue
 		case TypeA:
@@ -843,7 +855,6 @@ func (t *TunnelEncapSubTLVSRSegmentList) DecodeFromBytes(data []byte) error {
 			return NewMessageError(BGP_ERROR_UPDATE_MESSAGE_ERROR, BGP_ERROR_SUB_MALFORMED_ATTRIBUTE_LIST, nil, msg)
 		}
 		segments = append(segments, segment)
-		p += segment.Len()
 		value = value[segment.Len():]
 	}
 	if len(segments) == 0 {

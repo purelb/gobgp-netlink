@@ -4,6 +4,7 @@ aggregator
 aigp
 aspath
 apiutil
+asplain
 attrs
 bgpd
 bsid
@@ -15,12 +16,15 @@ enlp
 ethernet
 etree
 evpn
+fapm
 flowspec
 gobgp
 gobgpd
+goroutines
 grpc
 gzip
 ibgp
+interwork
 ipproto
 isis
 keepalive

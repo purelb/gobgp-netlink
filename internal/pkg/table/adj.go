@@ -63,12 +63,16 @@ func (adj *AdjRib) Update(pathList []*Path) {
 		if path.IsWithdraw {
 			if idx != -1 {
 				d.knownPathList = append(d.knownPathList[:idx], d.knownPathList[idx+1:]...)
-				if len(d.knownPathList) == 0 {
-					t.deleteDest(d)
-				}
 				if !old.IsRejected() {
 					adj.accepted[rf]--
 				}
+			}
+			// getOrCreateDest above created this destination unconditionally, so
+			// a withdraw for a prefix the peer never advertised (idx == -1) used
+			// to leave it behind forever. Deleting an empty destination has to
+			// happen outside the idx check.
+			if len(d.knownPathList) == 0 {
+				t.deleteDest(d)
 			}
 			path.SetDropped(true)
 		} else {

@@ -25,15 +25,42 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
+      # buf-setup-action still declares node20 and there is no release that
+      # does not - v1.50.0 (Jan 2025) is the latest and GitHub forces it onto
+      # node24 - so that deprecation warning cannot be cleared here.
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: latest
+          # It resolves the buf release through the GitHub API; without a token
+          # that is the anonymous rate limit, which this job now leans on for
+          # three steps rather than two.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: buf lint
         run: buf lint proto/
 
       - name: buf format check
         run: buf format --diff --exit-code
+
+      # proto/buf.yaml has declared `breaking: use: [FILE]` since the config was
+      # written, but nothing ever ran it. A wire-breaking change - a reused field
+      # number, a changed type - reached main unremarked.
+      - name: buf breaking
+        run: buf breaking proto/ --against "https://github.com/purelb/gobgp-netlink.git#branch=main,subdir=proto"
+        # A deliberate wire break (the planned field renumbering) fails here by
+        # design; that PR removes this step for one commit and restores it.
+
+      # api/*.pb.go is generated and committed. Nothing checked that it still
+      # matches the .proto, so a hand edit or a stale regeneration was invisible.
+      - name: buf generate is up to date
+        working-directory: proto
+        run: |
+          buf generate
+          cd ..
+          if ! git diff --exit-code -- api/; then
+            echo "::error::api/ is stale - run 'buf generate proto/' and commit the result"
+            exit 1
+          fi
 
   golangci:
     name: lint
@@ -44,7 +71,7 @@ jobs:
         with:
           go-version: "stable"
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           skip-cache: true
 
@@ -113,7 +140,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/bgp_router_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/bgp_router_test.py --gobgp-image gobgp -x -s
 
   evpn:
     name: evpn
@@ -130,7 +157,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/evpn_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/evpn_test.py --gobgp-image gobgp -x -s
 
   flowspec:
     name: flowspec
@@ -147,7 +174,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/flow_spec_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/flow_spec_test.py --gobgp-image gobgp -x -s
 
   global-policy:
     name: global-policy
@@ -164,7 +191,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/global_policy_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/global_policy_test.py --gobgp-image gobgp -x -s
 
   graceful-restart:
     name: graceful-restart
@@ -181,7 +208,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/graceful_restart_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/graceful_restart_test.py --gobgp-image gobgp -x -s
 
   ibgp:
     name: ibgp
@@ -198,7 +225,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/ibgp_router_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/ibgp_router_test.py --gobgp-image gobgp -x -s
 
   rr:
     name: route-refector
@@ -215,7 +242,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/route_reflector_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/route_reflector_test.py --gobgp-image gobgp -x -s
 
   as2:
     name: as2
@@ -232,7 +259,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/route_server_as2_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/route_server_as2_test.py --gobgp-image gobgp -x -s
 
   ipv4-v6:
     name: ipv4-v6
@@ -252,7 +279,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/route_server_ipv4_v6_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/route_server_ipv4_v6_test.py --gobgp-image gobgp -x -s
 
   malformed:
     name: malformed
@@ -269,7 +296,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/route_server_malformed_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/route_server_malformed_test.py --gobgp-image gobgp -x -s
 
   rs-policy-grpc:
     name: rs-policy-grpc
@@ -286,7 +313,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/route_server_policy_grpc_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/route_server_policy_grpc_test.py --gobgp-image gobgp -x -s
 
   rs-policy:
     name: rs-policy
@@ -303,7 +330,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/route_server_policy_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/route_server_policy_test.py --gobgp-image gobgp -x -s
 
   softreset:
     name: softreset
@@ -320,7 +347,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/route_server_softreset_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/route_server_softreset_test.py --gobgp-image gobgp -x -s
 
   rs1:
     name: routeserver1
@@ -337,7 +364,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/route_server_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/route_server_test.py --gobgp-image gobgp -x -s
 
   rs2:
     name: routeserver2
@@ -354,7 +381,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/route_server_test2.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/route_server_test2.py --gobgp-image gobgp -x -s
 
   llgr:
     name: llgr
@@ -371,7 +398,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/long_lived_graceful_restart_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/long_lived_graceful_restart_test.py --gobgp-image gobgp -x -s
 
   vrf-neighbor1:
     name: vrf-neighbor1
@@ -388,7 +415,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/vrf_neighbor_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/vrf_neighbor_test.py --gobgp-image gobgp -x -s
 
   vrf-neighbor2:
     name: vrf-neighbor2
@@ -405,7 +432,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/vrf_neighbor_test2.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/vrf_neighbor_test2.py --gobgp-image gobgp -x -s
 
   rtc:
     name: rtc
@@ -422,7 +449,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/rtc_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/rtc_test.py --gobgp-image gobgp -x -s
 
   unnumbered:
     name: unnumbered
@@ -446,7 +473,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/bgp_unnumbered_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/bgp_unnumbered_test.py --gobgp-image gobgp -x -s
 
   aspath:
     name: aspath
@@ -463,7 +490,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/aspath_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/aspath_test.py --gobgp-image gobgp -x -s
 
   addpath:
     name: addpath
@@ -480,7 +507,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/addpath_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/addpath_test.py --gobgp-image gobgp -x -s
 
   malformed-handling:
     name: malformed-handling
@@ -497,7 +524,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/bgp_malformed_msg_handling_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/bgp_malformed_msg_handling_test.py --gobgp-image gobgp -x -s
 
   confederation:
     name: confederation
@@ -514,7 +541,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/bgp_confederation_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/bgp_confederation_test.py --gobgp-image gobgp -x -s
 
   zebra:
     name: zebra
@@ -531,7 +558,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/bgp_zebra_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/bgp_zebra_test.py --gobgp-image gobgp -x -s
 
   zebra-nht:
     name: zebra-nht
@@ -548,7 +575,7 @@ jobs:
           docker load < artifact/gobgp-oq.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/bgp_zebra_nht_test.py --gobgp-image gobgp-oq -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/bgp_zebra_nht_test.py --gobgp-image gobgp-oq -x -s
 
   zapi-v3:
     name: zapi-v3
@@ -565,7 +592,7 @@ jobs:
           docker load < artifact/gobgp-oq.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/zapi_v3_test.py --gobgp-image gobgp-oq -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/zapi_v3_test.py --gobgp-image gobgp-oq -x -s
 
   zapi-v3-multipath:
     name: zapi-v3-multipath
@@ -582,7 +609,7 @@ jobs:
           docker load < artifact/gobgp-oq.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/zapi_v3_multipath_test.py --gobgp-image gobgp-oq -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/zapi_v3_multipath_test.py --gobgp-image gobgp-oq -x -s
 
   mup:
     name: mup
@@ -599,7 +626,7 @@ jobs:
           docker load < artifact/gobgp.tar
           sudo apt-get install python3-setuptools
           sudo pip3 install -r test/pip-requires.txt
-          PYTHONPATH=test python3 test/scenario_test/mup_test.py --gobgp-image gobgp -x -s
+          PYTHONPATH=test python3 -m pytest test/scenario_test/mup_test.py --gobgp-image gobgp -x -s
 
   netlink:
     name: netlink

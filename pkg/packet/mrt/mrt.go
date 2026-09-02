@@ -326,13 +326,14 @@ func parsePeerIndexTable(data []byte) (*PeerIndexTable, error) {
 		return nil, errNnotAllPeerIndexBytesAvailable
 	}
 	t.CollectorBgpId, _ = netip.AddrFromSlice(data[:4])
-	viewLen := binary.BigEndian.Uint16(data[4:6])
-	if len(data) < 6+int(viewLen) {
+	viewLen := int(binary.BigEndian.Uint16(data[4:6]))
+	viewEnd := 6 + viewLen
+	if len(data) < viewEnd {
 		return nil, errNnotAllPeerIndexBytesAvailable
 	}
-	t.ViewName = string(data[6 : 6+viewLen])
+	t.ViewName = string(data[6:viewEnd])
 
-	data = data[6+viewLen:]
+	data = data[viewEnd:]
 
 	if len(data) < 2 {
 		return nil, errNnotAllPeerIndexBytesAvailable
@@ -412,6 +413,9 @@ func parseRibEntry(data []byte, family bgp.Family, isAddPath bool, prefix ...bgp
 	}
 	totalLen := binary.BigEndian.Uint16(data[:2])
 	data = data[2:]
+	if len(data) < int(totalLen) {
+		return nil, nil, errNotAllRibEntryBytesAvailable
+	}
 	options := &bgp.MarshallingOption{
 		MRT: true,
 	}
@@ -440,11 +444,12 @@ func parseRibEntry(data []byte, family bgp.Family, isAddPath bool, prefix ...bgp
 			mp.Value = []bgp.PathNLRI{{NLRI: prefix[0], ID: e.PathIdentifier}}
 		}
 
-		attrLen -= uint16(p.Len())
-		if len(data) < p.Len() {
-			return nil, nil, errNotAllRibEntryBytesAvailable
+		pLen := p.Len()
+		if pLen > int(attrLen) {
+			return nil, nil, fmt.Errorf("path attribute length %d exceeds remaining attribute length %d", pLen, attrLen)
 		}
-		data = data[p.Len():]
+		attrLen -= uint16(pLen)
+		data = data[pLen:]
 		e.PathAttributes = append(e.PathAttributes, p)
 	}
 	return e, data, nil

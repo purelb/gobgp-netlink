@@ -1,4 +1,4 @@
-nose
+pytest
 toml
 pyyaml
 fabric == 2.4.0

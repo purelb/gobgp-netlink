@@ -3935,6 +3935,19 @@ func (r *RoutingPolicy) DeletePolicy(x *Policy, all, preserve bool, activeId []s
 	return err
 }
 
+// DeletePeerPolicy drops the policy assignment of a peer that is gone. Nothing
+// else removes an entry from assignmentMap, and SetPeerPolicy is reached from
+// the dynamic-neighbour accept path before any OPEN, so without this the map
+// grows on every inbound TCP connection - unbounded, with no session and no
+// credentials. A stale entry can also be applied to a later peer that reuses
+// the address.
+func (r *RoutingPolicy) DeletePeerPolicy(peerId string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	delete(r.assignmentMap, peerId)
+}
+
 func (r *RoutingPolicy) GetPolicyAssignment(id string, dir PolicyDirection) (RouteType, []*Policy, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
