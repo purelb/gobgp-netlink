@@ -68,43 +68,65 @@ jobs:
           fi
 
   yang-check:
-    name: yang regeneration is up to date
-    runs-on: ubuntu-22.04
+    name: generated YANG files check
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: "stable"
-      - name: check out the pinned model and tool sources
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # The model repositories are pinned. osrg/public and osrg/yang are forks
+      # that stopped tracking upstream, but osrg/pyang follows upstream pyang,
+      # where a new release can change the generated output. Without a pin, an
+      # unrelated pull request starts failing here. These land under
+      # .yang-models/, which is untracked, so the diff check below ignores them.
+      - uses: actions/checkout@v7
+        with:
+          repository: osrg/public
+          ref: 0d3376ef325b982124de8360e00eb36fc6367de5
+          path: .yang-models/public
+      - uses: actions/checkout@v7
+        with:
+          repository: osrg/yang
+          ref: 63f9a3563c2b31832e9e2046529fa61f3d31f6dd
+          path: .yang-models/yang
+      - uses: actions/checkout@v7
+        with:
+          repository: osrg/pyang
+          ref: fc9a965c3ae80688cc2889aefa183cf1aa6d55c2
+          path: .yang-models/pyang
+
+      # pyang imports pkg_resources, which setuptools 82 removes.
+      - name: install pyang dependencies
+        run: python -m pip install 'setuptools<82' -r .yang-models/pyang/requirements.txt
+
+      # shell: bash adds -o pipefail, so pyang's exit status is not hidden by
+      # gofmt. Write to a temporary file so a failed run leaves the checked-in
+      # file alone.
+      - name: generate YANG files
+        shell: bash
         run: |
-          set -eu
-          git clone -q https://github.com/osrg/public  /tmp/oc-public
-          git clone -q https://github.com/osrg/yang    /tmp/oc-yang
-          git clone -q https://github.com/osrg/pyang   /tmp/pyang
-          git -C /tmp/oc-public checkout -q 0d3376ef
-          git -C /tmp/oc-yang   checkout -q 63f9a356
-          git -C /tmp/pyang     checkout -q fc9a965c
-      - name: regenerate and diff
-        run: |
-          set -eu
-          python3 -m pip install --quiet "setuptools<82" lxml
-          cd /tmp/pyang
-          PYTHONPATH=. python3 ./bin/pyang \
-            --plugindir "$GITHUB_WORKSPACE/tools/pyang_plugins" \
-            -p /tmp/oc-yang/standard/ietf/RFC \
-            -p /tmp/oc-public/release/models \
-            -p /tmp/oc-public/release/models/bgp \
-            -p /tmp/oc-public/release/models/policy \
+          models="$GITHUB_WORKSPACE/.yang-models"
+          cd "$models/pyang"
+          source ./env.sh
+          PYTHONPATH=. ./bin/pyang --plugindir "$GITHUB_WORKSPACE/tools/pyang_plugins" \
+            -p "$models/yang/standard/ietf/RFC" \
+            -p "$models/public/release/models" \
+            -p "$models/public/release/models/bgp" \
+            -p "$models/public/release/models/policy" \
             -f golang \
-            /tmp/oc-public/release/models/policy/openconfig-routing-policy.yang \
-            /tmp/oc-public/release/models/bgp/openconfig-bgp.yang \
+            "$models/public/release/models/policy/openconfig-routing-policy.yang" \
+            "$models/public/release/models/bgp/openconfig-bgp.yang" \
             "$GITHUB_WORKSPACE/tools/pyang_plugins/gobgp.yang" \
-            | gofmt > /tmp/bgp_configs.go
-          if ! diff -u "$GITHUB_WORKSPACE/pkg/config/oc/bgp_configs.go" /tmp/bgp_configs.go; then
-            echo "::error::pkg/config/oc/bgp_configs.go does not match what the YANG generates."
-            echo "::error::It is generated - edit tools/pyang_plugins/gobgp.yang and regenerate."
-            exit 1
-          fi
+            | gofmt > "$RUNNER_TEMP/bgp_configs.go"
+          mv "$RUNNER_TEMP/bgp_configs.go" "$GITHUB_WORKSPACE/pkg/config/oc/bgp_configs.go"
+
+      - name: generated files are up to date
+        run: git diff --exit-code
 
   golangci:
     name: lint
