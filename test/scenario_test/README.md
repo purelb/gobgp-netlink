@@ -16,44 +16,6 @@ This page explains how to set up a scenario test environment and run the test.
 
 Go, Docker, and Python3 need to be set up.
 
-```shell
-$ python --version
-Python 3.9.7
-
-$ go version
-go version go1.17 linux/arm64
-
-$ docker version
-Client:
- Version:           20.10.7
- API version:       1.41
- Go version:        go1.13.8
- Git commit:        20.10.7-0ubuntu5.1
- Built:             Mon Nov  1 00:34:28 2021
- OS/Arch:           linux/arm64
- Context:           default
- Experimental:      true
-
-Server:
- Engine:
-  Version:          20.10.7
-  API version:      1.41 (minimum version 1.12)
-  Go version:       go1.13.8
-  Git commit:       20.10.7-0ubuntu5.1
-  Built:            Thu Oct 21 23:58:58 2021
-  OS/Arch:          linux/arm64
-  Experimental:     false
- containerd:
-  Version:          1.5.5-0ubuntu3
-  GitCommit:
- runc:
-  Version:          1.0.1-0ubuntu2
-  GitCommit:
- docker-init:
-  Version:          0.19.0
-  GitCommit:
-```
-
 ## Set up dependencies
 
 Execute the following commands to install the dependencies:
@@ -71,35 +33,64 @@ $ pip install -r test/pip-requires.txt
 You need to build GoBGP docker image to test from the source code that you modified. You need run the following command every time you modify the source code.
 
 ```shell
-$ fab -r ./test/lib make-gobgp-ctn
+$ test/lib/make-gobgp-ctn.sh
+```
+
+Three tests need a second image built on an older Quagga. Build it too if you
+run them:
+
+```shell
+$ test/lib/make-gobgp-ctn.sh --tag gobgp-oq --from-image osrg/quagga:v1.0
 ```
 
 ## Run tests
 
-There are two ways to run tests
+Run a single test file with pytest:
 
-1. Run all tests
+```shell
+$ PYTHONPATH=./test python3 -m pytest test/scenario_test/<scenario test name>.py --gobgp-image gobgp -s -x
+```
 
-    You can run all scenario tests with run_all_tests.sh.
-    If all tests passed, you can see "all tests passed successfully" at the end of the test.
+`-s` shows the output of the test while it runs. `-x` stops at the first
+failure. See `test/scenario_test/*_test*.py` for the test files.
 
-    ```shell
-    $ ./test/scenario_test/run_all_tests.sh
-    ...
-    OK
-    all tests passed successfully
-    ```
+Three tests use zebra from an older Quagga and need the `gobgp-oq` image:
+`bgp_zebra_nht_test.py`, `zapi_v3_test.py` and `zapi_v3_multipath_test.py`.
+Pass `--gobgp-image gobgp-oq` for them:
 
-1. Run each test
+```shell
+$ PYTHONPATH=./test python3 -m pytest test/scenario_test/zapi_v3_test.py --gobgp-image gobgp-oq -s -x
+```
 
-    You can run scenario tests individually with each test file.
-    See `test/scenario_test/*.py`, for the individual test files.
+Two tests need the host to be set up first. `bgp_unnumbered_test.py` needs IPv6
+in Docker. Do not assign an IPv6 address to the `docker0` bridge, so that two
+containers get a point to point link:
 
-    ```shell
-    $ PYTHONPATH=./test python3 test/scenario_test/<scenario test name>.py --gobgp-image=gobgp
-    ...
-    OK
-    ```
+```shell
+$ echo '{"ipv6": true, "fixed-cidr-v6": "2001:db8:1::/64"}' | sudo tee /etc/docker/daemon.json
+$ sudo systemctl restart docker
+$ sudo sysctl -w net.ipv6.conf.all.disable_ipv6=0
+$ sudo sysctl -w net.ipv6.conf.default.disable_ipv6=0
+$ sudo sysctl -w net.ipv6.conf.docker0.disable_ipv6=1
+```
+
+`tcp_md5_test.py` needs the vrf module:
+
+```shell
+$ sudo apt-get install -y linux-modules-extra-$(uname -r)
+$ sudo modprobe vrf
+```
+
+You can also run every test in one command:
+
+```shell
+$ PYTHONPATH=./test python3 -m pytest test/scenario_test/ --gobgp-image gobgp -s -x
+```
+
+This runs the test files one after another in a single process, so it takes a
+long time. It also passes one image to every file, so the three tests that need
+`gobgp-oq` fail. CI runs each test file as its own job, so opening a pull
+request is the faster way to get the full result.
 
 ## Clean up
 

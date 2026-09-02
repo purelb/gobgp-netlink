@@ -164,20 +164,20 @@ func TestEnableNetlinkExportGRPC(t *testing.T) {
 	// Verify config was updated
 	assert.True(t, s.bgpConfig.Netlink.Export.Enabled)
 	assert.Equal(t, uint32(500), s.bgpConfig.Netlink.Export.DampeningInterval)
-	assert.Equal(t, 186, s.bgpConfig.Netlink.Export.RouteProtocol)
+	assert.Equal(t, int32(186), s.bgpConfig.Netlink.Export.RouteProtocol)
 	assert.Len(t, s.bgpConfig.Netlink.Export.Rules, 2)
 
 	// Verify first rule
 	assert.Equal(t, "rule1", s.bgpConfig.Netlink.Export.Rules[0].Name)
 	assert.Equal(t, []string{"65000:100"}, s.bgpConfig.Netlink.Export.Rules[0].CommunityList)
 	assert.Equal(t, "exportvrf", s.bgpConfig.Netlink.Export.Rules[0].Vrf)
-	assert.Equal(t, 100, s.bgpConfig.Netlink.Export.Rules[0].TableId)
+	assert.Equal(t, int32(100), s.bgpConfig.Netlink.Export.Rules[0].TableId)
 	assert.Equal(t, uint32(10), s.bgpConfig.Netlink.Export.Rules[0].Metric)
 
 	// Verify second rule
 	assert.Equal(t, "rule2", s.bgpConfig.Netlink.Export.Rules[1].Name)
 	assert.Equal(t, []string{"65000:1:1"}, s.bgpConfig.Netlink.Export.Rules[1].LargeCommunityList)
-	assert.Equal(t, 200, s.bgpConfig.Netlink.Export.Rules[1].TableId)
+	assert.Equal(t, int32(200), s.bgpConfig.Netlink.Export.Rules[1].TableId)
 }
 
 func TestEnableNetlinkExportDefaultRouteProtocol(t *testing.T) {
@@ -201,7 +201,7 @@ func TestEnableNetlinkExportDefaultRouteProtocol(t *testing.T) {
 	assert.NoError(t, err)
 
 	// RouteProtocol should remain unchanged when 0 is passed
-	assert.Equal(t, 200, s.bgpConfig.Netlink.Export.RouteProtocol)
+	assert.Equal(t, int32(200), s.bgpConfig.Netlink.Export.RouteProtocol)
 }
 
 // newTestImportServer starts a server with global netlink import configured for

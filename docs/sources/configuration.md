@@ -79,6 +79,7 @@
         passive-mode = true
         local-address = "192.168.10.1"
         remote-port = 2016
+        ip-tos = 192 #DSCP class CS6
     [neighbors.ebgp-multihop.config]
         enabled = true #directly connection should be set false，if not ，peer will be deleted after hold-time
         multihop-ttl = 100
@@ -163,7 +164,7 @@
     [neighbors.route-server.config]
         route-server-client = true
     # To enable TTL Security, uncomment the following.
-    # Please note that this feature is mututally exclusive with
+    # Please note that this feature is mutually exclusive with
     # "neighbors.ebgp-multihop.config".
     #[neighbors.ttl-security.config]
     #    enabled = true
@@ -354,7 +355,7 @@
   vrf = ""
   table-id = 0
   metric = 100
-  validate-nexthop = true
+  skip-nexthop-validation = false
   community-list = []
 
 # Per-VRF netlink import/export
@@ -376,7 +377,7 @@
     linux-vrf = "vrf-customer1"
     linux-table-id = 100
     metric = 50
-    validate-nexthop = false
+    skip-nexthop-validation = true
     community-list = []
 ```
 

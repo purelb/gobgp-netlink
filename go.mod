@@ -8,6 +8,7 @@ require (
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da
 	github.com/eapache/channels v1.1.0
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/gaissmai/bart v0.26.1
 	github.com/getsentry/sentry-go v0.34.1
 	github.com/go-test/deep v1.1.1
 	github.com/go-viper/mapstructure/v2 v2.4.0
@@ -26,6 +27,7 @@ require (
 	github.com/spf13/viper v1.20.1
 	github.com/stretchr/testify v1.12.1
 	github.com/vishvananda/netlink v1.3.1
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.41.0
 	golang.org/x/time v0.15.0

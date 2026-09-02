@@ -20,9 +20,10 @@ package netutils
 import (
 	"fmt"
 	"net"
+	"syscall"
 )
 
-func SetTcpMD5SigSockopt(l *net.TCPListener, address string, key string) error {
+func SetTcpMD5SigSockopt(l *net.TCPListener, bindInterface string, address string, key string) error {
 	return fmt.Errorf("setting md5 is not supported")
 }
 
@@ -35,5 +36,17 @@ func SetTcpMinTTLSockopt(conn net.Conn, ttl int) error {
 }
 
 func SetTcpMSSSockopt(conn net.Conn, mss uint16) error {
-	return fmt.Errorf("setting min ttl is not supported")
+	return fmt.Errorf("setting tcp mss is not supported")
+}
+
+func SetIpTOSSockopt(conn net.Conn, tos uint8) error {
+	return fmt.Errorf("setting ip tos is not supported")
+}
+
+func SetUdpTTLSockopt(conn net.Conn, ttl int) error {
+	return fmt.Errorf("setting udp ttl is not supported")
+}
+
+func SetReuseAddrSockoptImpl(_ syscall.RawConn) error {
+	return fmt.Errorf("setting SO_REUSEADDR is not supported")
 }

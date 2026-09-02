@@ -20,7 +20,7 @@ import "fmt"
 const (
 	// Original GoBGP version this fork is based on
 	MAJOR uint = 4
-	MINOR uint = 0
+	MINOR uint = 9
 	PATCH uint = 0
 
 	// PureLB fork version

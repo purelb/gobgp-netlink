@@ -109,22 +109,21 @@ func TestUpdatePathAttrsNetlinkIPv6DualNexthop(t *testing.T) {
 		{"iBGP", oc.PEER_TYPE_INTERNAL},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			peer := &oc.Neighbor{
-				Config: oc.NeighborConfig{LocalAs: 65001, PeerAs: 65002},
-				State: oc.NeighborState{
-					PeerType:        tt.peerType,
-					NeighborAddress: netip.MustParseAddr("fe80::2"),
-				},
-			}
-			// Populated by the server when the session comes up; this is the only
-			// place the dual nexthop may come from.
+			// UpdatePathAttrs is now driven entirely from PeerInfo - upstream
+			// c2462941 dropped its *oc.Neighbor parameter - so the peer type
+			// lives here too. The dual nexthop still comes only from the peer's
+			// PeerInfo, populated when the session comes up.
 			info := &PeerInfo{
+				PeerType:             tt.peerType,
+				AS:                   65002,
+				LocalAS:              65001,
+				Address:              netip.MustParseAddr("fe80::2"),
 				LocalAddress:         netip.MustParseAddr("2001:db8::1"),
 				IPv6Nexthop:          net.ParseIP("2001:db8::1"),
 				IPv6LinkLocalNexthop: net.ParseIP("fe80::1"),
 			}
 
-			out := UpdatePathAttrs(logger, global, peer, info, newNetlinkIPv6Path(t, "eth0"))
+			out := UpdatePathAttrs(logger, global, info, newNetlinkIPv6Path(t, "eth0"))
 			assert.NotNil(t, out)
 
 			nh := nexthopsOf(t, out)
@@ -141,19 +140,16 @@ func TestUpdatePathAttrsNetlinkIPv6DualNexthop(t *testing.T) {
 func TestUpdatePathAttrsNetlinkIPv6GlobalOnly(t *testing.T) {
 	logger := slog.Default()
 	global := &oc.Global{Config: oc.GlobalConfig{As: 65001, RouterId: netip.MustParseAddr("1.1.1.1")}}
-	peer := &oc.Neighbor{
-		Config: oc.NeighborConfig{LocalAs: 65001, PeerAs: 65002},
-		State: oc.NeighborState{
-			PeerType:        oc.PEER_TYPE_EXTERNAL,
-			NeighborAddress: netip.MustParseAddr("2001:db8::2"),
-		},
-	}
 	info := &PeerInfo{
+		PeerType:     oc.PEER_TYPE_EXTERNAL,
+		AS:           65002,
+		LocalAS:      65001,
+		Address:      netip.MustParseAddr("2001:db8::2"),
 		LocalAddress: netip.MustParseAddr("2001:db8::1"),
 		IPv6Nexthop:  net.ParseIP("2001:db8::1"),
 	}
 
-	out := UpdatePathAttrs(logger, global, peer, info, newNetlinkIPv6Path(t, "eth0"))
+	out := UpdatePathAttrs(logger, global, info, newNetlinkIPv6Path(t, "eth0"))
 	assert.NotNil(t, out)
 
 	nh := nexthopsOf(t, out)

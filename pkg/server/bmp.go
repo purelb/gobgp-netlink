@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
-	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -84,13 +83,21 @@ func (r ribout) update(p *table.Path) bool {
 	return true
 }
 
+func bmpAddPathMarshallingOption(path *table.Path) *bgp.MarshallingOption {
+	return &bgp.MarshallingOption{
+		AddPath: map[bgp.Family]bgp.BGPAddPathMode{
+			path.GetFamily(): bgp.BGP_ADD_PATH_BOTH,
+		},
+	}
+}
+
 func (b *bmpClient) tryConnect() *net.TCPConn {
 	interval := 1
 	for {
 		b.s.logger.Debug("Connecting to BMP server",
 			slog.String("Topic", "bmp"),
-			slog.String("Key", b.host))
-		conn, err := net.Dial("tcp", b.host)
+			slog.String("Key", b.host.String()))
+		conn, err := net.Dial("tcp", b.host.String())
 		if err != nil {
 			select {
 			case <-b.dead:
@@ -104,7 +111,7 @@ func (b *bmpClient) tryConnect() *net.TCPConn {
 		} else {
 			b.s.logger.Debug("Connected to BMP server",
 				slog.String("Topic", "bmp"),
-				slog.String("Key", b.host))
+				slog.String("Key", b.host.String()))
 			return conn.(*net.TCPConn)
 		}
 	}
@@ -125,6 +132,7 @@ func (b *bmpClient) loop() {
 		if func() bool {
 			defer func() {
 				atomic.StoreInt64(&b.downtime, time.Now().Unix())
+				conn.Close()
 			}()
 			ops := []WatchOption{WatchPeer()}
 			if b.c.RouteMonitoringPolicy == oc.BMP_ROUTE_MONITORING_POLICY_TYPE_BOTH {
@@ -132,6 +140,11 @@ func (b *bmpClient) loop() {
 			}
 			if b.c.RouteMonitoringPolicy == oc.BMP_ROUTE_MONITORING_POLICY_TYPE_PRE_POLICY || b.c.RouteMonitoringPolicy == oc.BMP_ROUTE_MONITORING_POLICY_TYPE_ALL {
 				ops = append(ops, WatchUpdate(true, "", ""))
+				// Adj-RIB-In withdrawals generated on peer down / graceful-restart
+				// expiry are not received on the wire, so they arrive on a separate
+				// watch type. They clear the ribout cache so identical routes are
+				// reported again after the session re-establishes.
+				ops = append(ops, WatchAdjInWithdraw())
 			}
 			if b.c.RouteMonitoringPolicy == oc.BMP_ROUTE_MONITORING_POLICY_TYPE_POST_POLICY || b.c.RouteMonitoringPolicy == oc.BMP_ROUTE_MONITORING_POLICY_TYPE_ALL {
 				ops = append(ops, WatchPostUpdate(true, "", ""))
@@ -142,7 +155,15 @@ func (b *bmpClient) loop() {
 			if b.c.RouteMirroringEnabled {
 				ops = append(ops, watchMessage(false))
 			}
-			w := b.s.watch(ops...)
+			w, err := b.s.watch(ops...)
+			if err != nil {
+				// the BGP server has stopped, so there is nothing left to watch.
+				b.s.logger.Warn("failed to start bmp watcher",
+					slog.String("Topic", "bmp"),
+					slog.String("Key", b.host.String()),
+					slog.String("Error", err.Error()))
+				return true
+			}
 			defer w.Stop()
 
 			var tickerCh <-chan time.Time
@@ -160,7 +181,7 @@ func (b *bmpClient) loop() {
 				if err != nil {
 					b.s.logger.Warn("failed to write to bmp server",
 						slog.String("Topic", "bmp"),
-						slog.String("Key", b.host),
+						slog.String("Key", b.host.String()),
 						slog.String("Message", err.Error()))
 				}
 				return err
@@ -173,6 +194,23 @@ func (b *bmpClient) loop() {
 
 			if err := write(bmp.NewBMPInitiation(tlv)); err != nil {
 				return false
+			}
+
+			// RFC9069 (minimal): announce a single Loc-RIB instance only when
+			// route-monitoring-policy includes local-rib.
+			sentLocRIBPeerUp := false
+			if b.c.RouteMonitoringPolicy == oc.BMP_ROUTE_MONITORING_POLICY_TYPE_LOCAL_RIB || b.c.RouteMonitoringPolicy == oc.BMP_ROUTE_MONITORING_POLICY_TYPE_ALL {
+				// For now, use PD=0 and VRF/Table Name="global".
+				if err := write(bmpLocRIBPeerUp(
+					b.s.bgpConfig.Global.Config.As,
+					b.s.bgpConfig.Global.Config.RouterId,
+					"global",
+					0,
+					time.Now().Unix(),
+				)); err != nil {
+					return false
+				}
+				sentLocRIBPeerUp = true
 			}
 
 			for {
@@ -209,13 +247,17 @@ func (b *bmpClient) loop() {
 						}
 					case *watchEventBestPath:
 						info := &table.PeerInfo{
-							Address: netip.MustParseAddr("0.0.0.0"),
+							Address: netip.IPv4Unspecified(),
 							AS:      b.s.bgpConfig.Global.Config.As,
 							ID:      b.s.bgpConfig.Global.Config.RouterId,
 						}
-						for _, p := range msg.PathList {
-							u := table.CreateUpdateMsgFromPaths([]*table.Path{p})[0]
-							if payload, err := u.Serialize(); err != nil {
+						for _, p := range locRIBPathsForBMP(msg) {
+							if p == nil {
+								continue
+							}
+							options := bmpAddPathMarshallingOption(p)
+							u := table.CreateUpdateMsgFromPaths([]*table.Path{p}, options)[0]
+							if payload, err := u.Serialize(options); err != nil {
 								return false
 							} else if err = write(bmpPeerRoute(bmp.BMP_PEER_TYPE_LOCAL_RIB, false, 0, true, info, p.GetTimestamp().Unix(), payload)); err != nil {
 								return false
@@ -251,17 +293,20 @@ func (b *bmpClient) loop() {
 								err = write(bmpPeerStats(bmp.BMP_PEER_TYPE_GLOBAL, 0, time.Now().Unix(), peer))
 							}
 						})
-					if listErr != nil && err != nil {
+					if listErr != nil || err != nil {
 						return false
 					}
 				case <-b.dead:
+					// RFC9069 (minimal): close the announced Loc-RIB instance.
+					if sentLocRIBPeerUp {
+						_ = write(bmpLocRIBPeerDown(b.s.bgpConfig.Global.Config.As, b.s.bgpConfig.Global.Config.RouterId, "global", 0, time.Now().Unix()))
+					}
 					term := bmp.NewBMPTermination([]bmp.BMPTermTLVInterface{
 						bmp.NewBMPTermTLV16(bmp.BMP_TERM_TLV_TYPE_REASON, bmp.BMP_TERM_REASON_PERMANENTLY_ADMIN),
 					})
 					if err := write(term); err != nil {
 						return false
 					}
-					conn.Close()
 					return true
 				}
 			}
@@ -271,10 +316,89 @@ func (b *bmpClient) loop() {
 	}
 }
 
+func bmpLocRIBPeerUp(localAS uint32, routerID netip.Addr, tableName string, peerDist uint64, timestamp int64) *bmp.BMPMessage {
+	const asTrans uint16 = 23456
+
+	myAS := asTrans
+	opts := []bgp.OptionParameterInterface{}
+	if localAS <= 0xffff {
+		myAS = uint16(localAS)
+	}
+	// RFC 9069 5.2: "Capabilities MUST include the 4-octet ASN and all necessary
+	// capabilities to represent the Loc-RIB Route Monitoring messages." The
+	// 4-octet ASN capability is therefore advertised unconditionally, not only
+	// when the ASN does not fit in the 2-octet My Autonomous System field.
+	opts = append(opts, bgp.NewOptionParameterCapability([]bgp.ParameterCapabilityInterface{
+		bgp.NewCapFourOctetASNumber(localAS),
+	}))
+	// Loc-RIB Route Monitoring messages are always marshalled with
+	// BGP_ADD_PATH_BOTH (see bmpAddPathMarshallingOption), so the receiver always
+	// needs the ADD-PATH capability to decode their NLRIs. Advertising it only
+	// when global multipath happened to be enabled left the fabricated OPEN
+	// describing an encoding that was not the one on the wire, and every NLRI was
+	// then parsed 4 octets out of step.
+	opts = append(opts, bgp.NewOptionParameterCapability([]bgp.ParameterCapabilityInterface{
+		bgp.NewCapAddPath([]*bgp.CapAddPathTuple{
+			bgp.NewCapAddPathTuple(bgp.RF_IPv4_UC, bgp.BGP_ADD_PATH_BOTH),
+			bgp.NewCapAddPathTuple(bgp.RF_IPv6_UC, bgp.BGP_ADD_PATH_BOTH),
+		}),
+	}))
+
+	open, _ := bgp.NewBGPOpenMessage(myAS, 90, routerID, opts)
+
+	// RFC 9069 5.1: for a Loc-RIB Instance Peer only the Peer Address is
+	// zero-filled. The Peer AS is "the primary router BGP autonomous system
+	// number" and the Peer BGP ID is "the global instance router-id". They must
+	// match the header the Route Monitoring messages carry (see bmpPeerRoute),
+	// otherwise a receiver cannot correlate this Peer Up with them and loses the
+	// capabilities negotiated above.
+	ph := bmp.NewBMPPeerHeader(
+		bmp.BMP_PEER_TYPE_LOCAL_RIB,
+		0,
+		peerDist,
+		netip.Addr{},
+		localAS,
+		routerID,
+		float64(timestamp),
+	)
+	return bmp.NewBMPPeerUpNotification(
+		*ph,
+		netip.Addr{},
+		0,
+		0,
+		open,
+		open,
+		bmp.NewBMPInfoTLVString(bmp.BMP_INIT_TLV_TYPE_VRF_TABLE_NAME, tableName),
+	)
+}
+
+func bmpLocRIBPeerDown(localAS uint32, routerID netip.Addr, tableName string, peerDist uint64, timestamp int64) *bmp.BMPMessage {
+	// RFC 9069 5.1: as in bmpLocRIBPeerUp, only the Peer Address is zero-filled.
+	// The Peer AS and Peer BGP ID identify the router, so that a receiver can tie
+	// this Peer Down to the Peer Up and the Route Monitoring messages for the
+	// same Loc-RIB instance.
+	ph := bmp.NewBMPPeerHeader(
+		bmp.BMP_PEER_TYPE_LOCAL_RIB,
+		0,
+		peerDist,
+		netip.Addr{},
+		localAS,
+		routerID,
+		float64(timestamp),
+	)
+	return bmp.NewBMPPeerDownNotification(
+		*ph,
+		bmp.BMP_PEER_DOWN_REASON_TLV_FOLLOWS,
+		nil,
+		nil,
+		bmp.NewBMPInfoTLVString(bmp.BMP_INIT_TLV_TYPE_VRF_TABLE_NAME, tableName),
+	)
+}
+
 type bmpClient struct {
 	s        *BgpServer
 	dead     chan struct{}
-	host     string
+	host     netip.AddrPort
 	c        *oc.BmpServerConfig
 	ribout   ribout
 	uptime   int64
@@ -287,8 +411,8 @@ func bmpPeerUp(ev *watchEventPeer, t uint8, policy bool, pd uint64) *bmp.BMPMess
 		flags |= bmp.BMP_PEER_FLAG_POST_POLICY
 	}
 	// TODO: use netip event strcutres. MustParseAddr is safe because they are valid IP addresses.
-	ph := bmp.NewBMPPeerHeader(t, flags, pd, netip.MustParseAddr(ev.PeerAddress.String()), ev.PeerAS, netip.MustParseAddr(ev.PeerID.String()), float64(ev.Timestamp.Unix()))
-	return bmp.NewBMPPeerUpNotification(*ph, netip.MustParseAddr(ev.LocalAddress.String()), ev.LocalPort, ev.PeerPort, ev.SentOpen, ev.RecvOpen)
+	ph := bmp.NewBMPPeerHeader(t, flags, pd, ev.PeerAddress, ev.PeerAS, ev.PeerID, float64(ev.Timestamp.Unix()))
+	return bmp.NewBMPPeerUpNotification(*ph, ev.LocalAddress, ev.LocalPort, ev.PeerPort, ev.SentOpen, ev.RecvOpen)
 }
 
 func bmpPeerDown(ev *watchEventPeer, t uint8, policy bool, pd uint64) *bmp.BMPMessage {
@@ -296,7 +420,7 @@ func bmpPeerDown(ev *watchEventPeer, t uint8, policy bool, pd uint64) *bmp.BMPMe
 	if policy {
 		flags |= bmp.BMP_PEER_FLAG_POST_POLICY
 	}
-	ph := bmp.NewBMPPeerHeader(t, flags, pd, netip.MustParseAddr(ev.PeerAddress.String()), ev.PeerAS, netip.MustParseAddr(ev.PeerID.String()), float64(ev.Timestamp.Unix()))
+	ph := bmp.NewBMPPeerHeader(t, flags, pd, ev.PeerAddress, ev.PeerAS, ev.PeerID, float64(ev.Timestamp.Unix()))
 
 	reasonCode := bmp.BMP_peerDownByUnknownReason
 	switch ev.StateReason.Type {
@@ -311,7 +435,7 @@ func bmpPeerDown(ev *watchEventPeer, t uint8, policy bool, pd uint64) *bmp.BMPMe
 	case fsmDeConfigured:
 		reasonCode = bmp.BMP_PEER_DOWN_REASON_PEER_DE_CONFIGURED
 	}
-	return bmp.NewBMPPeerDownNotification(*ph, uint8(reasonCode), ev.StateReason.BGPNotification, ev.StateReason.Data)
+	return bmp.NewBMPPeerDownNotification(*ph, uint8(reasonCode), ev.StateReason.notificationMessage(), ev.StateReason.Data)
 }
 
 func bmpPeerRoute(t uint8, policy bool, pd uint64, fourBytesAs bool, peeri *table.PeerInfo, timestamp int64, payload []byte) *bmp.BMPMessage {
@@ -322,7 +446,7 @@ func bmpPeerRoute(t uint8, policy bool, pd uint64, fourBytesAs bool, peeri *tabl
 	if !fourBytesAs {
 		flags |= bmp.BMP_PEER_FLAG_TWO_AS
 	}
-	ph := bmp.NewBMPPeerHeader(t, flags, pd, netip.MustParseAddr(peeri.Address.String()), peeri.AS, netip.MustParseAddr(peeri.ID.String()), float64(timestamp))
+	ph := bmp.NewBMPPeerHeader(t, flags, pd, peeri.Address, peeri.AS, peeri.ID, float64(timestamp))
 	m := bmp.NewBMPRouteMonitoring(*ph, nil)
 	body := m.Body.(*bmp.BMPRouteMonitoring)
 	body.BGPUpdatePayload = payload
@@ -351,7 +475,7 @@ func bmpPeerStats(peerType uint8, peerDist uint64, timestamp int64, peer *api.Pe
 
 func bmpPeerRouteMirroring(peerType uint8, peerDist uint64, peerInfo *table.PeerInfo, timestamp int64, msg *bgp.BGPMessage) *bmp.BMPMessage {
 	var peerFlags uint8 = 0
-	ph := bmp.NewBMPPeerHeader(peerType, peerFlags, peerDist, netip.MustParseAddr(peerInfo.Address.String()), peerInfo.AS, netip.MustParseAddr(peerInfo.ID.String()), float64(timestamp))
+	ph := bmp.NewBMPPeerHeader(peerType, peerFlags, peerDist, peerInfo.Address, peerInfo.AS, peerInfo.ID, float64(timestamp))
 	return bmp.NewBMPRouteMirroring(
 		*ph,
 		[]bmp.BMPRouteMirrTLVInterface{
@@ -362,7 +486,7 @@ func bmpPeerRouteMirroring(peerType uint8, peerDist uint64, peerInfo *table.Peer
 }
 
 func (b *bmpClientManager) addServer(c *oc.BmpServerConfig) error {
-	host := net.JoinHostPort(c.Address.String(), strconv.Itoa(int(c.Port)))
+	host := netip.AddrPortFrom(c.Address, uint16(c.Port))
 	if _, y := b.clientMap[host]; y {
 		return fmt.Errorf("bmp client %s is already configured", host)
 	}
@@ -378,7 +502,7 @@ func (b *bmpClientManager) addServer(c *oc.BmpServerConfig) error {
 }
 
 func (b *bmpClientManager) deleteServer(c *oc.BmpServerConfig) error {
-	host := net.JoinHostPort(c.Address.String(), strconv.Itoa(int(c.Port)))
+	host := netip.AddrPortFrom(c.Address, uint16(c.Port))
 	if c, y := b.clientMap[host]; !y {
 		return fmt.Errorf("bmp client %s isn't found", host)
 	} else {
@@ -390,12 +514,12 @@ func (b *bmpClientManager) deleteServer(c *oc.BmpServerConfig) error {
 
 type bmpClientManager struct {
 	s         *BgpServer
-	clientMap map[string]*bmpClient
+	clientMap map[netip.AddrPort]*bmpClient
 }
 
 func newBmpClientManager(s *BgpServer) *bmpClientManager {
 	return &bmpClientManager{
 		s:         s,
-		clientMap: make(map[string]*bmpClient),
+		clientMap: make(map[netip.AddrPort]*bmpClient),
 	}
 }

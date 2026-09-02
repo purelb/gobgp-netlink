@@ -550,7 +550,7 @@ func (e *netlinkExportClient) buildVrfMappings() error {
 		vrfExport := &vrfExportConfig{
 			VrfName:      vrf.Config.Name,
 			LinuxVrf:     vrf.NetlinkExport.LinuxVrf,
-			LinuxTableId: vrf.NetlinkExport.LinuxTableId,
+			LinuxTableId: int(vrf.NetlinkExport.LinuxTableId),
 			Metric:       vrf.NetlinkExport.Metric,
 		}
 
@@ -559,12 +559,11 @@ func (e *netlinkExportClient) buildVrfMappings() error {
 			vrfExport.LinuxVrf = vrf.Config.Name
 		}
 
-		// Set ValidateNexthop (default: true)
-		if vrf.NetlinkExport.ValidateNexthop != nil {
-			vrfExport.ValidateNexthop = *vrf.NetlinkExport.ValidateNexthop
-		} else {
-			vrfExport.ValidateNexthop = true
-		}
+		// The config key is skip-nexthop-validation, so absent and explicit
+		// false both mean "validate" - the safe reading. It was previously a
+		// *bool named validate-nexthop, which generated code cannot express and
+		// which made an omitted key indistinguishable from an explicit false.
+		vrfExport.ValidateNexthop = !vrf.NetlinkExport.SkipNexthopValidation
 
 		// Parse communities.
 		//

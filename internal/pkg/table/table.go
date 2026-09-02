@@ -17,8 +17,6 @@ package table
 
 import (
 	"bytes"
-	"encoding/binary"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/bits"
@@ -26,8 +24,9 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 
-	"github.com/k-sone/critbitgo"
+	"github.com/gaissmai/bart"
 	"github.com/segmentio/fasthash/fnv1a"
 
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
@@ -86,42 +85,100 @@ func tableKey(nlri bgp.NLRI) addrPrefixKey {
 		h = fnv1a.AddBytes64(h, serializedRD)
 		h = fnv1a.AddBytes64(h, T.Prefix.Addr().AsSlice())
 		h = fnv1a.AddBytes64(h, []byte{uint8(T.Prefix.Bits())})
+	case *bgp.LsAddrPrefix:
+		// BGP-LS NLRIs must be keyed on their full serialized form so that
+		// otherwise-identical NLRIs differing only by Protocol-ID (e.g. IS-IS
+		// L1 vs L2) or Identifier are stored as distinct destinations rather
+		// than colliding on a String()-derived key.
+		if serialized, err := T.Serialize(); err == nil {
+			h = fnv1a.AddBytes64(h, serialized)
+		} else {
+			h = fnv1a.AddString64(h, nlri.String())
+		}
 	default:
 		h = fnv1a.AddString64(h, nlri.String())
 	}
 	return addrPrefixKey(h)
 }
 
-type Destinations map[addrPrefixKey][]*Destination
+// destinationShard is a sharded bucket that owns both the map subset and the lock
+// that protects both map operations and destination data within this shard.
+type destinationShard struct {
+	mu *sync.RWMutex
+	mp map[addrPrefixKey][]*destination
+}
 
-func (d Destinations) getDestinationList(nlri bgp.NLRI) []*Destination {
-	dest, ok := d[tableKey(nlri)]
+const destinationShardCount = 2048
+
+type Destinations struct {
+	shards [destinationShardCount]*destinationShard
+}
+
+func NewDestinations() *Destinations {
+	d := &Destinations{}
+	for i := range d.shards {
+		d.shards[i] = &destinationShard{
+			mu: &sync.RWMutex{},
+			mp: make(map[addrPrefixKey][]*destination),
+		}
+	}
+	return d
+}
+
+// getShard returns the shard for a given NLRI
+func (d *Destinations) getShard(nlri bgp.NLRI) *destinationShard {
+	key := tableKey(nlri)
+	return d.shards[uint32(key)&(destinationShardCount-1)]
+}
+
+// iterateAllDestinations calls fn for each destination across all shards.
+// Rlock will be hold per shard during the call of fn callback.
+func (d *Destinations) iterateAllDestinations(fn func(*destination)) {
+	for _, shard := range d.shards {
+		shard.mu.RLock()
+		for _, dests := range shard.mp {
+			for _, dest := range dests {
+				fn(dest)
+			}
+		}
+		shard.mu.RUnlock()
+	}
+}
+
+func (d *Destinations) Get(nlri bgp.NLRI) *destination {
+	shard := d.getShard(nlri)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	key := tableKey(nlri)
+	dests, ok := shard.mp[key]
 	if !ok {
 		return nil
 	}
-	return dest
-}
 
-func (d Destinations) Get(nlri bgp.NLRI) *Destination {
-	for _, d := range d.getDestinationList(nlri) {
-		if AddrPrefixOnlyCompare(d.nlri, nlri) == 0 {
-			return d
+	for _, dest := range dests {
+		if AddrPrefixOnlyCompare(dest.nlri, nlri) == 0 {
+			return dest.snapshot()
 		}
 	}
 	return nil
 }
 
-func (d Destinations) InsertUpdate(dest *Destination) (collision bool) {
+func (d *Destinations) InsertUpdate(dest *destination) (collision bool) {
+	shard := d.getShard(dest.nlri)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
 	nlri := dest.nlri
 	key := tableKey(nlri)
 	new := false
-	if _, ok := d[key]; !ok {
-		d[key] = make([]*Destination, 0)
+	if _, ok := shard.mp[key]; !ok {
+		shard.mp[key] = make([]*destination, 0)
 		new = true
 	}
-	for i, v := range d[key] {
+	for i, v := range shard.mp[key] {
 		if AddrPrefixOnlyCompare(v.nlri, nlri) == 0 {
-			d[key][i] = dest
+			shard.mp[key][i] = dest
 			return collision
 		}
 	}
@@ -129,24 +186,8 @@ func (d Destinations) InsertUpdate(dest *Destination) (collision bool) {
 		// we have collision
 		collision = true
 	}
-	d[key] = append(d[key], dest)
+	shard.mp[key] = append(shard.mp[key], dest)
 	return collision
-}
-
-func (d Destinations) Remove(nlri bgp.NLRI) {
-	key := tableKey(nlri)
-	if _, ok := d[key]; !ok {
-		return
-	}
-	for i, v := range d[key] {
-		if AddrPrefixOnlyCompare(v.nlri, nlri) == 0 {
-			d[key] = append(d[key][:i], d[key][i+1:]...)
-			if len(d[key]) == 0 {
-				delete(d, key)
-			}
-			return
-		}
-	}
 }
 
 func macKeyHash(rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr) macKey {
@@ -155,11 +196,21 @@ func macKeyHash(rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr) macKey 
 	return macKey(fnv1a.HashBytes64(b))
 }
 
-type EVPNMacNLRIs map[macKey]map[*Destination]struct{}
+type EVPNMacNLRIs struct {
+	mp map[macKey]map[*destination]struct{}
+	mu *sync.RWMutex
+}
 
-func (e EVPNMacNLRIs) Get(rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr) (d []*Destination) {
-	if dests, ok := e[macKeyHash(rt, mac)]; ok {
-		d = make([]*Destination, len(dests))
+func NewEVPNMacNLRIs() *EVPNMacNLRIs {
+	return &EVPNMacNLRIs{mp: make(map[macKey]map[*destination]struct{}), mu: &sync.RWMutex{}}
+}
+
+func (e *EVPNMacNLRIs) Get(rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr) (d []*destination) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if dests, ok := e.mp[macKeyHash(rt, mac)]; ok {
+		d = make([]*destination, len(dests))
 		i := 0
 		for dest := range dests {
 			d[i] = dest
@@ -169,40 +220,68 @@ func (e EVPNMacNLRIs) Get(rt bgp.ExtendedCommunityInterface, mac net.HardwareAdd
 	return d
 }
 
-func (e EVPNMacNLRIs) Insert(rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr, dest *Destination) {
+func (e *EVPNMacNLRIs) Insert(rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr, dest *destination) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	macKey := macKeyHash(rt, mac)
-	if _, ok := e[macKey]; !ok {
-		e[macKey] = make(map[*Destination]struct{})
+	if _, ok := e.mp[macKey]; !ok {
+		e.mp[macKey] = make(map[*destination]struct{})
 	}
-	e[macKey][dest] = struct{}{}
+	e.mp[macKey][dest] = struct{}{}
 }
 
-func (e EVPNMacNLRIs) Remove(rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr, dest *Destination) {
+func (e *EVPNMacNLRIs) Remove(rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr, dest *destination) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	macKey := macKeyHash(rt, mac)
-	if dests, ok := e[macKey]; ok {
+	if dests, ok := e.mp[macKey]; ok {
 		delete(dests, dest)
 		if len(dests) == 0 {
-			delete(e, macKey)
+			delete(e.mp, macKey)
 		}
 	}
 }
 
 type Table struct {
 	Family       bgp.Family
-	destinations Destinations
+	destinations *Destinations
 	logger       *slog.Logger
 	// index of evpn prefixes with paths to a specific MAC in a MAC-VRF
 	// this is a map[rt, MAC address]map[addrPrefixKey][]nlri
 	// this holds a map for a set of prefixes.
-	macIndex EVPNMacNLRIs
+	macIndex *EVPNMacNLRIs
+	// vpnIdx indexes all known paths by Route Target for O(1) RT-based lookup.
+	// Non-nil only for families that carry RT extended communities (VPNV4-6, EVPN, …).
+	vpnIdx *VPNPathIndex
 }
 
-func NewTable(logger *slog.Logger, rf bgp.Family, dsts ...*Destination) *Table {
+// vpnFamilies lists the route families whose paths carry RT extended communities
+// and should therefore be indexed in VPNPathIndex.
+func isVPNFamily(rf bgp.Family) bool {
+	switch rf {
+	case bgp.RF_IPv4_VPN, bgp.RF_IPv6_VPN,
+		bgp.RF_IPv4_VPN_MC, bgp.RF_IPv6_VPN_MC,
+		bgp.RF_EVPN,
+		bgp.RF_FS_IPv4_VPN, bgp.RF_FS_IPv6_VPN,
+		bgp.RF_MUP_IPv4, bgp.RF_MUP_IPv6:
+		return true
+	}
+	return false
+}
+
+func NewTable(logger *slog.Logger, rf bgp.Family, dsts ...*destination) *Table {
+	var vpnIdx *VPNPathIndex
+	if isVPNFamily(rf) {
+		vpnIdx = NewVPNPathIndex()
+	}
 	t := &Table{
 		Family:       rf,
-		destinations: make(Destinations),
+		destinations: NewDestinations(),
 		logger:       logger,
-		macIndex:     make(EVPNMacNLRIs),
+		macIndex:     NewEVPNMacNLRIs(),
+		vpnIdx:       vpnIdx,
 	}
 	for _, dst := range dsts {
 		t.setDestination(dst)
@@ -210,34 +289,48 @@ func NewTable(logger *slog.Logger, rf bgp.Family, dsts ...*Destination) *Table {
 	return t
 }
 
+// GetVPNIndex returns the RT-keyed path index for this table, or nil if the
+// table's family does not carry RT extended communities.
+func (t *Table) GetVPNIndex() *VPNPathIndex {
+	return t.vpnIdx
+}
+
 func (t *Table) GetFamily() bgp.Family {
 	return t.Family
 }
 
 func (t *Table) deletePathsByVrf(vrf *Vrf) []*Path {
+	// Early return for families that don't support VRF (no RD in NLRI)
+	switch t.Family {
+	case bgp.RF_IPv4_VPN, bgp.RF_IPv6_VPN, bgp.RF_IPv4_VPN_MC, bgp.RF_IPv6_VPN_MC,
+		bgp.RF_EVPN, bgp.RF_MUP_IPv4, bgp.RF_MUP_IPv6:
+		// These families have RD in their NLRI, continue
+	default:
+		// Non-VPN family, no paths belong to any VRF
+		return nil
+	}
+
 	pathList := make([]*Path, 0)
-	for _, dests := range t.destinations {
-		for _, dest := range dests {
-			for _, p := range dest.knownPathList {
-				var rd bgp.RouteDistinguisherInterface
-				nlri := p.GetNlri()
-				switch v := nlri.(type) {
-				case *bgp.LabeledVPNIPAddrPrefix:
-					rd = v.RD
-				case *bgp.EVPNNLRI:
-					rd = v.RD()
-				case *bgp.MUPNLRI:
-					rd = v.RD()
-				default:
-					return pathList
-				}
-				if p.IsLocal() && vrf.Rd.String() == rd.String() {
-					pathList = append(pathList, p.Clone(true))
-					break
-				}
+	t.destinations.iterateAllDestinations(func(dest *destination) {
+		for _, p := range dest.knownPathList {
+			var rd bgp.RouteDistinguisherInterface
+			nlri := p.GetNlri()
+			switch v := nlri.(type) {
+			case *bgp.LabeledVPNIPAddrPrefix:
+				rd = v.RD
+			case *bgp.EVPNNLRI:
+				rd = v.RD()
+			case *bgp.MUPNLRI:
+				rd = v.RD()
+			default:
+				return
+			}
+			if p.IsLocal() && vrf.Rd.String() == rd.String() {
+				pathList = append(pathList, p.Clone(true))
+				return
 			}
 		}
-	}
+	})
 	return pathList
 }
 
@@ -247,43 +340,20 @@ func (t *Table) deleteRTCPathsByVrf(vrf *Vrf, vrfs map[string]*Vrf) []*Path {
 		return pathList
 	}
 	for lhs := range vrf.ImportRt {
-		for _, dests := range t.destinations {
-			for _, dest := range dests {
-				nlri := dest.GetNlri().(*bgp.RouteTargetMembershipNLRI)
-				rhs, _ := extCommRouteTargetKey(nlri.RouteTarget)
-				if lhs == rhs && isLastTargetUser(vrfs, lhs) {
-					for _, p := range dest.knownPathList {
-						if p.IsLocal() {
-							pathList = append(pathList, p.Clone(true))
-							break
-						}
+		t.destinations.iterateAllDestinations(func(dest *destination) {
+			nlri := dest.GetNlri().(*bgp.RouteTargetMembershipNLRI)
+			rhs, _ := nlri.RouteTargetKey()
+			if lhs == rhs && isLastTargetUser(vrfs, lhs) {
+				for _, p := range dest.knownPathList {
+					if p.IsLocal() {
+						pathList = append(pathList, p.Clone(true))
+						return
 					}
 				}
 			}
-		}
+		})
 	}
 	return pathList
-}
-
-func (t *Table) deleteDest(dest *Destination) {
-	count := 0
-	for _, v := range dest.localIdMap.bitmap {
-		count += bits.OnesCount64(v)
-	}
-	if len(dest.localIdMap.bitmap) != 0 && count != 1 {
-		return
-	}
-	t.destinations.Remove(dest.GetNlri())
-
-	if nlri, ok := dest.nlri.(*bgp.EVPNNLRI); ok {
-		if macadv, ok := nlri.RouteTypeData.(*bgp.EVPNMacIPAdvertisementRoute); ok {
-			for _, path := range dest.knownPathList {
-				for _, ec := range path.GetRouteTargets() {
-					t.macIndex.Remove(ec, macadv.MacAddress, dest)
-				}
-			}
-		}
-	}
 }
 
 func (t *Table) validatePath(path *Path) {
@@ -328,138 +398,220 @@ func (t *Table) validatePath(path *Path) {
 	}
 }
 
-func (t *Table) getOrCreateDest(nlri bgp.NLRI, size int) *Destination {
-	dest := t.GetDestination(nlri)
-	// If destination for given prefix does not exist we create it.
-	if dest == nil {
-		t.logger.Debug("create Destination",
-			slog.String("Topic", "Table"),
-			slog.Any("Nlri", nlri),
-		)
-		dest = NewDestination(nlri, size)
-		t.setDestination(dest)
+// getOrCreateDest gets or creates a destination while holding the shard lock.
+// Caller must hold the shard lock before calling this.
+func (t *Table) getOrCreateDest(shard *destinationShard, nlri bgp.NLRI, size int) *destination {
+	key := tableKey(nlri)
+
+	// Check if destination already exists
+	if dests, ok := shard.mp[key]; ok {
+		for _, dest := range dests {
+			if AddrPrefixOnlyCompare(dest.nlri, nlri) == 0 {
+				return dest
+			}
+		}
 	}
+
+	// Create and insert new destination
+	dest := newDestination(nlri, size)
+	if _, ok := shard.mp[key]; !ok {
+		shard.mp[key] = make([]*destination, 0)
+	}
+	shard.mp[key] = append(shard.mp[key], dest)
 	return dest
+}
+
+// deleteDest removes a destination from the shard.
+// Caller must hold the shard lock before calling this.
+func (t *Table) deleteDest(shard *destinationShard, dest *destination) {
+	count := 0
+	for _, v := range dest.localIdMap.bitmap {
+		count += bits.OnesCount64(v)
+	}
+	if len(dest.localIdMap.bitmap) != 0 && count != 1 {
+		return
+	}
+
+	nlri := dest.GetNlri()
+	key := tableKey(nlri)
+	if _, ok := shard.mp[key]; !ok {
+		return
+	}
+	for i, v := range shard.mp[key] {
+		if AddrPrefixOnlyCompare(v.nlri, nlri) == 0 {
+			shard.mp[key] = append(shard.mp[key][:i], shard.mp[key][i+1:]...)
+			if len(shard.mp[key]) == 0 {
+				delete(shard.mp, key)
+			}
+			break
+		}
+	}
+
+	// Clean up EVPN mac index
+	if evpnNlri, ok := nlri.(*bgp.EVPNNLRI); ok {
+		if macadv, ok := evpnNlri.RouteTypeData.(*bgp.EVPNMacIPAdvertisementRoute); ok {
+			for _, path := range dest.knownPathList {
+				for _, ec := range path.GetRouteTargets() {
+					t.macIndex.Remove(ec, macadv.MacAddress, dest)
+				}
+			}
+		}
+	}
 }
 
 func (t *Table) update(newPath *Path) *Update {
 	t.validatePath(newPath)
-	dst := t.getOrCreateDest(newPath.GetNlri(), 64)
-	u := dst.Calculate(t.logger, newPath)
+
+	nlri := newPath.GetNlri()
+	shard := t.destinations.getShard(nlri)
+
+	// Hold shard lock for entire operation - no TOCTOU gap
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	dst := t.getOrCreateDest(shard, nlri, 64)
+	u, oldPath := dst.Calculate(t.logger, newPath)
 
 	if len(dst.knownPathList) == 0 {
-		t.deleteDest(dst)
-		return u
+		t.deleteDest(shard, dst)
 	}
 
-	if nlri, ok := newPath.GetNlri().(*bgp.EVPNNLRI); ok {
-		if macadv, ok := nlri.RouteTypeData.(*bgp.EVPNMacIPAdvertisementRoute); ok {
+	if evpnNlri, ok := nlri.(*bgp.EVPNNLRI); ok {
+		if macadv, ok := evpnNlri.RouteTypeData.(*bgp.EVPNMacIPAdvertisementRoute); ok {
 			for _, ec := range newPath.GetRouteTargets() {
 				t.macIndex.Insert(ec, macadv.MacAddress, dst)
 			}
 		}
 	}
 
+	t.updateVPNIdx(u, newPath, oldPath)
 	return u
 }
 
-func (t *Table) GetDestinations() []*Destination {
-	d := make([]*Destination, 0, len(t.destinations))
-	for _, dests := range t.destinations {
-		d = append(d, dests...)
+// updateVPNIdx keeps the vpnIdx in sync with the VPN path table after each
+// update. It must be called immediately after dst.Calculate so that
+// OldKnownPathList and KnownPathList reflect the state before and after the
+// change respectively.
+func (t *Table) updateVPNIdx(u *Update, newPath, oldPath *Path) {
+	if t.vpnIdx == nil {
+		return
 	}
-	return d
+	if newPath.RemoteID() != 0 {
+		// ADD-PATH: each (source, path-ID) pair is a distinct entry.
+		// oldPath is the previous path with the same source×pathID returned by
+		// implicitWithdraw (non-withdrawal) or explicitWithdraw (withdrawal).
+		if newPath.IsWithdraw {
+			t.vpnIdx.UnregisterPath(oldPath)
+		} else {
+			t.vpnIdx.UnregisterPath(oldPath)
+			t.vpnIdx.RegisterPath(newPath)
+		}
+		return
+	}
+	// No-add-path: track only the best path per NLRI.
+	// KnownPathList is sorted by computeKnownBestPath, so [0] is the best.
+	var oldBest, newBest *Path
+	if len(u.OldKnownPathList) > 0 {
+		oldBest = u.OldKnownPathList[0]
+	}
+	if len(u.KnownPathList) > 0 {
+		newBest = u.KnownPathList[0]
+	}
+	if oldBest != newBest {
+		t.vpnIdx.UnregisterPath(oldBest)
+		t.vpnIdx.RegisterPath(newBest)
+	}
 }
 
-func (t *Table) GetDestination(nlri bgp.NLRI) *Destination {
+// GetDestinations returns snapshots of all destinations in the table.
+// The snapshots are created while holding shard lock, then the locks are released.
+// The returned snapshots can be safely used without holding locks.
+// This is safe for iteration but may be expensive for large tables.
+func (t *Table) GetDestinations() []*destination {
+	destinations := make([]*destination, 0)
+	t.destinations.iterateAllDestinations(func(dest *destination) {
+		destinations = append(destinations, dest.snapshot())
+	})
+	return destinations
+}
+
+// GetDestination returns a snapshot of the destination for the given NLRI.
+// The snapshot can be safely used without holding locks.
+// Returns nil if the destination doesn't exist.
+func (t *Table) GetDestination(nlri bgp.NLRI) *destination {
 	return t.destinations.Get(nlri)
 }
 
-func (t *Table) GetLongerPrefixDestinations(key string) ([]*Destination, error) {
-	results := make([]*Destination, 0, len(t.GetDestinations()))
+// SelectDestination returns a selected/filtered destination for the given NLRI,
+// This is a Table-level locked helper that ensures destination methods are called
+// with the shard read lock held, preventing races on active destinations.
+// Returns nil if the destination doesn't exist or selection produces no paths.
+//
+// Use this instead of GetDestination() + Select() when you need to select a single
+// destination and want the locking to be encapsulated in a single call.
+// The shard read lock is held while calling destination.Select().
+func (t *Table) SelectDestination(nlri bgp.NLRI, option DestinationSelectOption) *destination {
+	shard := t.destinations.getShard(nlri)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+
+	key := tableKey(nlri)
+	dests, ok := shard.mp[key]
+	if !ok {
+		return nil
+	}
+
+	for _, dest := range dests {
+		if AddrPrefixOnlyCompare(dest.nlri, nlri) == 0 {
+			// Call Select while holding lock, which returns a new destination
+			return dest.Select(option)
+		}
+	}
+	return nil
+}
+
+func (t *Table) GetLongerPrefixDestinations(key string) ([]*destination, error) {
+	destinations := t.GetDestinations()
+	results := make([]*destination, 0, len(destinations))
 	switch t.Family {
 	case bgp.RF_IPv4_UC, bgp.RF_IPv6_UC, bgp.RF_IPv4_MPLS, bgp.RF_IPv6_MPLS:
-		_, prefix, err := net.ParseCIDR(key)
+		prefix, err := netip.ParsePrefix(key)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing cidr %s: %v", key, err)
 		}
-		ones, bits := prefix.Mask.Size()
 
-		r := critbitgo.NewNet()
+		r := new(bart.Table[*destination])
 		for _, dst := range t.GetDestinations() {
-			_ = r.Add(nlriToIPNet(dst.nlri), dst)
+			r.Insert(nlriToPrefix(dst.nlri), dst)
 		}
-		p := &net.IPNet{
-			IP:   prefix.IP,
-			Mask: net.CIDRMask(ones>>3<<3, bits),
+		for _, d := range r.Subnets(prefix) {
+			results = append(results, d)
 		}
-		mask := 0
-		div := 0
-		if ones%8 != 0 {
-			mask = 8 - ones&0x7
-			div = ones >> 3
-		}
-		r.WalkPrefix(p, func(n *net.IPNet, v any) bool {
-			if mask != 0 && n.IP[div]>>mask != p.IP[div]>>mask {
-				return true
-			}
-			l, _ := n.Mask.Size()
-
-			if ones > l {
-				return true
-			}
-			results = append(results, v.(*Destination))
-			return true
-		})
 	case bgp.RF_IPv4_VPN, bgp.RF_IPv6_VPN:
 		prefixRd, prefix, err := bgp.ParseVPNPrefix(key)
 		if err != nil {
 			return nil, err
 		}
-		ones := prefix.Bits()
-		bits := prefix.Addr().BitLen()
 
-		r := critbitgo.NewNet()
+		r := new(bart.Table[*destination])
 		for _, dst := range t.GetDestinations() {
 			dstRD := dst.nlri.(*bgp.LabeledVPNIPAddrPrefix).RD
 			if prefixRd.String() != dstRD.String() {
 				continue
 			}
 
-			_ = r.Add(nlriToIPNet(dst.nlri), dst)
+			r.Insert(nlriToPrefix(dst.nlri), dst)
 		}
-
-		p := &net.IPNet{
-			IP:   prefix.Addr().AsSlice(),
-			Mask: net.CIDRMask(ones>>3<<3, bits),
+		for _, d := range r.Subnets(prefix) {
+			results = append(results, d)
 		}
-
-		mask := 0
-		div := 0
-		if ones%8 != 0 {
-			mask = 8 - ones&0x7
-			div = ones >> 3
-		}
-
-		r.WalkPrefix(p, func(n *net.IPNet, v any) bool {
-			if mask != 0 && n.IP[div]>>mask != p.IP[div]>>mask {
-				return true
-			}
-			l, _ := n.Mask.Size()
-
-			if ones > l {
-				return true
-			}
-			results = append(results, v.(*Destination))
-			return true
-		})
 	default:
 		results = append(results, t.GetDestinations()...)
 	}
 	return results, nil
 }
 
-func (t *Table) GetEvpnDestinationsWithRouteType(typ string) ([]*Destination, error) {
+func (t *Table) GetEvpnDestinationsWithRouteType(typ string) ([]*destination, error) {
 	var routeType uint8
 	switch strings.ToLower(typ) {
 	case "a-d":
@@ -476,7 +628,7 @@ func (t *Table) GetEvpnDestinationsWithRouteType(typ string) ([]*Destination, er
 		return nil, fmt.Errorf("unsupported evpn route type: %s", typ)
 	}
 	destinations := t.GetDestinations()
-	results := make([]*Destination, 0, len(destinations))
+	results := make([]*destination, 0, len(destinations))
 	switch t.Family {
 	case bgp.RF_EVPN:
 		for _, dst := range destinations {
@@ -492,7 +644,7 @@ func (t *Table) GetEvpnDestinationsWithRouteType(typ string) ([]*Destination, er
 	return results, nil
 }
 
-func (t *Table) GetMUPDestinationsWithRouteType(p string) ([]*Destination, error) {
+func (t *Table) GetMUPDestinationsWithRouteType(p string) ([]*destination, error) {
 	var routeType uint16
 	switch strings.ToLower(p) {
 	case "isd":
@@ -507,7 +659,7 @@ func (t *Table) GetMUPDestinationsWithRouteType(p string) ([]*Destination, error
 		// use prefix as route key
 	}
 	destinations := t.GetDestinations()
-	results := make([]*Destination, 0, len(destinations))
+	results := make([]*destination, 0, len(destinations))
 	switch t.Family {
 	case bgp.RF_MUP_IPv4, bgp.RF_MUP_IPv6:
 		for _, dst := range destinations {
@@ -525,12 +677,22 @@ func (t *Table) GetMUPDestinationsWithRouteType(p string) ([]*Destination, error
 	return results, nil
 }
 
-func (t *Table) setDestination(dst *Destination) {
+func (t *Table) setDestination(dst *destination) {
 	if collision := t.destinations.InsertUpdate(dst); collision {
+		// Get the first prefix in this collision bucket
+		shard := t.destinations.getShard(dst.GetNlri())
+		shard.mu.RLock()
+		key := tableKey(dst.GetNlri())
+		firstPrefix := ""
+		if dests, ok := shard.mp[key]; ok && len(dests) > 0 {
+			firstPrefix = dests[0].GetNlri().String()
+		}
+		shard.mu.RUnlock()
+
 		t.logger.Warn("insert collision detected",
 			slog.String("Topic", "Table"),
 			slog.String("Key", t.Family.String()),
-			slog.String("1stPrefix", t.destinations.getDestinationList(dst.GetNlri())[0].GetNlri().String()),
+			slog.String("1stPrefix", firstPrefix),
 			slog.String("Prefix", dst.GetNlri().String()),
 		)
 	}
@@ -547,45 +709,86 @@ func (t *Table) setDestination(dst *Destination) {
 }
 
 func (t *Table) Bests(id string, as uint32) []*Path {
-	paths := make([]*Path, 0, len(t.destinations))
-	for _, dst := range t.GetDestinations() {
-		path := dst.GetBestPath(id, as)
-		if path != nil {
-			paths = append(paths, path)
+	paths := make([]*Path, 0)
+
+	for _, shard := range t.destinations.shards {
+		shard.mu.RLock()
+		for _, dests := range shard.mp {
+			for _, dest := range dests {
+				path := dest.GetBestPath(id, as)
+				if path != nil {
+					paths = append(paths, path)
+				}
+			}
 		}
+		shard.mu.RUnlock()
 	}
 	return paths
 }
 
 func (t *Table) MultiBests(id string) [][]*Path {
-	paths := make([][]*Path, 0, len(t.destinations))
-	for _, dst := range t.GetDestinations() {
-		path := dst.GetMultiBestPath(id)
-		if path != nil {
-			paths = append(paths, path)
+	paths := make([][]*Path, 0)
+
+	for _, shard := range t.destinations.shards {
+		shard.mu.RLock()
+		for _, dests := range shard.mp {
+			for _, dest := range dests {
+				path := dest.GetMultiBestPath(id)
+				if path != nil {
+					paths = append(paths, path)
+				}
+			}
 		}
+		shard.mu.RUnlock()
 	}
 	return paths
 }
 
 func (t *Table) GetKnownPathList(id string, as uint32) []*Path {
-	paths := make([]*Path, 0, len(t.destinations))
-	for _, dst := range t.GetDestinations() {
-		paths = append(paths, dst.GetKnownPathList(id, as)...)
+	paths := make([]*Path, 0)
+
+	for _, shard := range t.destinations.shards {
+		shard.mu.RLock()
+		for _, dests := range shard.mp {
+			for _, dest := range dests {
+				paths = append(paths, dest.GetKnownPathList(id, as)...)
+			}
+		}
+		shard.mu.RUnlock()
 	}
 	return paths
 }
 
 func (t *Table) GetKnownPathListWithMac(id string, as uint32, rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr, onlyBest bool) []*Path {
 	var paths []*Path
-	for _, dst := range t.macIndex.Get(rt, mac) {
+	dests := t.macIndex.Get(rt, mac)
+
+	// For each destination, lock its shard before accessing
+	for _, dst := range dests {
+		shard := t.destinations.getShard(dst.nlri)
+		shard.mu.RLock()
 		if onlyBest {
-			paths = append(paths, dst.GetBestPath(id, as))
+			path := dst.GetBestPath(id, as)
+			if path != nil {
+				paths = append(paths, path)
+			}
 		} else {
 			paths = append(paths, dst.GetKnownPathList(id, as)...)
 		}
+		shard.mu.RUnlock()
 	}
 	return paths
+}
+
+// mustIPAddrPrefix constructs an IPAddrPrefix from a netip.Prefix that is
+// guaranteed to be valid by the caller. It panics if prefix is not valid,
+// which indicates a programming error in the caller.
+func mustIPAddrPrefix(prefix netip.Prefix) *bgp.IPAddrPrefix {
+	nlri, err := bgp.NewIPAddrPrefix(prefix)
+	if err != nil {
+		panic("mustIPAddrPrefix called with invalid prefix: " + err.Error())
+	}
+	return nlri
 }
 
 // ContainsCIDR checks if one IPNet is a subnet of another.
@@ -622,24 +825,6 @@ func (t *Table) Select(option ...TableSelectOption) (*Table, error) {
 	if len(prefixes) != 0 {
 		switch t.Family {
 		case bgp.RF_IPv4_UC, bgp.RF_IPv6_UC:
-			f := func(prefixStr string) (bool, error) {
-				prefix, err := netip.ParsePrefix(prefixStr)
-				if err != nil {
-					return false, err
-				}
-				nlri, err := bgp.NewIPAddrPrefix(prefix)
-				if err != nil {
-					return false, err
-				}
-				if dst := t.GetDestination(nlri); dst != nil {
-					if d := dst.Select(dOption); d != nil {
-						r.setDestination(d)
-						return true, nil
-					}
-				}
-				return false, nil
-			}
-
 			for _, p := range prefixes {
 				key := p.Prefix
 				switch p.LookupOption {
@@ -654,42 +839,38 @@ func (t *Table) Select(option ...TableSelectOption) (*Table, error) {
 						}
 					}
 				case apiutil.LOOKUP_SHORTER:
-					addr, prefix, err := net.ParseCIDR(key)
+					prefix, err := netip.ParsePrefix(key)
 					if err != nil {
 						return nil, err
 					}
-					ones, _ := prefix.Mask.Size()
-					for i := ones; i >= 0; i-- {
-						_, prefix, _ := net.ParseCIDR(fmt.Sprintf("%s/%d", addr.String(), i))
-						ret, err := f(prefix.String())
-						if err != nil {
-							return nil, err
-						}
-						if ret {
-							break
+					for i := prefix.Bits(); i >= 0; i-- {
+						nlri := mustIPAddrPrefix(netip.PrefixFrom(prefix.Addr(), i))
+						if d := t.SelectDestination(nlri, dOption); d != nil {
+							r.setDestination(d)
 						}
 					}
 				default:
-					if host := net.ParseIP(key); host != nil {
+					if addr, err := netip.ParseAddr(key); err == nil {
 						masklen := 32
 						if t.Family == bgp.RF_IPv6_UC {
 							masklen = 128
 						}
 						for i := masklen; i >= 0; i-- {
-							_, prefix, err := net.ParseCIDR(fmt.Sprintf("%s/%d", key, i))
-							if err != nil {
-								return nil, err
-							}
-							ret, err := f(prefix.String())
-							if err != nil {
-								return nil, err
-							}
-							if ret {
+							nlri := mustIPAddrPrefix(netip.PrefixFrom(addr, i))
+							if d := t.SelectDestination(nlri, dOption); d != nil {
+								r.setDestination(d)
 								break
 							}
 						}
-					} else if _, err := f(key); err != nil {
-						return nil, err
+					} else {
+						prefix, err := netip.ParsePrefix(key)
+						if err != nil {
+							return nil, err
+						}
+						nlri := mustIPAddrPrefix(prefix)
+						if d := t.SelectDestination(nlri, dOption); d != nil {
+							r.setDestination(d)
+						}
 					}
 				}
 			}
@@ -701,10 +882,8 @@ func (t *Table) Select(option ...TableSelectOption) (*Table, error) {
 				}
 
 				nlri, _ := bgp.NewLabeledVPNIPAddrPrefix(p, *bgp.NewMPLSLabelStack(), rd)
-				if dst := t.GetDestination(nlri); dst != nil {
-					if d := dst.Select(dOption); d != nil {
-						r.setDestination(d)
-					}
+				if d := t.SelectDestination(nlri, dOption); d != nil {
+					r.setDestination(d)
 				}
 				return nil
 			}
@@ -818,10 +997,21 @@ func (t *Table) Select(option ...TableSelectOption) (*Table, error) {
 			return nil, fmt.Errorf("route filtering is not supported for this family")
 		}
 	} else {
-		for _, dst := range t.GetDestinations() {
-			if d := dst.Select(dOption); d != nil {
-				r.setDestination(d)
+		// Iterate with shard-level locking to ensure destination methods
+		// are called while holding the appropriate lock
+		for _, shard := range t.destinations.shards {
+			shard.mu.RLock()
+			for _, dests := range shard.mp {
+				for _, dest := range dests {
+					if d := dest.Select(dOption); d != nil {
+						// setDestination expects to receive destinations that can be
+						// safely stored (snapshots or newly created). Since Select()
+						// returns a new destination, this is safe.
+						r.setDestination(d)
+					}
+				}
 			}
+			shard.mu.RUnlock()
 		}
 	}
 	return r, nil
@@ -857,28 +1047,32 @@ func (t *Table) Info(option ...TableInfoOptions) *TableInfo {
 		as = o.AS
 	}
 
-	for _, dests := range t.destinations {
-		if len(dests) > 1 {
-			numC += len(dests) - 1
-		}
-		for _, d := range dests {
-			paths := d.GetKnownPathList(id, as)
-			n := len(paths)
+	for _, shard := range t.destinations.shards {
+		shard.mu.RLock()
+		for _, dests := range shard.mp {
+			if len(dests) > 1 {
+				numC += len(dests) - 1
+			}
+			for _, d := range dests {
+				paths := d.GetKnownPathList(id, as)
+				n := len(paths)
 
-			if vrf != nil {
-				ps := make([]*Path, 0, len(paths))
-				for _, p := range paths {
-					if CanImportToVrf(vrf, p) {
-						ps = append(ps, p.ToLocal())
+				if vrf != nil {
+					ps := make([]*Path, 0, len(paths))
+					for _, p := range paths {
+						if CanImportToVrf(vrf, p) {
+							ps = append(ps, p.ToLocal())
+						}
 					}
+					n = len(ps)
 				}
-				n = len(ps)
-			}
-			if n != 0 {
-				numD++
-				numP += n
+				if n != 0 {
+					numD++
+					numP += n
+				}
 			}
 		}
+		shard.mu.RUnlock()
 	}
 	return &TableInfo{
 		NumDestination: numD,
@@ -887,26 +1081,10 @@ func (t *Table) Info(option ...TableInfoOptions) *TableInfo {
 	}
 }
 
-var (
-	ErrInvalidRouteTarget error = errors.New("ExtendedCommunity is not RouteTarget")
-	ErrNilCommunity       error = errors.New("RouteTarget could not be nil")
-)
-
-func extCommRouteTargetKey(routeTarget bgp.ExtendedCommunityInterface) (uint64, error) {
-	if routeTarget == nil {
-		return 0, ErrNilCommunity
-	}
-	switch rt := routeTarget.(type) {
-	case *bgp.TwoOctetAsSpecificExtended, *bgp.IPv4AddressSpecificExtended, *bgp.FourOctetAsSpecificExtended:
-		bytes, err := rt.Serialize()
-		if err != nil {
-			return 0, err
-		}
-		return binary.BigEndian.Uint64(bytes[:]), nil
-	default:
-		return 0, ErrInvalidRouteTarget
-	}
-}
+// DefaultRT is the uint64 encoding of the default (wildcard) Route Target used in RTC.
+// It indicates interest in all routes, regardless of their Route Targets.
+// In RouteTargetMembershipNLRI, this value is represented as a nil RouteTarget.
+const DefaultRT uint64 = 0
 
 type routeTargetMap map[uint64]bgp.ExtendedCommunityInterface
 
@@ -929,7 +1107,7 @@ func (rtm routeTargetMap) Clone() routeTargetMap {
 func newRouteTargetMap(s []bgp.ExtendedCommunityInterface) (routeTargetMap, error) {
 	m := make(routeTargetMap, len(s))
 	for _, rt := range s {
-		key, err := extCommRouteTargetKey(rt)
+		key, err := bgp.ExtCommRouteTargetKey(rt)
 		if err != nil {
 			return nil, err
 		}

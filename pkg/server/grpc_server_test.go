@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/internal/pkg/table"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
@@ -61,6 +62,16 @@ func TestParseHost(t *testing.T) {
 			assert.Equal(t, tst.expectAddr, gotAddr)
 		})
 	}
+}
+
+func TestNewPeerGroupFromAPIStructRejectsInvalidAllowOwnAsn(t *testing.T) {
+	_, err := newPeerGroupFromAPIStruct(&api.PeerGroup{
+		Conf: &api.PeerGroupConf{
+			PeerGroupName: "pg",
+			AllowOwnAsn:   256,
+		},
+	})
+	assert.ErrorContains(t, err, "allow_own_asn is out of range")
 }
 
 func TestToPathApi(t *testing.T) {
@@ -407,8 +418,10 @@ func TestGRPCWatchEvent(t *testing.T) {
 
 	err = t2.AddPeer(context.Background(), &api.AddPeerRequest{Peer: peer2})
 	assert.NoError(err)
+	t.Log("t2 add peer done")
 
 	establishedWg.Wait()
+	t.Log("t2 peer established done")
 
 	count := 0
 	tableCh := make(chan any)
@@ -447,6 +460,80 @@ func TestGRPCWatchEvent(t *testing.T) {
 	<-tableCh
 
 	assert.Equal(2, count)
+}
+
+func TestGRPCAddPathUpdatesUUIDMap(t *testing.T) {
+	assert := assert.New(t)
+
+	socketName, err := os.MkdirTemp("", "gobgp-grpc-test-*")
+	assert.NoError(err)
+	t.Cleanup(func() {
+		_ = os.RemoveAll(socketName)
+	})
+	socketAddr := "unix://" + socketName + "/gobgp.sock"
+
+	s := NewBgpServer(GrpcListenAddress(socketAddr))
+	go s.Serve()
+	defer s.Stop()
+
+	err = s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{
+			Asn:        1,
+			RouterId:   "1.1.1.1",
+			ListenPort: -1,
+		},
+	})
+	assert.NoError(err)
+	if err != nil {
+		return
+	}
+	if !assert.Eventually(func() bool {
+		_, statErr := os.Stat(socketName + "/gobgp.sock")
+		return statErr == nil
+	}, time.Second, 10*time.Millisecond) {
+		return
+	}
+
+	conn, err := grpc.NewClient(socketAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	assert.NoError(err)
+	if err != nil {
+		return
+	}
+	t.Cleanup(func() {
+		_ = conn.Close()
+	})
+	client := api.NewGoBgpServiceClient(conn)
+
+	prefix, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.0.0.0/24"))
+	assert.NoError(err)
+	nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr("10.0.0.1"))
+	assert.NoError(err)
+	origin := bgp.NewPathAttributeOrigin(0)
+
+	path := &api.Path{
+		Family: &api.Family{
+			Afi:  api.Family_AFI_IP,
+			Safi: api.Family_SAFI_UNICAST,
+		},
+		Nlri:   nlri(prefix),
+		Pattrs: attrs([]bgp.PathAttributeInterface{origin, nh}),
+	}
+
+	resp, err := client.AddPath(context.Background(), &api.AddPathRequest{
+		TableType: api.TableType_TABLE_TYPE_GLOBAL,
+		Path:      path,
+	})
+	assert.NoError(err)
+	if err != nil {
+		return
+	}
+
+	id, err := uuid.FromBytes(resp.Uuid)
+	assert.NoError(err)
+	assert.Len(s.uuidMap, 1)
+	for _, v := range s.uuidMap {
+		assert.Equal(id, v)
+	}
 }
 
 func TestToOcAttributeComparison(t *testing.T) {
@@ -513,4 +600,61 @@ func TestNewCommunityCountConditionFromApiStruct(t *testing.T) {
 			t.Fatalf("operator mismatch: got %q want prefix %q", got, tt.wantOp)
 		}
 	}
+}
+
+func TestNewConfigPrefixFromAPIStruct(t *testing.T) {
+	c, err := newConfigPrefixFromAPIStruct(&api.Prefix{IpPrefix: "10.1.2.3/24", MaskLengthMin: 24, MaskLengthMax: 24})
+	assert.NoError(t, err)
+	assert.Equal(t, "10.1.2.3/24", c.IpPrefix.String())
+	assert.Equal(t, "", c.RtcPrefix)
+	assert.Equal(t, "24..24", c.MasklengthRange)
+
+	// rtc-prefix is canonicalized (dotted AS -> asplain, /0 -> 0:0:0/0).
+	c, err = newConfigPrefixFromAPIStruct(&api.Prefix{RtcPrefix: "100.1000:65000:100/80", MaskLengthMin: 80, MaskLengthMax: 80})
+	assert.NoError(t, err)
+	assert.Equal(t, "6554600:65000:100/80", c.RtcPrefix)
+	assert.False(t, c.IpPrefix.IsValid())
+
+	// A length-less rtc-prefix is accepted on input and canonicalized to /96.
+	c, err = newConfigPrefixFromAPIStruct(&api.Prefix{RtcPrefix: "65000:65000:100", MaskLengthMin: 96, MaskLengthMax: 96})
+	assert.NoError(t, err)
+	assert.Equal(t, "65000:65000:100/96", c.RtcPrefix)
+
+	// /0 wildcard (RTC default-route) keeps the caller's mask range.
+	c, err = newConfigPrefixFromAPIStruct(&api.Prefix{RtcPrefix: "0:0:0/0", MaskLengthMin: 0, MaskLengthMax: 96})
+	assert.NoError(t, err)
+	assert.Equal(t, "0:0:0/0", c.RtcPrefix)
+	assert.False(t, c.IpPrefix.IsValid())
+	assert.Equal(t, "0..96", c.MasklengthRange)
+	c, err = newConfigPrefixFromAPIStruct(&api.Prefix{RtcPrefix: "0:0/0", MaskLengthMin: 0, MaskLengthMax: 0})
+	assert.NoError(t, err)
+	assert.Equal(t, "0:0:0/0", c.RtcPrefix)
+
+	_, err = newConfigPrefixFromAPIStruct(&api.Prefix{IpPrefix: "10.0.0.0/8", RtcPrefix: "65000:65000:100/96"})
+	assert.NotNil(t, err)
+	_, err = newConfigPrefixFromAPIStruct(&api.Prefix{})
+	assert.NotNil(t, err)
+	_, err = newConfigPrefixFromAPIStruct(&api.Prefix{RtcPrefix: "65000:65000"})
+	assert.NotNil(t, err)
+}
+
+func TestNewPrefixFromApiStructRTC(t *testing.T) {
+	p, err := newPrefixFromApiStruct(&api.Prefix{RtcPrefix: "65000:65000:100/96", MaskLengthMin: 96, MaskLengthMax: 96})
+	assert.NoError(t, err)
+	assert.Equal(t, bgp.RF_RTC_UC, p.AddressFamily)
+	assert.Equal(t, uint8(96), p.MasklengthRangeMin)
+	assert.Equal(t, uint8(96), p.MasklengthRangeMax)
+	assert.Equal(t, "65000:65000:100/96", p.PrefixString())
+
+	// /0 wildcard maps to ::/0 and matches any RTC NLRI.
+	p, err = newPrefixFromApiStruct(&api.Prefix{RtcPrefix: "0:0:0/0", MaskLengthMin: 0, MaskLengthMax: 96})
+	assert.NoError(t, err)
+	assert.Equal(t, bgp.RF_RTC_UC, p.AddressFamily)
+	assert.Equal(t, uint8(0), p.MasklengthRangeMin)
+	assert.Equal(t, uint8(96), p.MasklengthRangeMax)
+	assert.Equal(t, "::/0", p.Prefix.String())
+	assert.Equal(t, "0:0:0/0", p.PrefixString())
+	full, err := newPrefixFromApiStruct(&api.Prefix{RtcPrefix: "65000:65000:100/96", MaskLengthMin: 96, MaskLengthMax: 96})
+	assert.NoError(t, err)
+	assert.True(t, p.Prefix.Contains(full.Prefix.Addr()))
 }

@@ -33,23 +33,143 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestSelectExactAndHostIPv4UC(t *testing.T) {
+	pi := &PeerInfo{}
+	attrs := []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0)}
+	addPath := func(tbl *Table, s string) {
+		nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix(s))
+		p := NewPath(bgp.RF_IPv4_UC, pi, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+		tbl.setDestination(newDestination(nlri, 0, p))
+	}
+
+	t.Run("CIDR exact match found", func(t *testing.T) {
+		tbl := NewTable(logger, bgp.RF_IPv4_UC)
+		addPath(tbl, "14.0.0.0/8")
+		addPath(tbl, "14.14.0.0/16")
+		result, err := tbl.Select(TableSelectOption{
+			LookupPrefixes: []*apiutil.LookupPrefix{{Prefix: "14.0.0.0/8"}},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(result.GetDestinations()))
+	})
+
+	t.Run("CIDR exact match not found", func(t *testing.T) {
+		tbl := NewTable(logger, bgp.RF_IPv4_UC)
+		addPath(tbl, "14.14.0.0/16")
+		result, err := tbl.Select(TableSelectOption{
+			LookupPrefixes: []*apiutil.LookupPrefix{{Prefix: "14.0.0.0/8"}},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, 0, len(result.GetDestinations()))
+	})
+
+	t.Run("host IP longest prefix match found", func(t *testing.T) {
+		tbl := NewTable(logger, bgp.RF_IPv4_UC)
+		addPath(tbl, "14.0.0.0/8")
+		addPath(tbl, "14.14.0.0/16")
+		// "14.14.14.14" is a bare host address — should match 14.14.0.0/16 (longest)
+		result, err := tbl.Select(TableSelectOption{
+			LookupPrefixes: []*apiutil.LookupPrefix{{Prefix: "14.14.14.14"}},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(result.GetDestinations()))
+	})
+
+	t.Run("host IP longest prefix match not found", func(t *testing.T) {
+		tbl := NewTable(logger, bgp.RF_IPv4_UC)
+		addPath(tbl, "10.0.0.0/8")
+		result, err := tbl.Select(TableSelectOption{
+			LookupPrefixes: []*apiutil.LookupPrefix{{Prefix: "14.14.14.14"}},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, 0, len(result.GetDestinations()))
+	})
+}
+
+func TestSelectExactAndHostIPv6UC(t *testing.T) {
+	pi := &PeerInfo{}
+	attrs := []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0)}
+	addPath := func(tbl *Table, s string) {
+		nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix(s))
+		p := NewPath(bgp.RF_IPv6_UC, pi, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+		tbl.setDestination(newDestination(nlri, 0, p))
+	}
+
+	t.Run("host IPv6 longest prefix match found", func(t *testing.T) {
+		tbl := NewTable(logger, bgp.RF_IPv6_UC)
+		addPath(tbl, "2001:db8::/32")
+		addPath(tbl, "2001:db8:1::/48")
+		result, err := tbl.Select(TableSelectOption{
+			LookupPrefixes: []*apiutil.LookupPrefix{{Prefix: "2001:db8:1::1"}},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(result.GetDestinations()))
+	})
+
+	t.Run("host IPv6 longest prefix match not found", func(t *testing.T) {
+		tbl := NewTable(logger, bgp.RF_IPv6_UC)
+		addPath(tbl, "2001:db8::/32")
+		result, err := tbl.Select(TableSelectOption{
+			LookupPrefixes: []*apiutil.LookupPrefix{{Prefix: "2001:db9::1"}},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, 0, len(result.GetDestinations()))
+	})
+}
+
+func TestSelectLongerShorterIPv4UC(t *testing.T) {
+	tbl := NewTable(logger, bgp.RF_IPv4_UC)
+	pi := &PeerInfo{}
+	attrs := []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0)}
+
+	for _, s := range []string{"14.0.0.0/8", "14.14.0.0/16", "14.14.14.0/24"} {
+		nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix(s))
+		p := NewPath(bgp.RF_IPv4_UC, pi, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+		tbl.setDestination(newDestination(nlri, 0, p))
+	}
+
+	tests := []struct {
+		name   string
+		prefix string
+		option apiutil.LookupOption
+		want   int
+	}{
+		{"longer from /8 returns all 3", "14.0.0.0/8", apiutil.LOOKUP_LONGER, 3},
+		{"longer from /16 returns /16 and /24", "14.14.0.0/16", apiutil.LOOKUP_LONGER, 2},
+		{"shorter from /24 returns all 3", "14.14.14.0/24", apiutil.LOOKUP_SHORTER, 3},
+		{"shorter from /16 returns /8 and /16", "14.14.0.0/16", apiutil.LOOKUP_SHORTER, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := tbl.Select(TableSelectOption{
+				LookupPrefixes: []*apiutil.LookupPrefix{{
+					Prefix:       tt.prefix,
+					LookupOption: tt.option,
+				}},
+			})
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, len(result.GetDestinations()))
+		})
+	}
+}
+
 func TestLookupLonger(t *testing.T) {
 	tbl := NewTable(logger, bgp.RF_IPv4_UC)
 
 	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("11.0.0.0/23"))
-	tbl.setDestination(NewDestination(nlri, 0))
+	tbl.setDestination(newDestination(nlri, 0))
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("11.0.0.0/24"))
-	tbl.setDestination(NewDestination(nlri, 0))
+	tbl.setDestination(newDestination(nlri, 0))
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("11.0.0.4/32"))
-	tbl.setDestination(NewDestination(nlri, 0))
+	tbl.setDestination(newDestination(nlri, 0))
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("11.0.0.129/32"))
-	tbl.setDestination(NewDestination(nlri, 0))
+	tbl.setDestination(newDestination(nlri, 0))
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("11.0.0.144/28"))
-	tbl.setDestination(NewDestination(nlri, 0))
+	tbl.setDestination(newDestination(nlri, 0))
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("11.0.0.144/29"))
-	tbl.setDestination(NewDestination(nlri, 0))
+	tbl.setDestination(newDestination(nlri, 0))
 	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix("11.0.0.145/32"))
-	tbl.setDestination(NewDestination(nlri, 0))
+	tbl.setDestination(newDestination(nlri, 0))
 
 	r, _ := tbl.GetLongerPrefixDestinations("11.0.0.128/25")
 	assert.Equal(t, len(r), 4)
@@ -62,14 +182,35 @@ func TestTableDeleteDest(t *testing.T) {
 	pathT := TableCreatePath(peerT)
 	ipv4t := NewTable(logger, bgp.RF_IPv4_UC)
 	for _, path := range pathT {
-		dest := NewDestination(path.GetNlri(), 0)
+		dest := newDestination(path.GetNlri(), 0)
 		ipv4t.setDestination(dest)
 	}
-	dest := NewDestination(pathT[0].GetNlri(), 0)
+	dest := newDestination(pathT[0].GetNlri(), 0)
 	ipv4t.setDestination(dest)
-	ipv4t.deleteDest(dest)
+	// Test deletion by removing directly
+	shard := ipv4t.destinations.getShard(pathT[0].GetNlri())
+	shard.mu.Lock()
+	ipv4t.deleteDest(shard, dest)
+	shard.mu.Unlock()
 	gdest := ipv4t.GetDestination(pathT[0].GetNlri())
 	assert.Nil(t, gdest)
+}
+
+func TestTableDeleteDestKeepsDestinationWhilePathIDsReserved(t *testing.T) {
+	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.0.0.0/24"))
+	ipv4t := NewTable(logger, bgp.RF_IPv4_UC)
+
+	dest := newDestination(nlri, 64)
+	dest.localIdMap.Flag(1)
+	ipv4t.setDestination(dest)
+
+	shard := ipv4t.destinations.getShard(nlri)
+	shard.mu.Lock()
+	ipv4t.deleteDest(shard, dest)
+	shard.mu.Unlock()
+
+	gdest := ipv4t.GetDestination(nlri)
+	assert.NotNil(t, gdest)
 }
 
 func TestTableGetFamily(t *testing.T) {
@@ -83,11 +224,15 @@ func TestTableDestinationsCollision(t *testing.T) {
 	pathT := TableCreatePath(peerT)
 	ipv4t := NewTable(logger, bgp.RF_IPv4_UC)
 
+	// Fake a collision by inserting a destination with different NLRI but same hash key
 	k := tableKey(pathT[0].GetNlri())
-	// fake an entry
-	ipv4t.destinations[k] = []*Destination{{nlri: pathT[1].GetNlri()}}
+	shard := ipv4t.destinations.getShard(pathT[0].GetNlri())
+	shard.mu.Lock()
+	shard.mp[k] = []*destination{newDestination(pathT[1].GetNlri(), 0)}
+	shard.mu.Unlock()
+
 	for _, path := range pathT {
-		dest := NewDestination(path.GetNlri(), 0)
+		dest := newDestination(path.GetNlri(), 0)
 		ipv4t.setDestination(dest)
 	}
 	assert.Equal(t, 1, ipv4t.Info().NumCollision)
@@ -97,50 +242,56 @@ func TestTableSetDestinations(t *testing.T) {
 	peerT := TableCreatePeer()
 	pathT := TableCreatePath(peerT)
 	ipv4t := NewTable(logger, bgp.RF_IPv4_UC)
-	destinations := make([]*Destination, 0)
+	destinations := make([]*destination, 0)
 	for _, path := range pathT {
-		dest := NewDestination(path.GetNlri(), 0)
+		dest := newDestination(path.GetNlri(), 0)
 		destinations = append(destinations, dest)
 		ipv4t.setDestination(dest)
 	}
 	// make them comparable
-	slices.SortFunc(destinations, func(a, b *Destination) int {
+	slices.SortFunc(destinations, func(a, b *destination) int {
 		return AddrPrefixOnlyCompare(a.GetNlri(), b.GetNlri())
 	})
 	ds := ipv4t.GetDestinations()
-	slices.SortFunc(ds, func(a, b *Destination) int {
+	slices.SortFunc(ds, func(a, b *destination) int {
 		return AddrPrefixOnlyCompare(a.GetNlri(), b.GetNlri())
 	})
-	assert.Equal(t, ds, destinations)
+	assert.Equal(t, len(destinations), len(ds))
+	for i := range ds {
+		assert.Equal(t, 0, AddrPrefixOnlyCompare(ds[i].GetNlri(), destinations[i].GetNlri()))
+	}
 }
 
 func TestTableGetDestinations(t *testing.T) {
 	peerT := DestCreatePeer()
 	pathT := DestCreatePath(peerT)
 	ipv4t := NewTable(logger, bgp.RF_IPv4_UC)
-	destinations := make([]*Destination, 0)
+	destinations := make([]*destination, 0)
 	for _, path := range pathT {
-		dest := NewDestination(path.GetNlri(), 0)
+		dest := newDestination(path.GetNlri(), 0)
 		destinations = append(destinations, dest)
 		ipv4t.setDestination(dest)
 	}
 	// make them comparable
-	slices.SortFunc(destinations, func(a, b *Destination) int {
+	slices.SortFunc(destinations, func(a, b *destination) int {
 		return AddrPrefixOnlyCompare(a.GetNlri(), b.GetNlri())
 	})
 	ds := ipv4t.GetDestinations()
-	slices.SortFunc(ds, func(a, b *Destination) int {
+	slices.SortFunc(ds, func(a, b *destination) int {
 		return AddrPrefixOnlyCompare(a.GetNlri(), b.GetNlri())
 	})
-	assert.Equal(t, ds, destinations)
+	assert.Equal(t, len(destinations), len(ds))
+	for i := range ds {
+		assert.Equal(t, 0, AddrPrefixOnlyCompare(ds[i].GetNlri(), destinations[i].GetNlri()))
+	}
 }
 
 func TestTableKey(t *testing.T) {
 	tb := NewTable(logger, bgp.RF_IPv4_UC)
 	n1, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("0.0.0.0/0"))
-	d1 := NewDestination(n1, 0)
+	d1 := newDestination(n1, 0)
 	n2, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("0.0.0.0/1"))
-	d2 := NewDestination(n2, 0)
+	d2 := newDestination(n2, 0)
 
 	assert.NotEqual(t, tableKey(d1.GetNlri()), tableKey(d2.GetNlri()))
 	tb.setDestination(d1)
@@ -202,6 +353,18 @@ func TestTableSelectMalformedIPv4UCPrefixes(t *testing.T) {
 			name:   "exact match with RD and prefix that does not exist",
 			prefix: "foo",
 			option: apiutil.LOOKUP_EXACT,
+			found:  0,
+		},
+		{
+			name:   "malformed prefix with LOOKUP_LONGER",
+			prefix: "foo",
+			option: apiutil.LOOKUP_LONGER,
+			found:  0,
+		},
+		{
+			name:   "malformed prefix with LOOKUP_SHORTER",
+			prefix: "foo",
+			option: apiutil.LOOKUP_SHORTER,
 			found:  0,
 		},
 	}
@@ -278,7 +441,7 @@ func TestTableSelectVPNv4(t *testing.T) {
 		rd, p, _ := bgp.ParseVPNPrefix(prefix)
 		nlri, _ := bgp.NewLabeledVPNIPAddrPrefix(p, *bgp.NewMPLSLabelStack(), rd)
 
-		destination := NewDestination(nlri, 0, NewPath(bgp.RF_IPv4_VPN, nil, bgp.PathNLRI{NLRI: nlri}, false, nil, time.Now(), false))
+		destination := newDestination(nlri, 0, NewPath(bgp.RF_IPv4_VPN, nil, bgp.PathNLRI{NLRI: nlri}, false, nil, time.Now(), false))
 		table.setDestination(destination)
 	}
 	assert.Equal(t, 9, len(table.GetDestinations()))
@@ -385,7 +548,7 @@ func TestTableSelectVPNv6(t *testing.T) {
 	for _, prefix := range prefixes {
 		rd, p, _ := bgp.ParseVPNPrefix(prefix)
 		nlri, _ := bgp.NewLabeledVPNIPAddrPrefix(p, *bgp.NewMPLSLabelStack(), rd)
-		destination := NewDestination(nlri, 0, NewPath(bgp.RF_IPv6_VPN, nil, bgp.PathNLRI{NLRI: nlri}, false, nil, time.Now(), false))
+		destination := newDestination(nlri, 0, NewPath(bgp.RF_IPv6_VPN, nil, bgp.PathNLRI{NLRI: nlri}, false, nil, time.Now(), false))
 		table.setDestination(destination)
 	}
 	assert.Equal(t, 9, len(table.GetDestinations()))
@@ -629,12 +792,12 @@ func TestTableDestinationsCollisionAttack(t *testing.T) {
 		}
 
 		for _, p := range createAddrPrefixBaseIndex(i) {
-			dest := NewDestination(p, 0)
+			dest := newDestination(p, 0)
 			ipv4t.setDestination(dest)
 		}
 
 		for _, p := range createRandomAddrPrefix() {
-			dest := NewDestination(p, 0)
+			dest := newDestination(p, 0)
 			ipv4t.setDestination(dest)
 		}
 
@@ -697,7 +860,7 @@ func buildPrefixesWithLabels() []bgp.NLRI {
 func TestTableKeyWithLabels(t *testing.T) {
 	ipv4t := NewTable(logger, bgp.RF_IPv4_UC)
 	for _, p := range buildPrefixesWithLabels() {
-		dest := NewDestination(p, 0)
+		dest := newDestination(p, 0)
 		ipv4t.setDestination(dest)
 	}
 
@@ -719,64 +882,6 @@ func BenchmarkTableKeyWithLabels(b *testing.B) {
 			tableKey(p)
 		}
 	}
-}
-
-func Test_RouteTargetKey(t *testing.T) {
-	assert := assert.New(t)
-
-	// TwoOctetAsSpecificExtended
-	buf := make([]byte, 13)
-	buf[0] = 96 // in bit length
-	binary.BigEndian.PutUint32(buf[1:5], 65546)
-	buf[5] = byte(bgp.EC_TYPE_TRANSITIVE_TWO_OCTET_AS_SPECIFIC) // typehigh
-	buf[6] = byte(bgp.EC_SUBTYPE_ROUTE_TARGET)                  // subtype
-	binary.BigEndian.PutUint16(buf[7:9], 0x1314)
-	binary.BigEndian.PutUint32(buf[9:], 0x15161718)
-	r, err := bgp.NLRIFromSlice(bgp.RF_RTC_UC, buf)
-	assert.NoError(err)
-	key, err := extCommRouteTargetKey(r.(*bgp.RouteTargetMembershipNLRI).RouteTarget)
-	assert.NoError(err)
-	assert.Equal(uint64(0x0002131415161718), key)
-
-	// IPv4AddressSpecificExtended
-	buf = make([]byte, 13)
-	buf[0] = 96 // in bit length
-	binary.BigEndian.PutUint32(buf[1:5], 65546)
-	buf[5] = byte(bgp.EC_TYPE_TRANSITIVE_IP4_SPECIFIC) // typehigh
-	buf[6] = byte(bgp.EC_SUBTYPE_ROUTE_TARGET)         // subtype
-	ip := net.ParseIP("10.1.2.3").To4()
-	copy(buf[7:11], []byte(ip))
-	binary.BigEndian.PutUint16(buf[11:], 0x1314)
-	r, err = bgp.NLRIFromSlice(bgp.RF_RTC_UC, buf)
-	assert.NoError(err)
-	key, err = extCommRouteTargetKey(r.(*bgp.RouteTargetMembershipNLRI).RouteTarget)
-	assert.NoError(err)
-	assert.Equal(uint64(0x01020a0102031314), key)
-
-	// FourOctetAsSpecificExtended
-	buf = make([]byte, 13)
-	buf[0] = 96 // in bit length
-	binary.BigEndian.PutUint32(buf[1:5], 65546)
-	buf[5] = byte(bgp.EC_TYPE_TRANSITIVE_FOUR_OCTET_AS_SPECIFIC) // typehigh
-	buf[6] = byte(bgp.EC_SUBTYPE_ROUTE_TARGET)                   // subtype
-	binary.BigEndian.PutUint32(buf[7:], 0x15161718)
-	binary.BigEndian.PutUint16(buf[11:], 0x1314)
-	r, err = bgp.NLRIFromSlice(bgp.RF_RTC_UC, buf)
-	assert.NoError(err)
-	key, err = extCommRouteTargetKey(r.(*bgp.RouteTargetMembershipNLRI).RouteTarget)
-	assert.NoError(err)
-	assert.Equal(uint64(0x0202151617181314), key)
-
-	// OpaqueExtended, wrong RouteTarget
-	buf = make([]byte, 13)
-	buf[0] = 96 // in bit length
-	binary.BigEndian.PutUint32(buf[1:5], 65546)
-	buf[5] = byte(bgp.EC_TYPE_TRANSITIVE_OPAQUE) // typehigh
-	binary.BigEndian.PutUint32(buf[9:], 1000000)
-	r, err = bgp.NLRIFromSlice(bgp.RF_RTC_UC, buf)
-	assert.NoError(err)
-	_, err = extCommRouteTargetKey(r.(*bgp.RouteTargetMembershipNLRI).RouteTarget)
-	assert.NotNil(err)
 }
 
 func TestContainsCIDR(t *testing.T) {

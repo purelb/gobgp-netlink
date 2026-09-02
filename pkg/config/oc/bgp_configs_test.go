@@ -17,7 +17,6 @@ package oc
 
 import (
 	"bufio"
-	"fmt"
 	"net/netip"
 	"os"
 	"path"
@@ -25,8 +24,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-viper/mapstructure/v2"
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -64,36 +61,50 @@ func TestEqual(t *testing.T) {
 	assert.False(ps1.Equal(&ps2))
 }
 
-func extractTomlFromMarkdown(fileMd string, fileToml string) error {
+func extractTomlFromMarkdown(fileMd string) (string, error) {
 	fMd, err := os.Open(fileMd)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer fMd.Close()
 
-	fToml, err := os.Create(fileToml)
-	if err != nil {
-		return err
-	}
-	defer fToml.Close()
+	var tomlString strings.Builder
 
 	isBody := false
 	scanner := bufio.NewScanner(fMd)
-	fTomlWriter := bufio.NewWriter(fToml)
+
 	for scanner.Scan() {
 		if curText := scanner.Text(); strings.HasPrefix(curText, "```toml") {
 			isBody = true
 		} else if strings.HasPrefix(curText, "```") {
 			isBody = false
 		} else if isBody {
-			if _, err := fTomlWriter.WriteString(curText + "\n"); err != nil {
-				return err
+			if _, err := tomlString.WriteString(curText); err != nil {
+				return "", err
+			}
+			if _, err := tomlString.WriteString("\n"); err != nil {
+				return "", err
 			}
 		}
 	}
 
-	fTomlWriter.Flush()
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+
+	return tomlString.String(), nil
+}
+
+func saveTomlToFile(fileToml string, tomlString string) error {
+	fToml, err := os.Create(fileToml)
+	if err != nil {
+		return err
+	}
+	defer fToml.Close()
+
+	_, err = fToml.WriteString(tomlString)
+
+	return err
 }
 
 func TestConfigExample(t *testing.T) {
@@ -102,19 +113,15 @@ func TestConfigExample(t *testing.T) {
 	_, f, _, _ := runtime.Caller(0)
 	fileMd := path.Join(path.Dir(f), "../../../docs/sources/configuration.md")
 	fileToml := "/tmp/gobgpd.example.toml"
-	assert.NoError(extractTomlFromMarkdown(fileMd, fileToml))
+
+	tomlString, err := extractTomlFromMarkdown(fileMd)
+	assert.NoError(err)
+
+	assert.NoError(saveTomlToFile(fileToml, tomlString))
 	defer os.Remove(fileToml)
 
-	opts := viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(mapstructure.StringToNetIPAddrHookFunc(), mapstructure.StringToNetIPPrefixHookFunc()))
-	format := detectConfigFileType(fileToml, "")
-	c := &BgpConfigSet{}
-	v := viper.New()
-	v.SetConfigFile(fileToml)
-	v.SetConfigType(format)
-	assert.NoError(v.ReadInConfig())
-	fmt.Println(v)
-	assert.NoError(v.UnmarshalExact(c, opts))
-	assert.NoError(setDefaultConfigValuesWithViper(v, c))
+	c, err := ReadConfigfile(fileToml, "")
+	assert.NoError(err)
 
 	// Test if we can set the parameters for a peer-group
 	for _, peerGroup := range c.PeerGroups {
@@ -133,4 +140,26 @@ func TestConfigExample(t *testing.T) {
 
 		assert.True(neighbor.Config.SendSoftwareVersion)
 	}
+}
+
+func TestConfigError(t *testing.T) {
+	assert := assert.New(t)
+
+	_, f, _, _ := runtime.Caller(0)
+	fileMd := path.Join(path.Dir(f), "../../../docs/sources/configuration.md")
+	fileToml := "/tmp/gobgpd.example.toml"
+
+	tomlString, err := extractTomlFromMarkdown(fileMd)
+	assert.NoError(err)
+
+	invlalidToml := strings.Replace(tomlString, "port = 1790", "port-OOPS = 1790", 1)
+
+	assert.NoError(saveTomlToFile(fileToml, invlalidToml))
+	defer os.Remove(fileToml)
+
+	_, err = ReadConfigfile(fileToml, "")
+	assert.Error(err)
+
+	expectedErr := "decoding failed due to the following error(s):\n\n'global.config' has invalid keys: port-oops"
+	assert.Equal(err.Error(), expectedErr)
 }

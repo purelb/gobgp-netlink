@@ -121,6 +121,11 @@ service GoBgpService {
   rpc ListBmp(ListBmpRequest) returns (stream ListBmpResponse);
 
   rpc SetLogLevel(SetLogLevelRequest) returns (SetLogLevelResponse);
+
+  rpc AddTcpAoKeychain(AddTcpAoKeychainRequest) returns (AddTcpAoKeychainResponse);
+  rpc UpdateTcpAoKeychain(UpdateTcpAoKeychainRequest) returns (UpdateTcpAoKeychainResponse);
+  rpc DeleteTcpAoKeychain(DeleteTcpAoKeychainRequest) returns (DeleteTcpAoKeychainResponse);
+  rpc ListTcpAoKeychain(ListTcpAoKeychainRequest) returns (stream ListTcpAoKeychainResponse);
 }
 
 message GetNetlinkRequest {}
@@ -887,6 +892,7 @@ message Peer {
   GracefulRestart graceful_restart = 9;
   repeated AfiSafi afi_safis = 10;
   TtlSecurity ttl_security = 11;
+  BfdPeerConfig bfd = 12;
 }
 
 message PeerGroup {
@@ -901,6 +907,7 @@ message PeerGroup {
   GracefulRestart graceful_restart = 9;
   repeated AfiSafi afi_safis = 10;
   TtlSecurity ttl_security = 11;
+  BfdPeerConfig bfd = 12;
 }
 
 message DynamicNeighbor {
@@ -962,6 +969,9 @@ message PeerGroupConf {
   bool route_flap_damping = 8;
   uint32 send_community = 9;
   bool send_software_version = 10;
+  uint32 allow_own_asn = 11;
+  bool replace_peer_asn = 12;
+  bool allow_aspath_loop_local = 13;
 }
 
 message PeerGroupState {
@@ -1047,10 +1057,17 @@ message PeerState {
   }
   DisconnectReason disconnect_reason = 21;
   string disconnect_message = 22;
+  // Upstream owns the low field numbers; this fork's own fields live at 200+.
+  // 23-25 previously held ipv4_nexthop/ipv6_nexthop/ipv6_link_local_nexthop and
+  // were vacated in advance of this merge precisely so bfd_state could land
+  // here. Deliberately not `reserved`: that would block upstream from growing
+  // into 24-25, and `buf breaking` plus the 200+ convention are what keep this
+  // fork out of their way.
+  BfdPeerState bfd_state = 23;
   // Netlink nexthop information
-  string ipv4_nexthop = 23;
-  string ipv6_nexthop = 24;
-  string ipv6_link_local_nexthop = 25;
+  string ipv4_nexthop = 200;
+  string ipv6_nexthop = 201;
+  string ipv6_link_local_nexthop = 202;
 }
 
 message Messages {
@@ -1107,6 +1124,7 @@ message Transport {
   uint32 remote_port = 6;
   uint32 tcp_mss = 7;
   string bind_interface = 8;
+  uint32 ip_tos = 9;
 }
 
 message RouteServer {
@@ -1300,6 +1318,7 @@ message AddPaths {
 
 message Prefix {
   string ip_prefix = 1;
+  string rtc_prefix = 4;
   uint32 mask_length_min = 2;
   uint32 mask_length_max = 3;
 }
@@ -1567,3 +1586,112 @@ message SetLogLevelRequest {
 }
 
 message SetLogLevelResponse {}
+
+enum BfdSessionState {
+  BFD_SESSION_STATE_UNSPECIFIED = 0;
+  BFD_SESSION_STATE_UP = 1;
+  BFD_SESSION_STATE_DOWN = 2;
+  BFD_SESSION_STATE_ADMIN_DOWN = 3;
+  BFD_SESSION_STATE_INIT = 4;
+}
+
+// buf:lint:ignore ENUM_ZERO_VALUE_SUFFIX
+// RFC 5880 §4.1 explicitly defines 0 as "No Diagnostic", not an unspecified state.
+enum BfdDiagnosticCode {
+  BFD_DIAGNOSTIC_CODE_NO_DIAGNOSTIC = 0;
+  BFD_DIAGNOSTIC_CODE_DETECTION_TIMEOUT = 1;
+  BFD_DIAGNOSTIC_CODE_ECHO_FAILED = 2;
+  BFD_DIAGNOSTIC_CODE_NEIGHBOR_SIGNALED_SESSION_DOWN = 3;
+  BFD_DIAGNOSTIC_CODE_FORWARDING_PLANE_RESET = 4;
+  BFD_DIAGNOSTIC_CODE_PATH_DOWN = 5;
+  BFD_DIAGNOSTIC_CODE_CONCATENATED_PATH_DOWN = 6;
+  BFD_DIAGNOSTIC_CODE_ADMINISTRATIVELY_DOWN = 7;
+  BFD_DIAGNOSTIC_CODE_REVERSE_CONCATENATED_PATH_DOWN = 8;
+}
+
+message BfdAsyncCounters {
+  uint64 last_packet_transmitted = 1;
+  uint64 last_packet_received = 2;
+  uint64 transmitted_packets = 3;
+  uint64 received_packets = 4;
+}
+
+message BfdPeerState {
+  BfdSessionState session_state = 1;
+  BfdSessionState remote_session_state = 2;
+  uint64 last_failure_time = 3;
+  uint64 failure_transitions = 4;
+  uint32 local_discriminator = 5;
+  uint32 remote_discriminator = 6;
+  BfdDiagnosticCode local_diagnostic_code = 7;
+  BfdDiagnosticCode remote_diagnostic_code = 8;
+  uint32 remote_minimum_receive_interval = 9;
+  BfdAsyncCounters bfd_async = 10;
+}
+
+message BfdPeerConfig {
+  bool enabled = 1;
+  uint32 port = 2;
+  uint32 desired_minimum_tx_interval = 3;
+  uint32 required_minimum_receive = 4;
+  uint32 detection_multiplier = 5;
+}
+
+message BfdState {
+  uint64 received_packet = 1;
+  uint64 received_drop = 2;
+  uint64 received_error = 3;
+  uint64 invalid_packet = 4;
+  uint64 unknown_peer = 5;
+}
+
+enum TcpAoAlgorithm {
+  TCP_AO_ALGORITHM_UNSPECIFIED = 0;
+  TCP_AO_ALGORITHM_HMAC_SHA1_96 = 1;
+  TCP_AO_ALGORITHM_AES_128_CMAC_96 = 2;
+  TCP_AO_ALGORITHM_HMAC_SHA256_96 = 3;
+  TCP_AO_ALGORITHM_HMAC_SHA256_128 = 4;
+}
+
+message TcpAoKey {
+  uint32 send_id = 1;
+  uint32 receive_id = 2;
+  TcpAoAlgorithm algorithm = 3;
+  bytes master_key = 4 [debug_redact = true]; // write-only
+  bool exclude_tcp_options = 5;
+}
+
+message TcpAoKeychain {
+  string name = 1;
+  repeated TcpAoKey keys = 2;
+}
+
+message AddTcpAoKeychainRequest {
+  TcpAoKeychain keychain = 1;
+}
+
+message AddTcpAoKeychainResponse {}
+
+message UpdateTcpAoKeychainRequest {
+  string name = 1;
+  repeated TcpAoKey add_keys = 2;
+  repeated TcpAoKey delete_keys = 3; // only send_id and receive_id are used
+}
+
+message UpdateTcpAoKeychainResponse {
+  TcpAoKeychain keychain = 1;
+}
+
+message DeleteTcpAoKeychainRequest {
+  string name = 1;
+}
+
+message DeleteTcpAoKeychainResponse {}
+
+message ListTcpAoKeychainRequest {
+  string name = 1;
+}
+
+message ListTcpAoKeychainResponse {
+  TcpAoKeychain keychain = 1;
+}

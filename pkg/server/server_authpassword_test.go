@@ -64,9 +64,7 @@ func TestListPeerRedactsAuthPassword(t *testing.T) {
 	// Half two: the daemon must still hold it, or MD5 silently stops working.
 	assert.NoError(s.mgmtOperation(func() error {
 		for _, peer := range s.neighborMap {
-			peer.fsm.lock.Lock()
-			pw := peer.fsm.pConf.Config.AuthPassword
-			peer.fsm.lock.Unlock()
+			pw := peer.fsm.pConf.ReadCopy().Config.AuthPassword
 			assert.Equal(secret, pw, "the key must survive redaction of the read path")
 		}
 		return nil

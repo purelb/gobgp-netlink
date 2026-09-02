@@ -606,7 +606,12 @@ func getPathAttributeString(nlri bgp.NLRI, attrs []bgp.PathAttributeInterface) s
 }
 
 func makeShowRouteArgs(p *api.Path, idx int, now time.Time, showAge, showBest, showLabel, showMUP, showSendMaxFiltered bool, showIdentifier bgp.BGPAddPathMode) []any {
-	nlri, _ := apiutil.GetNativeNlri(p)
+	nlri, err := apiutil.GetNativeNlri(p)
+	// nlri is nil when the NLRI cannot be decoded; avoid a nil dereference below.
+	nlriStr := "?"
+	if err == nil && nlri != nil {
+		nlriStr = nlri.String()
+	}
 
 	// Path Symbols (e.g. "*>")
 	args := []any{getPathSymbolString(p, idx, showBest)}
@@ -620,7 +625,7 @@ func makeShowRouteArgs(p *api.Path, idx int, now time.Time, showAge, showBest, s
 	}
 
 	// NLRI
-	args = append(args, nlri)
+	args = append(args, nlriStr)
 
 	// Label
 	label := ""
@@ -681,7 +686,7 @@ func makeShowRouteArgs(p *api.Path, idx int, now time.Time, showAge, showBest, s
 		}
 	}
 
-	updateColumnWidth(nlri.String(), nexthop, aspathstr, label, teid, qfi, endpoint)
+	updateColumnWidth(nlriStr, nexthop, aspathstr, label, teid, qfi, endpoint)
 
 	return args
 }
@@ -1311,7 +1316,8 @@ func modNeighbor(cmdType string, args []string) error {
 		params["remove-private-as"] = paramSingle
 		params["replace-peer-as"] = paramFlag
 		params["ebgp-multihop-ttl"] = paramSingle
-		usage += " [ local-as <VALUE> | family <address-families-list> | vrf <vrf-name> | route-reflector-client [<cluster-id>] | route-server-client | allow-own-as <num> | remove-private-as (all|replace) | replace-peer-as | ebgp-multihop-ttl <ttl>]"
+		params["peer-group"] = paramSingle
+		usage += " [ local-as <VALUE> | family <address-families-list> | vrf <vrf-name> | route-reflector-client [<cluster-id>] | route-server-client | allow-own-as <num> | remove-private-as (all|replace) | replace-peer-as | ebgp-multihop-ttl <ttl> | peer-group <peer-group-name>]"
 	}
 
 	m, err := extractReserved(args, params)
@@ -1431,6 +1437,9 @@ func modNeighbor(cmdType string, args []string) error {
 				Enabled:     true,
 				MultihopTtl: uint32(ttl),
 			}
+		}
+		if len(m["peer-group"]) == 1 {
+			peer.Conf.PeerGroup = m["peer-group"][0]
 		}
 		return nil
 	}

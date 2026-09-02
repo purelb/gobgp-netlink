@@ -32,8 +32,10 @@ func NewRouteRefreshCapability(a *bgp.CapRouteRefresh) *api.RouteRefreshCapabili
 	return &api.RouteRefreshCapability{}
 }
 
-// NewExtendedMessageCapability mirrors RFC 8654's empty TLV. There is no
-// payload; the consumer only needs to know the peer advertised it.
+// NewExtendedMessageCapability mirrors the empty-TLV shape RFC 8654
+// gives the BGP Extended Message capability. There is no payload to
+// project; the API consumer just needs to know the peer advertised
+// the capability.
 func NewExtendedMessageCapability(a *bgp.CapExtendedMessage) *api.ExtendedMessageCapability {
 	return &api.ExtendedMessageCapability{}
 }
@@ -255,6 +257,8 @@ func unmarshalCapability(a *api.Capability) (bgp.ParameterCapabilityInterface, e
 	case *api.Capability_SoftwareVersion:
 		a := cap.SoftwareVersion
 		return bgp.NewCapSoftwareVersion(a.SoftwareVersion), nil
+	case *api.Capability_ExtendedMessage:
+		return bgp.NewCapExtendedMessage(), nil
 	case *api.Capability_Unknown:
 		a := cap.Unknown
 		return bgp.NewCapUnknown(bgp.BGPCapabilityCode(a.Code), a.Value), nil

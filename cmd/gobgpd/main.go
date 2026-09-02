@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -83,6 +84,13 @@ func main() {
 	}
 	_, err := flags.Parse(&opts)
 	if err != nil {
+		var flagsErr *flags.Error
+		if errors.As(err, &flagsErr) {
+			if flagsErr.Type == flags.ErrHelp {
+				os.Exit(0)
+			}
+		}
+
 		logger.Error("Error parsing flags", slog.String("Error", err.Error()))
 		os.Exit(1)
 	}
@@ -260,17 +268,8 @@ func main() {
 	prometheus.MustRegister(metrics.NewBuildInfoCollector())
 	go bgpServer.Serve()
 
-	if opts.UseSdNotify {
-		if status, err := daemon.SdNotify(false, daemon.SdNotifyReady); !status {
-			if err != nil {
-				logger.Warn("Failed to send notification via sd_notify()", slog.String("Error", err.Error()))
-			} else {
-				logger.Warn("The socket sd_notify() isn't available")
-			}
-		}
-	}
-
 	if opts.ConfigFile == "" {
+		notifyReady(opts.UseSdNotify)
 		<-sigCh
 		stopServer(bgpServer, opts.UseSdNotify)
 		return
@@ -306,6 +305,8 @@ func main() {
 		})
 	}
 
+	notifyReady(opts.UseSdNotify)
+
 	for sig := range sigCh {
 		if sig != syscall.SIGHUP {
 			stopServer(bgpServer, opts.UseSdNotify)
@@ -324,6 +325,20 @@ func main() {
 		if err != nil {
 			logger.Warn("Failed to update config", slog.String("File", opts.ConfigFile), slog.String("Error", err.Error()))
 			continue
+		}
+	}
+}
+
+func notifyReady(useSdNotify bool) {
+	if !useSdNotify {
+		return
+	}
+
+	if status, err := daemon.SdNotify(false, daemon.SdNotifyReady); !status {
+		if err != nil {
+			logger.Warn("Failed to send notification via sd_notify()", slog.String("Error", err.Error()))
+		} else {
+			logger.Warn("The socket sd_notify() isn't available")
 		}
 	}
 }

@@ -283,7 +283,7 @@ test_export_global() {
   vrf = ""
   table-id = 0
   metric = 100
-  validate-nexthop = true
+  skip-nexthop-validation = false
   community-list = []
 EOF
 
@@ -342,7 +342,7 @@ test_export_vrf_onlink() {
     linux-vrf = "$VRF_NAME"
     linux-table-id = $VRF_TABLE
     metric = 50
-    validate-nexthop = false
+    skip-nexthop-validation = true
     community-list = []
 EOF
 
@@ -406,7 +406,7 @@ test_cli_commands() {
   vrf = ""
   table-id = 0
   metric = 100
-  validate-nexthop = true
+  skip-nexthop-validation = false
   community-list = []
 
 [[vrfs]]

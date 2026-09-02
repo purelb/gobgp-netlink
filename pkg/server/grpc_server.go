@@ -17,7 +17,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -32,7 +31,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dgryski/go-farm"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -231,6 +229,7 @@ func toPathAPI(binNlri []byte, binPattrs [][]byte, anyNlri *api.NLRI, anyPattrs 
 		PattrsBinary:       binPattrs,
 		SourceAsn:          path.PeerASN,
 		// ListPath API fields only
+		Best:            path.Best,
 		SendMaxFiltered: path.SendMaxFiltered,
 		Filtered:        path.Filtered,
 		Validation:      path.Validation,
@@ -305,7 +304,7 @@ func (s *server) listPath(ctx context.Context, r *api.ListPathRequest, fn func(*
 			req.Prefixes = append(req.Prefixes, &apiutil.LookupPrefix{
 				Prefix:       p.Prefix,
 				RD:           p.Rd,
-				LookupOption: apiutil.LookupOption(p.Type),
+				LookupOption: apiutil.LookupOptionFromAPI(p.Type),
 			})
 		}
 	}
@@ -426,6 +425,10 @@ func (s *server) watchEvent(ctx context.Context, r *api.WatchEventRequest, fn fu
 			if err != nil {
 				remoteCaps = []*api.Capability{}
 			}
+			localCaps, err := apiutil.MarshalCapabilities(p.State.LocalCap)
+			if err != nil {
+				localCaps = []*api.Capability{}
+			}
 			fn(&api.WatchEventResponse{
 				Event: &api.WatchEventResponse_Peer{
 					Peer: &api.WatchEventResponse_PeerEvent{
@@ -436,6 +439,7 @@ func (s *server) watchEvent(ctx context.Context, r *api.WatchEventRequest, fn fu
 								LocalAsn:          p.Conf.LocalASN,
 								NeighborAddress:   p.Conf.NeighborAddress.String(),
 								NeighborInterface: p.Conf.NeighborInterface,
+								PeerGroup:         p.Conf.PeerGroup,
 							},
 							State: &api.PeerState{
 								PeerAsn:         p.State.PeerASN,
@@ -444,7 +448,9 @@ func (s *server) watchEvent(ctx context.Context, r *api.WatchEventRequest, fn fu
 								SessionState:    api.PeerState_SessionState(int(p.State.SessionState) + 1),
 								AdminState:      p.State.AdminState,
 								RouterId:        p.State.RouterID.String(),
+								PeerGroup:       p.State.PeerGroup,
 								RemoteCap:       remoteCaps,
+								LocalCap:        localCaps,
 							},
 							Transport: &api.Transport{
 								LocalAddress: p.Transport.LocalAddress.String(),
@@ -525,9 +531,13 @@ func api2Path(resource api.TableType, path *api.Path, isWithdraw bool) (*table.P
 	var nexthop netip.Addr
 
 	if path.SourceAsn != 0 {
+		id, err := netip.ParseAddr(path.SourceId)
+		if err != nil {
+			return nil, fmt.Errorf("invalid source ID: %w", err)
+		}
 		pi = &table.PeerInfo{
 			AS: path.SourceAsn,
-			ID: netip.MustParseAddr(path.SourceId),
+			ID: id,
 		}
 	}
 
@@ -583,17 +593,6 @@ func api2Path(resource api.TableType, path *api.Path, isWithdraw bool) (*table.P
 
 	doWithdraw := isWithdraw || path.IsWithdraw
 	newPath := table.NewPath(rf, pi, bgp.PathNLRI{NLRI: nlri, ID: path.Identifier}, doWithdraw, pattrs, time.Now(), path.NoImplicitWithdraw)
-	if !doWithdraw {
-		total := bytes.NewBuffer(make([]byte, 0))
-		for _, a := range newPath.GetPathAttrs() {
-			if a.GetType() == bgp.BGP_ATTR_TYPE_MP_REACH_NLRI {
-				continue
-			}
-			b, _ := a.Serialize()
-			total.Write(b)
-		}
-		newPath.SetHash(farm.Hash64(total.Bytes()))
-	}
 	newPath.SetIsFromExternal(path.IsFromExternal)
 	return newPath, nil
 }
@@ -1043,6 +1042,26 @@ func PeerTypeFromApi(a api.PeerType) (oc.PeerType, error) {
 	}
 }
 
+func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
+	if a == nil {
+		return oc.BfdConfig{}, nil
+	}
+	if a.Port > uint32(^uint16(0)) {
+		return oc.BfdConfig{}, fmt.Errorf("invalid BFD port: %d", a.Port)
+	}
+	if a.DetectionMultiplier > uint32(^uint8(0)) {
+		return oc.BfdConfig{}, fmt.Errorf("invalid BFD detection multiplier: %d", a.DetectionMultiplier)
+	}
+
+	return oc.BfdConfig{
+		Enabled:                  a.Enabled,
+		Port:                     uint16(a.Port),
+		DesiredMinimumTxInterval: a.DesiredMinimumTxInterval,
+		RequiredMinimumReceive:   a.RequiredMinimumReceive,
+		DetectionMultiplier:      uint8(a.DetectionMultiplier),
+	}, nil
+}
+
 func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	pconf := &oc.Neighbor{}
 	if a.Conf != nil {
@@ -1152,6 +1171,7 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.Transport.Config.LocalPort = uint16(a.Transport.LocalPort)
 		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
 		pconf.Transport.Config.TcpMss = uint16(a.Transport.TcpMss)
+		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
 	}
 	if a.EbgpMultihop != nil {
 		pconf.EbgpMultihop.Config.Enabled = a.EbgpMultihop.Enabled
@@ -1160,6 +1180,13 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	if a.TtlSecurity != nil {
 		pconf.TtlSecurity.Config.Enabled = a.TtlSecurity.Enabled
 		pconf.TtlSecurity.Config.TtlMin = uint8(a.TtlSecurity.TtlMin)
+	}
+	if a.Bfd != nil {
+		bfdConfig, err := newBfdConfigFromAPIStruct(a.Bfd)
+		if err != nil {
+			return nil, err
+		}
+		pconf.Bfd.Config = bfdConfig
 	}
 	if a.State != nil {
 		var sessionState oc.SessionState
@@ -1226,6 +1253,12 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		pconf.Config.Description = a.Conf.Description
 		pconf.Config.PeerGroupName = a.Conf.PeerGroupName
 		pconf.Config.SendSoftwareVersion = a.Conf.SendSoftwareVersion
+		if a.Conf.AllowOwnAsn > math.MaxUint8 {
+			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.AllowOwnAsn)
+		}
+		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.AllowOwnAsn)
+		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.ReplacePeerAsn
+		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.AllowAspathLoopLocal
 
 		switch a.Conf.RemovePrivate {
 		case api.RemovePrivate_REMOVE_PRIVATE_ALL:
@@ -1291,7 +1324,9 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		}
 		pconf.Transport.Config.PassiveMode = a.Transport.PassiveMode
 		pconf.Transport.Config.RemotePort = uint16(a.Transport.RemotePort)
+		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
 		pconf.Transport.Config.TcpMss = uint16(a.Transport.TcpMss)
+		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
 	}
 	if a.EbgpMultihop != nil {
 		pconf.EbgpMultihop.Config.Enabled = a.EbgpMultihop.Enabled
@@ -1300,6 +1335,13 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 	if a.TtlSecurity != nil {
 		pconf.TtlSecurity.Config.Enabled = a.TtlSecurity.Enabled
 		pconf.TtlSecurity.Config.TtlMin = uint8(a.TtlSecurity.TtlMin)
+	}
+	if a.Bfd != nil {
+		bfdConfig, err := newBfdConfigFromAPIStruct(a.Bfd)
+		if err != nil {
+			return nil, err
+		}
+		pconf.Bfd.Config = bfdConfig
 	}
 	if a.Info != nil {
 		pconf.State.TotalPaths = a.Info.TotalPaths
@@ -1347,13 +1389,32 @@ func (s *server) DeleteDynamicNeighbor(ctx context.Context, r *api.DeleteDynamic
 }
 
 func newPrefixFromApiStruct(a *api.Prefix) (*table.Prefix, error) {
-	_, prefix, err := net.ParseCIDR(a.IpPrefix)
-	if err != nil {
-		return nil, err
+	if a.IpPrefix != "" && a.RtcPrefix != "" {
+		return nil, fmt.Errorf("ip-prefix and rtc-prefix are mutually exclusive")
 	}
-	rf := bgp.RF_IPv4_UC
-	if strings.Contains(a.IpPrefix, ":") {
-		rf = bgp.RF_IPv6_UC
+	var (
+		prefix netip.Prefix
+		rf     bgp.Family
+		err    error
+	)
+	switch {
+	case a.IpPrefix != "":
+		prefix, err = netip.ParsePrefix(a.IpPrefix)
+		if err != nil {
+			return nil, err
+		}
+		rf = bgp.RF_IPv4_UC
+		if prefix.Addr().Is6() {
+			rf = bgp.RF_IPv6_UC
+		}
+	case a.RtcPrefix != "":
+		prefix, err = bgp.ParseRTCPrefix(a.RtcPrefix)
+		if err != nil {
+			return nil, err
+		}
+		rf = bgp.RF_RTC_UC
+	default:
+		return nil, fmt.Errorf("prefix requires ip-prefix or rtc-prefix")
 	}
 	return &table.Prefix{
 		Prefix:             prefix,
@@ -1364,12 +1425,32 @@ func newPrefixFromApiStruct(a *api.Prefix) (*table.Prefix, error) {
 }
 
 func newConfigPrefixFromAPIStruct(a *api.Prefix) (*oc.Prefix, error) {
-	_, prefix, err := net.ParseCIDR(a.IpPrefix)
-	if err != nil {
-		return nil, err
+	if a.IpPrefix != "" && a.RtcPrefix != "" {
+		return nil, fmt.Errorf("ip-prefix and rtc-prefix are mutually exclusive")
+	}
+	var (
+		ipPrefix  netip.Prefix
+		rtcPrefix string
+	)
+	switch {
+	case a.IpPrefix != "":
+		prefix, err := netip.ParsePrefix(a.IpPrefix)
+		if err != nil {
+			return nil, err
+		}
+		ipPrefix = prefix
+	case a.RtcPrefix != "":
+		nlri, err := bgp.ParseRouteTargetMembershipNLRI(a.RtcPrefix)
+		if err != nil {
+			return nil, err
+		}
+		rtcPrefix = nlri.String()
+	default:
+		return nil, fmt.Errorf("prefix requires ip-prefix or rtc-prefix")
 	}
 	return &oc.Prefix{
-		IpPrefix:        netip.MustParsePrefix(prefix.String()),
+		IpPrefix:        ipPrefix,
+		RtcPrefix:       rtcPrefix,
 		MasklengthRange: fmt.Sprintf("%d..%d", a.MaskLengthMin, a.MaskLengthMax),
 	}, nil
 }
@@ -2453,6 +2534,7 @@ func newGlobalFromAPIStruct(a *api.Global) *oc.Global {
 			RouterId:         netip.MustParseAddr(a.RouterId),
 			Port:             a.ListenPort,
 			LocalAddressList: l,
+			BindToDevice:     a.BindToDevice,
 		},
 		AfiSafis: families,
 		UseMultiplePaths: oc.UseMultiplePaths{
@@ -2521,4 +2603,35 @@ func (s *server) GetTable(ctx context.Context, r *api.GetTableRequest) (*api.Get
 
 func (s *server) SetLogLevel(ctx context.Context, r *api.SetLogLevelRequest) (*api.SetLogLevelResponse, error) {
 	return &api.SetLogLevelResponse{}, s.bgpServer.SetLogLevel(ctx, r)
+}
+
+func (s *server) AddTcpAoKeychain(ctx context.Context, r *api.AddTcpAoKeychainRequest) (*api.AddTcpAoKeychainResponse, error) {
+	return &api.AddTcpAoKeychainResponse{}, s.bgpServer.AddTcpAoKeychain(ctx, r)
+}
+
+func (s *server) UpdateTcpAoKeychain(ctx context.Context, r *api.UpdateTcpAoKeychainRequest) (*api.UpdateTcpAoKeychainResponse, error) {
+	return s.bgpServer.UpdateTcpAoKeychain(ctx, r)
+}
+
+func (s *server) DeleteTcpAoKeychain(ctx context.Context, r *api.DeleteTcpAoKeychainRequest) (*api.DeleteTcpAoKeychainResponse, error) {
+	if err := s.bgpServer.DeleteTcpAoKeychain(ctx, r); err != nil {
+		return nil, err
+	}
+	return &api.DeleteTcpAoKeychainResponse{}, nil
+}
+
+func (s *server) ListTcpAoKeychain(r *api.ListTcpAoKeychainRequest, stream api.GoBgpService_ListTcpAoKeychainServer) error {
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	var sendErr error
+	fn := func(chain *api.TcpAoKeychain) {
+		if sendErr = stream.Send(&api.ListTcpAoKeychainResponse{Keychain: chain}); sendErr != nil {
+			cancel()
+		}
+	}
+	err := s.bgpServer.ListTcpAoKeychain(ctx, r, fn)
+	if sendErr != nil {
+		return sendErr
+	}
+	return err
 }

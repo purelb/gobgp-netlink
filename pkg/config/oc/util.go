@@ -16,8 +16,10 @@
 package oc
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net"
+	"net/netip"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -113,15 +115,15 @@ func (d *DynamicNeighbor) validate(b *BgpConfigSet) error {
 	return nil
 }
 
-func (n *Neighbor) IsConfederationMember(g *Global) bool {
-	return slices.Contains(g.Confederation.Config.MemberAsList, n.Config.PeerAs)
+func (g *Global) IsConfederationMember(peerAS uint32) bool {
+	return slices.Contains(g.Confederation.Config.MemberAsList, peerAS)
 }
 
-func (n *Neighbor) IsConfederation(g *Global) bool {
-	if n.Config.PeerAs == g.Config.As {
+func (g *Global) IsConfederation(peerAS uint32) bool {
+	if peerAS == g.Config.As {
 		return true
 	}
-	return n.IsConfederationMember(g)
+	return g.IsConfederationMember(peerAS)
 }
 
 func (n *Neighbor) IsEBGPPeer(g *Global) bool {
@@ -240,12 +242,17 @@ func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
 var _regexpPrefixMaskLengthRange = regexp.MustCompile(`(\d+)\.\.(\d+)`)
 
 func ParseMaskLength(prefix, mask string) (int, int, error) {
-	_, ipNet, err := net.ParseCIDR(prefix)
+	p, err := netip.ParsePrefix(prefix)
+	var rf bgp.Family
 	if err != nil {
-		return 0, 0, fmt.Errorf("invalid prefix: %s", prefix)
+		p, err = bgp.ParseRTCPrefix(prefix)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid prefix: %s", prefix)
+		}
+		rf = bgp.RF_RTC_UC
 	}
 	if mask == "" {
-		l, _ := ipNet.Mask.Size()
+		l := p.Bits()
 		return l, l, nil
 	}
 	elems := _regexpPrefixMaskLengthRange.FindStringSubmatch(mask)
@@ -258,22 +265,45 @@ func ParseMaskLength(prefix, mask string) (int, int, error) {
 	if min > max {
 		return 0, 0, fmt.Errorf("invalid mask length range: %s", mask)
 	}
-	if ipv4 := ipNet.IP.To4(); ipv4 != nil {
+	if rf == bgp.RF_RTC_UC {
 		f := func(i uint64) bool {
-			return i <= 32
+			return i <= bgp.RouteTargetMembershipPrefixLen
 		}
 		if !f(min) || !f(max) {
-			return 0, 0, fmt.Errorf("ipv4 mask length range outside scope :%s", mask)
+			return 0, 0, fmt.Errorf("rtc mask length range outside scope :%s", mask)
 		}
 	} else {
 		f := func(i uint64) bool {
-			return i <= 128
+			return i <= uint64(p.Addr().BitLen())
 		}
 		if !f(min) || !f(max) {
-			return 0, 0, fmt.Errorf("ipv6 mask length range outside scope :%s", mask)
+			return 0, 0, fmt.Errorf("ip mask length range outside scope :%s", mask)
 		}
 	}
 	return int(min), int(max), nil
+}
+
+// ToPrefix parses the ip-prefix or rtc-prefix field (mutually exclusive) into a netip.Prefix and family.
+func (c *Prefix) ToPrefix() (netip.Prefix, bgp.Family, error) {
+	if c.IpPrefix.IsValid() && c.RtcPrefix != "" {
+		return netip.Prefix{}, 0, fmt.Errorf("ip-prefix and rtc-prefix are mutually exclusive")
+	}
+	switch {
+	case c.IpPrefix.IsValid():
+		rf := bgp.RF_IPv4_UC
+		if c.IpPrefix.Addr().Is6() {
+			rf = bgp.RF_IPv6_UC
+		}
+		return c.IpPrefix, rf, nil
+	case c.RtcPrefix != "":
+		pfx, err := bgp.ParseRTCPrefix(c.RtcPrefix)
+		if err != nil {
+			return netip.Prefix{}, 0, err
+		}
+		return pfx, bgp.RF_RTC_UC, nil
+	default:
+		return netip.Prefix{}, 0, fmt.Errorf("prefix requires ip-prefix or rtc-prefix")
+	}
 }
 
 func extractFamilyFromConfigAfiSafi(c *AfiSafi) uint32 {
@@ -458,6 +488,32 @@ func toPeerType(t PeerType) api.PeerType {
 	}
 }
 
+// bfdSessionStateToAPI maps oc BfdSessionState string values to api.BfdSessionState.
+// Do not cast BfdSessionState.ToInt() to the API enum: YANG-derived indices (0..3) are
+// one less than protobuf values (BFD_SESSION_STATE_UP=1, etc.).
+func bfdSessionStateToAPI(s BfdSessionState) api.BfdSessionState {
+	switch s {
+	case BFD_SESSION_STATE_UP:
+		return api.BfdSessionState_BFD_SESSION_STATE_UP
+	case BFD_SESSION_STATE_DOWN:
+		return api.BfdSessionState_BFD_SESSION_STATE_DOWN
+	case BFD_SESSION_STATE_ADMIN_DOWN:
+		return api.BfdSessionState_BFD_SESSION_STATE_ADMIN_DOWN
+	case BFD_SESSION_STATE_INIT:
+		return api.BfdSessionState_BFD_SESSION_STATE_INIT
+	default:
+		return api.BfdSessionState_BFD_SESSION_STATE_UNSPECIFIED
+	}
+}
+
+func bfdDiagnosticCodeToAPI(d BfdDiagnosticCode) api.BfdDiagnosticCode {
+	i := d.ToInt()
+	if i < 0 || i > int(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_REVERSE_CONCATENATED_PATH_DOWN) {
+		return api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_NO_DIAGNOSTIC
+	}
+	return api.BfdDiagnosticCode(i)
+}
+
 func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 	afiSafis := make([]*api.AfiSafi, 0, len(pconf.AfiSafis))
 	for _, f := range pconf.AfiSafis {
@@ -537,24 +593,24 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			AdminState:   admin_state,
 			Messages: &api.Messages{
 				Received: &api.Message{
-					Notification:   s.Messages.Received.Notification,
-					Update:         s.Messages.Received.Update,
-					Open:           s.Messages.Received.Open,
-					Keepalive:      s.Messages.Received.Keepalive,
-					Refresh:        s.Messages.Received.Refresh,
-					Discarded:      s.Messages.Received.Discarded,
-					Total:          s.Messages.Received.Total,
-					WithdrawUpdate: uint64(s.Messages.Received.WithdrawUpdate),
-					WithdrawPrefix: uint64(s.Messages.Received.WithdrawPrefix),
+					Notification:   pconf.State.Messages.Received.Notification,
+					Update:         pconf.State.Messages.Received.Update,
+					Open:           pconf.State.Messages.Received.Open,
+					Keepalive:      pconf.State.Messages.Received.Keepalive,
+					Refresh:        pconf.State.Messages.Received.Refresh,
+					Discarded:      pconf.State.Messages.Received.Discarded,
+					Total:          pconf.State.Messages.Received.Total,
+					WithdrawUpdate: uint64(pconf.State.Messages.Received.WithdrawUpdate),
+					WithdrawPrefix: uint64(pconf.State.Messages.Received.WithdrawPrefix),
 				},
 				Sent: &api.Message{
-					Notification: s.Messages.Sent.Notification,
-					Update:       s.Messages.Sent.Update,
-					Open:         s.Messages.Sent.Open,
-					Keepalive:    s.Messages.Sent.Keepalive,
-					Refresh:      s.Messages.Sent.Refresh,
-					Discarded:    s.Messages.Sent.Discarded,
-					Total:        s.Messages.Sent.Total,
+					Notification: pconf.State.Messages.Sent.Notification,
+					Update:       pconf.State.Messages.Sent.Update,
+					Open:         pconf.State.Messages.Sent.Open,
+					Keepalive:    pconf.State.Messages.Sent.Keepalive,
+					Refresh:      pconf.State.Messages.Sent.Refresh,
+					Discarded:    pconf.State.Messages.Sent.Discarded,
+					Total:        pconf.State.Messages.Sent.Total,
 				},
 			},
 			PeerAsn:         s.PeerAs,
@@ -566,6 +622,21 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			LocalCap:        localCap,
 			RouterId:        s.RemoteRouterId.String(),
 			Flops:           s.Flops,
+			BfdState: &api.BfdPeerState{
+				SessionState:                 bfdSessionStateToAPI(pconf.Bfd.State.SessionState),
+				RemoteSessionState:           bfdSessionStateToAPI(pconf.Bfd.State.RemoteSessionState),
+				LastFailureTime:              pconf.Bfd.State.LastFailureTime,
+				FailureTransitions:           pconf.Bfd.State.FailureTransitions,
+				LocalDiscriminator:           pconf.Bfd.State.LocalDiscriminator,
+				RemoteDiscriminator:          pconf.Bfd.State.RemoteDiscriminator,
+				LocalDiagnosticCode:          bfdDiagnosticCodeToAPI(pconf.Bfd.State.LocalDiagnosticCode),
+				RemoteDiagnosticCode:         bfdDiagnosticCodeToAPI(pconf.Bfd.State.RemoteDiagnosticCode),
+				RemoteMinimumReceiveInterval: pconf.Bfd.State.RemoteMinimumReceiveInterval,
+				BfdAsync: &api.BfdAsyncCounters{
+					TransmittedPackets: pconf.Bfd.State.BfdAsync.TransmittedPackets,
+					ReceivedPackets:    pconf.Bfd.State.BfdAsync.ReceivedPackets,
+				},
+			},
 		},
 		EbgpMultihop: &api.EbgpMultihop{
 			Enabled:     pconf.EbgpMultihop.Config.Enabled,
@@ -615,9 +686,89 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			PassiveMode:   pconf.Transport.Config.PassiveMode,
 			BindInterface: pconf.Transport.Config.BindInterface,
 			TcpMss:        uint32(pconf.Transport.Config.TcpMss),
+			IpTos:         uint32(pconf.Transport.Config.IpTos),
 		},
 		AfiSafis: afiSafis,
+		Bfd: &api.BfdPeerConfig{
+			Enabled:                  pconf.Bfd.Config.Enabled,
+			Port:                     uint32(pconf.Bfd.Config.Port),
+			DesiredMinimumTxInterval: pconf.Bfd.Config.DesiredMinimumTxInterval,
+			RequiredMinimumReceive:   pconf.Bfd.Config.RequiredMinimumReceive,
+			DetectionMultiplier:      uint32(pconf.Bfd.Config.DetectionMultiplier),
+		},
 	}
+}
+
+func NewTcpAoKeychainsFromConfigStruct(chains []Keychain) ([]*api.TcpAoKeychain, error) {
+	result := make([]*api.TcpAoKeychain, 0, len(chains))
+	names := make(map[string]struct{}, len(chains))
+	for i := range chains {
+		chain, err := newTcpAoKeychainFromConfigStruct(&chains[i])
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := names[chain.Name]; ok {
+			return nil, fmt.Errorf("duplicate TCP-AO keychain %q", chain.Name)
+		}
+		names[chain.Name] = struct{}{}
+		result = append(result, chain)
+	}
+	return result, nil
+}
+
+func newTcpAoKeychainFromConfigStruct(chain *Keychain) (*api.TcpAoKeychain, error) {
+	name := chain.Config.Name
+	if name == "" {
+		return nil, fmt.Errorf("TCP-AO keychain name is required")
+	}
+	result := &api.TcpAoKeychain{
+		Name: name,
+		Keys: make([]*api.TcpAoKey, 0, len(chain.Keys)),
+	}
+	for i, key := range chain.Keys {
+		masterKey, err := readTcpAoMasterKey(key.Config.SecretKey)
+		if err != nil {
+			return nil, fmt.Errorf("TCP-AO keychain %q key %d: %w", name, i, err)
+		}
+		algorithm, err := tcpAoAlgorithmToAPI(key.Config.CryptoAlgorithm)
+		if err != nil {
+			return nil, fmt.Errorf("TCP-AO keychain %q key %d: %w", name, i, err)
+		}
+		result.Keys = append(result.Keys, &api.TcpAoKey{
+			SendId:            uint32(key.Config.KeyId),
+			ReceiveId:         uint32(key.Config.ReceiveId),
+			Algorithm:         algorithm,
+			ExcludeTcpOptions: key.Config.ExcludeTcpOptions,
+			MasterKey:         masterKey,
+		})
+	}
+	return result, nil
+}
+
+func tcpAoAlgorithmToAPI(algorithm CryptoType) (api.TcpAoAlgorithm, error) {
+	switch algorithm {
+	case CRYPTO_TYPE_HMAC_SHA_1_96:
+		return api.TcpAoAlgorithm_TCP_AO_ALGORITHM_HMAC_SHA1_96, nil
+	case CRYPTO_TYPE_AES_128_CMAC_96:
+		return api.TcpAoAlgorithm_TCP_AO_ALGORITHM_AES_128_CMAC_96, nil
+	case CRYPTO_TYPE_HMAC_SHA_256_96:
+		return api.TcpAoAlgorithm_TCP_AO_ALGORITHM_HMAC_SHA256_96, nil
+	case CRYPTO_TYPE_HMAC_SHA_256_128:
+		return api.TcpAoAlgorithm_TCP_AO_ALGORITHM_HMAC_SHA256_128, nil
+	default:
+		return api.TcpAoAlgorithm_TCP_AO_ALGORITHM_UNSPECIFIED, fmt.Errorf("unsupported algorithm %q", algorithm)
+	}
+}
+
+func readTcpAoMasterKey(secretKey string) ([]byte, error) {
+	if secretKey == "" {
+		return nil, fmt.Errorf("secret-key is required")
+	}
+	masterKey, err := base64.StdEncoding.DecodeString(secretKey)
+	if err != nil {
+		return nil, fmt.Errorf("secret-key must be base64 encoded: %w", err)
+	}
+	return masterKey, nil
 }
 
 func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
@@ -635,14 +786,17 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 	return &api.PeerGroup{
 		ApplyPolicy: newApplyPolicyFromConfigStruct(&pconf.ApplyPolicy),
 		Conf: &api.PeerGroupConf{
-			PeerAsn:             pconf.Config.PeerAs,
-			LocalAsn:            pconf.Config.LocalAs,
-			Type:                toPeerType(pconf.Config.PeerType),
-			AuthPassword:        pconf.Config.AuthPassword,
-			RouteFlapDamping:    pconf.Config.RouteFlapDamping,
-			Description:         pconf.Config.Description,
-			PeerGroupName:       pconf.Config.PeerGroupName,
-			SendSoftwareVersion: pconf.Config.SendSoftwareVersion,
+			PeerAsn:              pconf.Config.PeerAs,
+			LocalAsn:             pconf.Config.LocalAs,
+			Type:                 toPeerType(pconf.Config.PeerType),
+			AuthPassword:         pconf.Config.AuthPassword,
+			RouteFlapDamping:     pconf.Config.RouteFlapDamping,
+			Description:          pconf.Config.Description,
+			PeerGroupName:        pconf.Config.PeerGroupName,
+			SendSoftwareVersion:  pconf.Config.SendSoftwareVersion,
+			AllowOwnAsn:          uint32(pconf.AsPathOptions.Config.AllowOwnAs),
+			ReplacePeerAsn:       pconf.AsPathOptions.Config.ReplacePeerAs,
+			AllowAspathLoopLocal: pconf.AsPathOptions.Config.AllowAsPathLoopLocal,
 		},
 		Info: &api.PeerGroupState{
 			PeerAsn:       s.PeerAs,
@@ -690,12 +844,21 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			LocalRestarting:     pconf.GracefulRestart.State.LocalRestarting,
 		},
 		Transport: &api.Transport{
-			RemotePort:   uint32(pconf.Transport.Config.RemotePort),
-			LocalAddress: pconf.Transport.Config.LocalAddress.String(),
-			PassiveMode:  pconf.Transport.Config.PassiveMode,
-			TcpMss:       uint32(pconf.Transport.Config.TcpMss),
+			RemotePort:    uint32(pconf.Transport.Config.RemotePort),
+			LocalAddress:  pconf.Transport.Config.LocalAddress.String(),
+			PassiveMode:   pconf.Transport.Config.PassiveMode,
+			BindInterface: pconf.Transport.Config.BindInterface,
+			TcpMss:        uint32(pconf.Transport.Config.TcpMss),
+			IpTos:         uint32(pconf.Transport.Config.IpTos),
 		},
 		AfiSafis: afiSafis,
+		Bfd: &api.BfdPeerConfig{
+			Enabled:                  pconf.Bfd.Config.Enabled,
+			Port:                     uint32(pconf.Bfd.Config.Port),
+			DesiredMinimumTxInterval: pconf.Bfd.Config.DesiredMinimumTxInterval,
+			RequiredMinimumReceive:   pconf.Bfd.Config.RequiredMinimumReceive,
+			DetectionMultiplier:      uint32(pconf.Bfd.Config.DetectionMultiplier),
+		},
 	}
 }
 
@@ -717,6 +880,7 @@ func NewGlobalFromConfigStruct(c *Global) *api.Global {
 		ListenAddresses:  l,
 		Families:         families,
 		UseMultiplePaths: c.UseMultiplePaths.Config.Enabled,
+		BindToDevice:     c.Config.BindToDevice,
 		RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 			AlwaysCompareMed:         c.RouteSelectionOptions.Config.AlwaysCompareMed,
 			IgnoreAsPathLength:       c.RouteSelectionOptions.Config.IgnoreAsPathLength,
@@ -748,12 +912,21 @@ func NewGlobalFromConfigStruct(c *Global) *api.Global {
 }
 
 func newAPIPrefixFromConfigStruct(c Prefix) (*api.Prefix, error) {
-	min, max, err := ParseMaskLength(c.IpPrefix.String(), c.MasklengthRange)
+	prefix := c.RtcPrefix
+	if c.IpPrefix.IsValid() {
+		prefix = c.IpPrefix.String()
+	}
+	min, max, err := ParseMaskLength(prefix, c.MasklengthRange)
 	if err != nil {
 		return nil, err
 	}
+	ipPrefix := ""
+	if c.IpPrefix.IsValid() {
+		ipPrefix = c.IpPrefix.String()
+	}
 	return &api.Prefix{
-		IpPrefix:      c.IpPrefix.String(),
+		IpPrefix:      ipPrefix,
+		RtcPrefix:     c.RtcPrefix,
 		MaskLengthMin: uint32(min),
 		MaskLengthMax: uint32(max),
 	}, nil

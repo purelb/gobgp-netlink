@@ -59,6 +59,7 @@ const (
 	ctColor
 	ctLb
 	ctMup
+	ctRedirectIP
 )
 
 var extCommNameMap = map[extCommType]string{
@@ -66,6 +67,7 @@ var extCommNameMap = map[extCommType]string{
 	ctDiscard:        "discard",
 	ctRate:           "rate-limit",
 	ctRedirect:       "redirect",
+	ctRedirectIP:     "redirect-to-ip",
 	ctMark:           "mark",
 	ctAction:         "action",
 	ctRT:             "rt",
@@ -88,6 +90,7 @@ var extCommValueMap = map[string]extCommType{
 	extCommNameMap[ctDiscard]:        ctDiscard,
 	extCommNameMap[ctRate]:           ctRate,
 	extCommNameMap[ctRedirect]:       ctRedirect,
+	extCommNameMap[ctRedirectIP]:     ctRedirectIP,
 	extCommNameMap[ctMark]:           ctMark,
 	extCommNameMap[ctAction]:         ctAction,
 	extCommNameMap[ctRT]:             ctRT,
@@ -151,6 +154,42 @@ func redirectParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
 		return []bgp.ExtendedCommunityInterface{ex}, nil
 	}
 	return nil, fmt.Errorf("invalid redirect")
+}
+
+// redirectIPParser parses "redirect-to-ip <address> [copy]". Unlike
+// redirectParser, the argument is a forwarding target, not a route target.
+func redirectIPParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
+	if len(args) < 2 || args[0] != extCommNameMap[ctRedirectIP] {
+		return nil, fmt.Errorf("invalid redirect-to-ip")
+	}
+	isCopy := false
+	switch len(args) {
+	case 2:
+	case 3:
+		if args[2] != "copy" {
+			return nil, fmt.Errorf("invalid redirect-to-ip: unexpected %q, want \"copy\"", args[2])
+		}
+		isCopy = true
+	default:
+		return nil, fmt.Errorf("invalid redirect-to-ip: want <address> [copy]")
+	}
+	addr, err := netip.ParseAddr(args[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid redirect-to-ip target %q: %w", args[1], err)
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		ext, err := bgp.NewFlowSpecRedirectToIPv4Extended(addr, isCopy)
+		if err != nil {
+			return nil, err
+		}
+		return []bgp.ExtendedCommunityInterface{ext}, nil
+	}
+	ext, err := bgp.NewFlowSpecRedirectToIPv6Extended(addr, isCopy)
+	if err != nil {
+		return nil, err
+	}
+	return []bgp.ExtendedCommunityInterface{ext}, nil
 }
 
 func markParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
@@ -371,22 +410,97 @@ func lbParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
 	return []bgp.ExtendedCommunityInterface{bgp.NewLinkBandwidthExtended(uint16(as), float32(bw))}, nil
 }
 
+// mupAsDotRegexp matches the "<upper>.<lower>" AS-dot notation for 4-octet
+// AS numbers, mirroring the convention used by bgp.ParseExtendedCommunity
+// for route targets.
+var mupAsDotRegexp = regexp.MustCompile(`^(\d+)\.(\d+)$`)
+
 func mupParser(args []string) ([]bgp.ExtendedCommunityInterface, error) {
-	if len(args) != 2 || args[0] != extCommNameMap[ctMup] {
+	if len(args) < 2 || args[0] != extCommNameMap[ctMup] {
 		return nil, fmt.Errorf("invalid mup")
 	}
-	a := strings.Split(args[1], ":")
-	sid2, err := strconv.ParseUint(a[0], 10, 16)
-	if err != nil {
-		return nil, fmt.Errorf("invalid mup segment ID")
+	interwork := false
+	value := args[1]
+	switch len(args) {
+	case 2:
+	case 3:
+		switch args[1] {
+		case "direct":
+		case "interwork":
+			interwork = true
+		default:
+			return nil, fmt.Errorf("invalid mup segment type: %s", args[1])
+		}
+		value = args[2]
+	default:
+		return nil, fmt.Errorf("invalid mup")
 	}
-	sid4, err := strconv.ParseUint(a[1], 10, 32)
-	if err != nil {
-		return nil, fmt.Errorf("invalid mup segment ID")
+
+	i := strings.LastIndex(value, ":")
+	if i < 0 {
+		return nil, fmt.Errorf("invalid mup segment ID: %s", value)
 	}
-	// Sub-type became explicit upstream; it was previously hard-coded to
-	// EC_SUBTYPE_MUP_DIRECT_SEG, which is what this CLI syntax means.
-	return []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(bgp.EC_SUBTYPE_MUP_DIRECT_SEG, uint16(sid2), uint32(sid4))}, nil
+	ga, la := value[:i], value[i+1:]
+
+	if addr, err := netip.ParseAddr(ga); err == nil && addr.Is4() {
+		localAdmin, err := strconv.ParseUint(la, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid mup local admin: %s", la)
+		}
+		subType := bgp.EC_SUBTYPE_MUP_DIRECT_SEG_IPV4
+		if interwork {
+			subType = bgp.EC_SUBTYPE_MUP_INTERWORK_SEG_IPV4
+		}
+		ext, err := bgp.NewMUPIPv4AddressSpecificExtended(subType, addr, uint16(localAdmin))
+		if err != nil {
+			return nil, err
+		}
+		return []bgp.ExtendedCommunityInterface{ext}, nil
+	}
+
+	var as uint64
+	fourOctet := false
+	if m := mupAsDotRegexp.FindStringSubmatch(ga); m != nil {
+		upper, err := strconv.ParseUint(m[1], 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid mup global admin: %s", ga)
+		}
+		lower, err := strconv.ParseUint(m[2], 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid mup global admin: %s", ga)
+		}
+		as = upper<<16 | lower
+		fourOctet = true
+	} else {
+		v, err := strconv.ParseUint(ga, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid mup global admin: %s", ga)
+		}
+		as = v
+		fourOctet = v > 0xffff
+	}
+
+	if fourOctet {
+		localAdmin, err := strconv.ParseUint(la, 10, 16)
+		if err != nil {
+			return nil, fmt.Errorf("invalid mup local admin: %s", la)
+		}
+		subType := bgp.EC_SUBTYPE_MUP_DIRECT_SEG_4_OCTET_AS
+		if interwork {
+			subType = bgp.EC_SUBTYPE_MUP_INTERWORK_SEG_4_OCTET_AS
+		}
+		return []bgp.ExtendedCommunityInterface{bgp.NewMUPFourOctetAsSpecificExtended(subType, uint32(as), uint16(localAdmin))}, nil
+	}
+
+	localAdmin, err := strconv.ParseUint(la, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("invalid mup local admin: %s", la)
+	}
+	subType := bgp.EC_SUBTYPE_MUP_DIRECT_SEG
+	if interwork {
+		subType = bgp.EC_SUBTYPE_MUP_INTERWORK_SEG
+	}
+	return []bgp.ExtendedCommunityInterface{bgp.NewMUPExtended(subType, uint16(as), uint32(localAdmin))}, nil
 }
 
 var extCommParserMap = map[extCommType]func([]string) ([]bgp.ExtendedCommunityInterface, error){
@@ -394,6 +508,7 @@ var extCommParserMap = map[extCommType]func([]string) ([]bgp.ExtendedCommunityIn
 	ctDiscard:        rateLimitParser,
 	ctRate:           rateLimitParser,
 	ctRedirect:       redirectParser,
+	ctRedirectIP:     redirectIPParser,
 	ctMark:           markParser,
 	ctAction:         actionParser,
 	ctRT:             rtParser,
@@ -992,7 +1107,7 @@ func parseEvpnIPPrefixArgs(args []string) (bgp.NLRI, []string, error) {
 
 func parseEvpnIPMSIArgs(args []string) (bgp.NLRI, []string, error) {
 	// Format:
-	// etag <etag> rd <rd> [rt <rt>...] [encap <encap type>]
+	// etag <etag> rd <rd> rt <rt> [encap <encap type>]
 	req := 4
 	if len(args) < req {
 		return nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
@@ -1006,7 +1121,7 @@ func parseEvpnIPMSIArgs(args []string) (bgp.NLRI, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, f := range []string{"etag", "rd"} {
+	for _, f := range []string{"etag", "rd", "rt"} {
 		for len(m[f]) == 0 {
 			return nil, nil, fmt.Errorf("specify %s", f)
 		}
@@ -1024,10 +1139,8 @@ func parseEvpnIPMSIArgs(args []string) (bgp.NLRI, []string, error) {
 	etag := uint32(e)
 
 	extcomms := make([]string, 0)
-	if len(m["rt"]) > 0 {
-		extcomms = append(extcomms, "rt")
-		extcomms = append(extcomms, m["rt"]...)
-	}
+	extcomms = append(extcomms, "rt")
+	extcomms = append(extcomms, m["rt"]...)
 	ec, err := bgp.ParseExtendedCommunity(bgp.EC_SUBTYPE_SOURCE_AS, m["rt"][0])
 	if err != nil {
 		return nil, nil, fmt.Errorf("route target parse failed")
@@ -1070,7 +1183,7 @@ func parseEvpnArgs(args []string) (bgp.NLRI, []string, error) {
 
 func parseMUPInterworkSegmentDiscoveryRouteArgs(args []string, afi uint16, nexthop string) (bgp.NLRI, *bgp.PathAttributePrefixSID, []string, error) {
 	// Format:
-	// <ip prefix> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...]
+	// <ip prefix> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup [direct|interwork] <global administrator>:<local administrator>]
 	req := 13
 	if len(args) < req {
 		return nil, nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
@@ -1081,7 +1194,8 @@ func parseMUPInterworkSegmentDiscoveryRouteArgs(args []string, afi uint16, nexth
 		"locator-node-length": paramSingle,
 		"function-length":     paramSingle,
 		"behavior":            paramSingle,
-		"rt":                  paramSingle,
+		"rt":                  paramList,
+		"mup":                 paramList,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -1144,6 +1258,10 @@ func parseMUPInterworkSegmentDiscoveryRouteArgs(args []string, afi uint16, nexth
 		extcomms = append(extcomms, "rt")
 		extcomms = append(extcomms, m["rt"]...)
 	}
+	if len(m["mup"]) > 0 {
+		extcomms = append(extcomms, "mup")
+		extcomms = append(extcomms, m["mup"]...)
+	}
 
 	r := &bgp.MUPInterworkSegmentDiscoveryRoute{
 		RD:     rd,
@@ -1161,12 +1279,12 @@ func parseMUPDirectSegmentDiscoveryRouteArgs(args []string, afi uint16, nexthop 
 	}
 	m, err := extractReserved(args, map[string]int{
 		"rd":                  paramSingle,
-		"rt":                  paramSingle,
+		"rt":                  paramList,
 		"prefix":              paramSingle,
 		"locator-node-length": paramSingle,
 		"function-length":     paramSingle,
 		"behavior":            paramSingle,
-		"mup":                 paramSingle,
+		"mup":                 paramList,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -1227,7 +1345,8 @@ func parseMUPDirectSegmentDiscoveryRouteArgs(args []string, afi uint16, nexthop 
 		extcomms = append(extcomms, m["rt"]...)
 	}
 	if len(m["mup"]) > 0 {
-		extcomms = append(extcomms, "mup", m["mup"][0])
+		extcomms = append(extcomms, "mup")
+		extcomms = append(extcomms, m["mup"]...)
 	}
 
 	r := &bgp.MUPDirectSegmentDiscoveryRoute{
@@ -1275,7 +1394,7 @@ func parseMUPType1SessionTransformedRouteArgs(args []string, afi uint16) (bgp.NL
 	}
 	m, err := extractReserved(args, map[string]int{
 		"rd":       paramSingle,
-		"rt":       paramSingle,
+		"rt":       paramList,
 		"teid":     paramSingle,
 		"qfi":      paramSingle,
 		"endpoint": paramSingle,
@@ -1339,17 +1458,21 @@ func parseMUPType1SessionTransformedRouteArgs(args []string, afi uint16) (bgp.NL
 
 func parseMUPType2SessionTransformedRouteArgs(args []string, afi uint16) (bgp.NLRI, *bgp.PathAttributePrefixSID, []string, error) {
 	// Format:
-	// <endpoint address> rd <rd> [rt <rt>...] endpoint-address-length <endpoint-address-length> teid <teid> [mup <segment identifier>]
+	// <endpoint address> rd <rd> [rt <rt>...] endpoint-address-length <endpoint-address-length> teid <teid> [mup [direct|interwork] <global administrator>:<local administrator>] [session-teid <teid> session-qfi <qfi>] [interwork-endpoint <addr>] [source-address <addr>]
 	req := 6
 	if len(args) < req {
 		return nil, nil, nil, fmt.Errorf("%d args required at least, but got %d", req, len(args))
 	}
 	m, err := extractReserved(args, map[string]int{
 		"rd":                      paramSingle,
-		"rt":                      paramSingle,
+		"rt":                      paramList,
 		"endpoint-address-length": paramSingle,
 		"teid":                    paramSingle,
-		"mup":                     paramSingle,
+		"mup":                     paramList,
+		"session-teid":            paramSingle,
+		"session-qfi":             paramSingle,
+		"interwork-endpoint":      paramSingle,
+		"source-address":          paramSingle,
 	})
 	if err != nil {
 		return nil, nil, nil, err
@@ -1387,16 +1510,41 @@ func parseMUPType2SessionTransformedRouteArgs(args []string, afi uint16) (bgp.NL
 		extcomms = append(extcomms, m["rt"]...)
 	}
 	if len(m["mup"]) > 0 {
-		extcomms = append(extcomms, "mup", m["mup"][0])
+		extcomms = append(extcomms, "mup")
+		extcomms = append(extcomms, m["mup"]...)
 	}
 
-	r := &bgp.MUPType2SessionTransformedRoute{
-		RD:                    rd,
-		EndpointAddressLength: uint8(eaLen),
-		EndpointAddress:       ea,
-		TEID:                  teid,
+	var tlvs []bgp.MUPTLVInterface
+	if len(m["session-teid"]) > 0 || len(m["session-qfi"]) > 0 {
+		if len(m["session-teid"]) == 0 || len(m["session-qfi"]) == 0 {
+			return nil, nil, nil, fmt.Errorf("session-teid and session-qfi must be specified together")
+		}
+		sessionTeid, err := parseTeid(m["session-teid"][0])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		sessionQfi, err := strconv.ParseUint(m["session-qfi"][0], 10, 8)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		tlvs = append(tlvs, bgp.NewMUPSessionParametersTLV(sessionTeid, uint8(sessionQfi)))
 	}
-	return bgp.NewMUPNLRI(afi, bgp.MUP_ARCH_TYPE_UNDEFINED, bgp.MUP_ROUTE_TYPE_TYPE_2_SESSION_TRANSFORMED, r), nil, extcomms, nil
+	if len(m["interwork-endpoint"]) > 0 {
+		addr, err := netip.ParseAddr(m["interwork-endpoint"][0])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		tlvs = append(tlvs, bgp.NewMUPInterworkEndpointTLV(addr))
+	}
+	if len(m["source-address"]) > 0 {
+		addr, err := netip.ParseAddr(m["source-address"][0])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		tlvs = append(tlvs, bgp.NewMUPSourceAddressTLV(addr))
+	}
+
+	return bgp.NewMUPType2SessionTransformedRoute(rd, uint8(eaLen), ea, teid, tlvs...), nil, extcomms, nil
 }
 
 func parseMUPArgs(args []string, afi uint16, nexthop string) (bgp.NLRI, *bgp.PathAttributePrefixSID, []string, error) {
@@ -1780,43 +1928,49 @@ func parseLsLinkNLRIType(args []string) (bgp.NLRI, *bgp.PathAttributeLs, error) 
 	}
 
 	m, err := extractReserved(args, map[string]int{
-		"protocol":                        paramSingle,
-		"identifier":                      paramSingle,
-		"local-asn":                       paramSingle, // optional, one of the four local fields is required
-		"local-bgp-ls-id":                 paramSingle, // optional, one of the four local fields is required
-		"local-bgp-router-id":             paramSingle, // optional, one of the four local fields is required
-		"local-igp-router-id":             paramSingle, // optional, one of the four local fields is required
-		"local-bgp-confederation-member":  paramSingle, // optional
-		"remote-asn":                      paramSingle, // optional, one of the four remote fields is required
-		"remote-bgp-ls-id":                paramSingle, // optional, one of the four remote fields is required
-		"remote-bgp-router-id":            paramSingle, // optional, one of the four remote fields is required
-		"remote-igp-router-id":            paramSingle, // optional, one of the four remote fields is required
-		"remote-bgp-confederation-member": paramSingle, // optional
-		"link-local-id":                   paramSingle, // optional, link local id
-		"link-remote-id":                  paramSingle, // optional, link remote id
-		"ipv4-interface-address":          paramSingle, // optional, IPv4 interface address
-		"ipv4-neighbor-address":           paramSingle, // optional, IPv4 neighbor address
-		"ipv6-interface-address":          paramSingle, // optional, IPv6 interface address
-		"ipv6-neighbor-address":           paramSingle, // optional, IPv6 neighbor address
-		"sid":                             paramSingle, // optional
-		"sid-type":                        paramSingle, // optional
-		"v-flag":                          paramFlag,   // optional
-		"l-flag":                          paramFlag,   // optional
-		"b-flag":                          paramFlag,   // optional
-		"p-flag":                          paramFlag,   // optional
-		"weight":                          paramSingle, // optional
-		"max-link-bandwidth":              paramSingle, // optional, maximum link bandwidth
-		"te-default-metric":               paramSingle, // optional, te default metric
-		"metric":                          paramSingle, // optional, metric
-		"srv6-endpoint-behavior":          paramSingle, // optional, srv6 end.x sid
-		"srv6-sids":                       paramList,   // optional, srv6 end.x sid
-		"srv6-weight":                     paramSingle, // optional, srv6 end.x sid
-		"srv6-flags":                      paramSingle, // optional, srv6 end.x sid
-		"srv6-algo":                       paramSingle, // optional, srv6 end.x sid
-		"srv6-structure-lb":               paramSingle, // optional, srv6 sid structure
-		"srv6-structure-ln":               paramSingle, // optional, srv6 sid structure
-		"srv6-structure-fun":              paramSingle, // optional, srv6 sid structure
-		"srv6-structure-arg":              paramSingle, // optional, srv6 sid structure
+		"protocol":                            paramSingle,
+		"identifier":                          paramSingle,
+		"local-asn":                           paramSingle, // optional, one of the four local fields is required
+		"local-bgp-ls-id":                     paramSingle, // optional, one of the four local fields is required
+		"local-bgp-router-id":                 paramSingle, // optional, one of the four local fields is required
+		"local-igp-router-id":                 paramSingle, // optional, one of the four local fields is required
+		"local-bgp-confederation-member":      paramSingle, // optional
+		"remote-asn":                          paramSingle, // optional, one of the four remote fields is required
+		"remote-bgp-ls-id":                    paramSingle, // optional, one of the four remote fields is required
+		"remote-bgp-router-id":                paramSingle, // optional, one of the four remote fields is required
+		"remote-igp-router-id":                paramSingle, // optional, one of the four remote fields is required
+		"remote-bgp-confederation-member":     paramSingle, // optional
+		"link-local-id":                       paramSingle, // optional, link local id
+		"link-remote-id":                      paramSingle, // optional, link remote id
+		"ipv4-interface-address":              paramSingle, // optional, IPv4 interface address
+		"ipv4-neighbor-address":               paramSingle, // optional, IPv4 neighbor address
+		"ipv6-interface-address":              paramSingle, // optional, IPv6 interface address
+		"ipv6-neighbor-address":               paramSingle, // optional, IPv6 neighbor address
+		"sid":                                 paramSingle, // optional
+		"sid-type":                            paramSingle, // optional
+		"v-flag":                              paramFlag,   // optional
+		"l-flag":                              paramFlag,   // optional
+		"b-flag":                              paramFlag,   // optional
+		"p-flag":                              paramFlag,   // optional
+		"weight":                              paramSingle, // optional
+		"max-link-bandwidth":                  paramSingle, // optional, maximum link bandwidth
+		"te-default-metric":                   paramSingle, // optional, te default metric
+		"unidirectional-link-delay":           paramSingle, // optional, RFC8571 TLV 1114
+		"unidirectional-link-delay-anomalous": paramFlag,   // optional, RFC8571 TLV 1114 A-flag
+		"min-unidirectional-link-delay":       paramSingle, // optional, RFC8571 TLV 1115
+		"max-unidirectional-link-delay":       paramSingle, // optional, RFC8571 TLV 1115
+		"min-max-unidirectional-link-delay-anomalous": paramFlag,   // optional, RFC8571 TLV 1115 A-flag
+		"unidirectional-delay-variation":              paramSingle, // optional, RFC8571 TLV 1116
+		"metric":                                      paramSingle, // optional, metric
+		"srv6-endpoint-behavior":                      paramSingle, // optional, srv6 end.x sid
+		"srv6-sids":                                   paramList,   // optional, srv6 end.x sid
+		"srv6-weight":                                 paramSingle, // optional, srv6 end.x sid
+		"srv6-flags":                                  paramSingle, // optional, srv6 end.x sid
+		"srv6-algo":                                   paramSingle, // optional, srv6 end.x sid
+		"srv6-structure-lb":                           paramSingle, // optional, srv6 sid structure
+		"srv6-structure-ln":                           paramSingle, // optional, srv6 sid structure
+		"srv6-structure-fun":                          paramSingle, // optional, srv6 sid structure
+		"srv6-structure-arg":                          paramSingle, // optional, srv6 sid structure
 	})
 	if err != nil {
 		return nil, nil, err
@@ -1947,12 +2101,14 @@ func parseLsLinkNLRIType(args []string) (bgp.NLRI, *bgp.PathAttributeLs, error) 
 		}
 	}
 	var linkLocalId uint32
+	var linkIDGiven bool
 	if linkID, ok := m["link-local-id"]; ok && len(linkID) > 0 {
 		linkLocalIdVal, err := strconv.ParseUint(linkID[0], 10, 64)
 		if err != nil {
 			return nil, nil, err
 		}
 		linkLocalId = uint32(linkLocalIdVal)
+		linkIDGiven = true
 	}
 	var linkRemoteId uint32
 	if linkID, ok := m["link-remote-id"]; ok && len(linkID) > 0 {
@@ -1961,10 +2117,16 @@ func parseLsLinkNLRIType(args []string) (bgp.NLRI, *bgp.PathAttributeLs, error) 
 			return nil, nil, err
 		}
 		linkRemoteId = uint32(linkRemoteIdVal)
+		linkIDGiven = true
 	}
-	ld := &bgp.LsLinkDescriptor{
-		LinkLocalID:  &linkLocalId,
-		LinkRemoteID: &linkRemoteId,
+	ld := &bgp.LsLinkDescriptor{}
+
+	// The Link Local/Remote Identifiers TLV must be emitted only when asked for.
+	// Its presence distinguishes a PeerAdj-SID Link NLRI, which requires it, from
+	// a PeerNode-SID one, which does not (RFC 9086, Sections 5.1 and 5.2).
+	if linkIDGiven {
+		ld.LinkLocalID = &linkLocalId
+		ld.LinkRemoteID = &linkRemoteId
 	}
 
 	// Set IPv4/IPv6 addresses only if they are actually specified
@@ -2093,6 +2255,92 @@ func parseLsLinkNLRIType(args []string) (bgp.NLRI, *bgp.PathAttributeLs, error) 
 				Length: 4,
 			},
 			Metric: uint32(teMetric),
+		}
+		tlvs = append(tlvs, lsTLV)
+		length += uint16(lsTLV.Len())
+	}
+
+	const maxDelayMetricValue = 0xFFFFFF
+	if delayStr, ok := m["unidirectional-link-delay"]; ok && len(delayStr) > 0 {
+		delay, err := strconv.ParseUint(delayStr[0], 10, 32)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid unidirectional-link-delay: %v", err)
+		}
+		if delay > maxDelayMetricValue {
+			return nil, nil, fmt.Errorf("invalid unidirectional-link-delay: must be <= %d", maxDelayMetricValue)
+		}
+		flags := uint8(0)
+		if _, ok := m["unidirectional-link-delay-anomalous"]; ok {
+			flags = flags | 1<<7
+		}
+		lsTLV := &bgp.LsTLVUnidirectionalLinkDelay{
+			LsTLV: bgp.LsTLV{
+				Type:   bgp.LS_TLV_UNIDIRECTIONAL_LINK_DELAY,
+				Length: 4,
+			},
+			Flags: flags,
+			Delay: uint32(delay),
+		}
+		tlvs = append(tlvs, lsTLV)
+		length += uint16(lsTLV.Len())
+	}
+
+	minDelayStr, hasMinDelay := m["min-unidirectional-link-delay"]
+	maxDelayStr, hasMaxDelay := m["max-unidirectional-link-delay"]
+	if hasMinDelay != hasMaxDelay {
+		return nil, nil, fmt.Errorf("both min-unidirectional-link-delay and max-unidirectional-link-delay must be specified together")
+	}
+	if hasMinDelay && len(minDelayStr) > 0 && len(maxDelayStr) > 0 {
+		minDelay, err := strconv.ParseUint(minDelayStr[0], 10, 32)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid min-unidirectional-link-delay: %v", err)
+		}
+		if minDelay > maxDelayMetricValue {
+			return nil, nil, fmt.Errorf("invalid min-unidirectional-link-delay: must be <= %d", maxDelayMetricValue)
+		}
+		maxDelay, err := strconv.ParseUint(maxDelayStr[0], 10, 32)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid max-unidirectional-link-delay: %v", err)
+		}
+		if maxDelay > maxDelayMetricValue {
+			return nil, nil, fmt.Errorf("invalid max-unidirectional-link-delay: must be <= %d", maxDelayMetricValue)
+		}
+		if minDelay > maxDelay {
+			return nil, nil, fmt.Errorf("invalid min/max unidirectional-link-delay: min must be <= max")
+		}
+		flags := uint8(0)
+		if _, ok := m["min-max-unidirectional-link-delay-anomalous"]; ok {
+			flags = flags | 1<<7
+		}
+		lsTLV := &bgp.LsTLVMinMaxUnidirectionalLinkDelay{
+			LsTLV: bgp.LsTLV{
+				Type:   bgp.LS_TLV_MIN_MAX_UNIDIRECTIONAL_LINK_DELAY,
+				Length: 8,
+			},
+			Flags:    flags,
+			MinDelay: uint32(minDelay),
+			Reserved: 0,
+			MaxDelay: uint32(maxDelay),
+		}
+		tlvs = append(tlvs, lsTLV)
+		length += uint16(lsTLV.Len())
+	}
+
+	if delayVariationStr, ok := m["unidirectional-delay-variation"]; ok && len(delayVariationStr) > 0 {
+		delayVariation, err := strconv.ParseUint(delayVariationStr[0], 10, 32)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid unidirectional-delay-variation: %v", err)
+		}
+		if delayVariation > maxDelayMetricValue {
+			return nil, nil, fmt.Errorf("invalid unidirectional-delay-variation: must be <= %d", maxDelayMetricValue)
+		}
+		lsTLV := &bgp.LsTLVUnidirectionalDelayVariation{
+			LsTLV: bgp.LsTLV{
+				Type:   bgp.LS_TLV_UNIDIRECTIONAL_DELAY_VARIATION,
+				Length: 4,
+			},
+			Reserved:       0,
+			DelayVariation: uint32(delayVariation),
 		}
 		tlvs = append(tlvs, lsTLV)
 		length += uint16(lsTLV.Len())
@@ -2569,7 +2817,7 @@ func parseLsArgs(args []string) (bgp.NLRI, *bgp.PathAttributeLs, error) {
 
 func parseRtcArgs(args []string) (bgp.NLRI, error) {
 	// Format:
-	// asn <asn> rt <rt> | default
+	// <as>:<rt>[/len] | asn <asn> rt <rt> | default
 	m, err := extractReserved(args, map[string]int{
 		"asn":     paramSingle,
 		"rt":      paramSingle,
@@ -2583,13 +2831,21 @@ func parseRtcArgs(args []string) (bgp.NLRI, error) {
 		return bgp.NewRouteTargetMembershipNLRI(0, nil), nil
 	}
 
+	if len(m[""]) != 0 {
+		nlri, err := bgp.ParseRouteTargetMembershipNLRI(m[""][0])
+		if err != nil {
+			return nil, err
+		}
+		return nlri, nil
+	}
+
 	for _, f := range []string{"asn", "rt"} {
 		if len(m[f]) == 0 {
 			return nil, fmt.Errorf("specify %s", f)
 		}
 	}
 
-	asn, err := toAs4Value(m["asn"][0])
+	asn, err := bgp.ParseAs4Value(m["asn"][0])
 	if err != nil {
 		return nil, err
 	}
@@ -2622,26 +2878,6 @@ func extractOrigin(args []string) ([]string, bgp.PathAttributeInterface, error) 
 	return args, bgp.NewPathAttributeOrigin(typ), nil
 }
 
-func toAs4Value(s string) (uint32, error) {
-	if strings.Contains(s, ".") {
-		v := strings.Split(s, ".")
-		upper, err := strconv.ParseUint(v[0], 10, 16)
-		if err != nil {
-			return 0, nil
-		}
-		lower, err := strconv.ParseUint(v[1], 10, 16)
-		if err != nil {
-			return 0, nil
-		}
-		return uint32(upper<<16 | lower), nil
-	}
-	i, err := strconv.ParseUint(s, 10, 32)
-	if err != nil {
-		return 0, err
-	}
-	return uint32(i), nil
-}
-
 var (
 	_regexpASPathGroups  = regexp.MustCompile("[{}]")
 	_regexpASPathSegment = regexp.MustCompile(`,|\s+`)
@@ -2662,7 +2898,7 @@ func newAsPath(aspath string) (bgp.PathAttributeInterface, error) {
 			if n == "" {
 				continue
 			}
-			if asn, err := toAs4Value(n); err != nil {
+			if asn, err := bgp.ParseAs4Value(n); err != nil {
 				return nil, err
 			} else {
 				asNums = append(asNums, asn)
@@ -3034,7 +3270,7 @@ func parsePath(rf bgp.Family, args []string) (*api.Path, error) {
 		ipv6extcomms := make([]bgp.ExtendedCommunityInterface, 0)
 		for _, com := range extcomms {
 			switch com.(type) {
-			case *bgp.RedirectIPv6AddressSpecificExtended:
+			case *bgp.RedirectIPv6AddressSpecificExtended, *bgp.FlowSpecRedirectToIPv6Extended:
 				ipv6extcomms = append(ipv6extcomms, com)
 			default:
 				normalextcomms = append(normalextcomms, com)
@@ -3122,6 +3358,7 @@ usage: %s rib -a %%s %s%%s match <MATCH> then <THEN>%%s%%s%%s
                %s |
                %s <RATE> [as <AS>] |
                %s <RT> [color <color>] [prefix <prefix>] [locator-node-length <length>] [function-length <length>] [behavior <behavior>] |
+               %s <ADDRESS> [copy] |
                %s <DEC_NUM> |
                %s { sample | terminal | sample-terminal } }...
     <RT> : xxx:yyy, xxx.xxx.xxx.xxx:yyy, xxxx::xxxx:yyy, xxx.xxx:yyy`,
@@ -3137,6 +3374,7 @@ usage: %s rib -a %%s %s%%s match <MATCH> then <THEN>%%s%%s%%s
 			extCommNameMap[ctDiscard],
 			extCommNameMap[ctRate],
 			extCommNameMap[ctRedirect],
+			extCommNameMap[ctRedirectIP],
 			extCommNameMap[ctMark],
 			extCommNameMap[ctAction],
 		)
@@ -3227,20 +3465,20 @@ usage: %s rib %s { a-d <A-D> | macadv <MACADV> | multicast <MULTICAST> | esi <ES
 		)
 		helpErrMap[bgp.RF_MUP_IPv4] = fmt.Errorf(`error: %s
 usage: %s rib %s { isd <ISD> | dsd <DSD> | t1st <T1ST> | t2st <T2ST> } -a mup-ipv4
-    <ISD>  : <ip prefix> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...]
-    <DSD>  : <ip address> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup <segment identifier>]
+    <ISD>  : <ip prefix> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup [direct|interwork] <global administrator>:<local administrator>]
+    <DSD>  : <ip address> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup [direct|interwork] <global administrator>:<local administrator>]
     <T1ST> : <ip prefix> rd <rd> [rt <rt>...] teid <teid> qfi <qfi> endpoint <endpoint> [source <source>]
-    <T2ST> : <endpoint address> rd <rd> [rt <rt>...] endpoint-address-length <endpoint-address-length> teid <teid> [mup <segment identifier>]`,
+    <T2ST> : <endpoint address> rd <rd> [rt <rt>...] endpoint-address-length <endpoint-address-length> teid <teid> [mup [direct|interwork] <global administrator>:<local administrator>] [session-teid <teid> session-qfi <qfi>] [interwork-endpoint <addr>] [source-address <addr>]`,
 			err,
 			cmdstr,
 			modtype,
 		)
 		helpErrMap[bgp.RF_MUP_IPv6] = fmt.Errorf(`error: %s
 usage: %s rib %s { isd <ISD> | dsd <DSD> | t1st <T1ST> | t2st <T2ST> } -a mup-ipv6
-    <ISD>  : <ip prefix> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...]
-    <DSD>  : <ip address> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup <segment identifier>]
+    <ISD>  : <ip prefix> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup [direct|interwork] <global administrator>:<local administrator>]
+    <DSD>  : <ip address> rd <rd> prefix <prefix> locator-node-length <locator-node-length> function-length <function-length> behavior <behavior> [rt <rt>...] [mup [direct|interwork] <global administrator>:<local administrator>]
     <T1ST> : <ip prefix> rd <rd> [rt <rt>...] teid <teid> qfi <qfi> endpoint <endpoint> [source <source>]
-    <T2ST> : <endpoint address> rd <rd> [rt <rt>...] endpoint-address-length <endpoint-address-length> teid <teid> [mup <segment identifier>]`,
+    <T2ST> : <endpoint address> rd <rd> [rt <rt>...] endpoint-address-length <endpoint-address-length> teid <teid> [mup [direct|interwork] <global administrator>:<local administrator>] [session-teid <teid> session-qfi <qfi>] [interwork-endpoint <addr>] [source-address <addr>]`,
 			err,
 			cmdstr,
 			modtype,
@@ -3262,7 +3500,7 @@ usage: %s rib -a %%s %s %%s [origin { igp | egp | incomplete }] [aspath <ASPATH>
 			cmdstr,
 			modtype,
 		)
-		helpErrMap[bgp.RF_RTC_UC] = fmt.Errorf(rtcHelpMsgFmt, "rtc", "{ asn <ASN> rt <RT> | default }")
+		helpErrMap[bgp.RF_RTC_UC] = fmt.Errorf(rtcHelpMsgFmt, "rtc", "{ <ASN>:<RT>[/len] | asn <ASN> rt <RT> | default }")
 
 		if err, ok := helpErrMap[rf]; ok {
 			return err

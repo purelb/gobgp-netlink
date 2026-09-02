@@ -106,15 +106,10 @@ class MalformedMpReachNlri(object):
         e1 = env.e1
         e2 = env.e2
 
-        def f():
-            for line in e1.log().split('\n'):
-                if 'UPDATE message error / Attribute Flags Error / 0x600E0411223344' in line:
-                    return True
-            return False
-
-        wait_for(f)
-        # check e2 is still established
+        # RFC 7606: gobgp treats malformed attribute flags as withdraw (no session reset)
+        g1.wait_for(BGP_FSM_ESTABLISHED, e1)
         g1.wait_for(BGP_FSM_ESTABLISHED, e2)
+        assert len(g1.get_global_rib()) == 0
 
     @staticmethod
     def executor(env):
@@ -150,15 +145,10 @@ class MalformedMpUnReachNlri(object):
         e1 = env.e1
         e2 = env.e2
 
-        def f():
-            for line in e1.log().split('\n'):
-                if 'UPDATE message error / Attribute Flags Error / 0x600F0411223344' in line:
-                    return True
-            return False
-
-        wait_for(f)
-        # check e2 is still established
+        # RFC 7606: gobgp treats malformed attribute flags as withdraw (no session reset)
+        g1.wait_for(BGP_FSM_ESTABLISHED, e1)
         g1.wait_for(BGP_FSM_ESTABLISHED, e2)
+        assert len(g1.get_global_rib()) == 0
 
     @staticmethod
     def executor(env):
@@ -201,15 +191,10 @@ class MalformedAsPath(object):
         e1 = env.e1
         e2 = env.e2
 
-        def f():
-            for line in e1.log().split('\n'):
-                if 'UPDATE message error / Attribute Flags Error / 0x60020411223344' in line:
-                    return True
-            return False
-
-        wait_for(f)
-        # check e2 is still established
+        # RFC 7606: gobgp treats malformed attribute flags as withdraw (no session reset)
+        g1.wait_for(BGP_FSM_ESTABLISHED, e1)
         g1.wait_for(BGP_FSM_ESTABLISHED, e2)
+        assert len(g1.get_global_rib()) == 0
 
     @staticmethod
     def executor(env):
@@ -245,15 +230,10 @@ class MalformedAs4Path(object):
         e1 = env.e1
         e2 = env.e2
 
-        def f():
-            for line in e1.log().split('\n'):
-                if 'UPDATE message error / Attribute Flags Error / 0x60110411223344' in line:
-                    return True
-            return False
-
-        wait_for(f)
-        # check e2 is still established
+        # RFC 7606: gobgp treats malformed attribute flags as withdraw (no session reset)
+        g1.wait_for(BGP_FSM_ESTABLISHED, e1)
         g1.wait_for(BGP_FSM_ESTABLISHED, e2)
+        assert len(g1.get_global_rib()) == 0
 
     @staticmethod
     def executor(env):
@@ -296,15 +276,10 @@ class MalformedNexthop(object):
         e1 = env.e1
         e2 = env.e2
 
-        def f():
-            for line in e1.log().split('\n'):
-                if 'UPDATE message error / Attribute Flags Error / 0x600E08010110FFFFFF0000' in line:
-                    return True
-            return False
-
-        wait_for(f)
-        # check e2 is still established
+        # RFC 7606: gobgp treats malformed attribute flags as withdraw (no session reset)
+        g1.wait_for(BGP_FSM_ESTABLISHED, e1)
         g1.wait_for(BGP_FSM_ESTABLISHED, e2)
+        assert len(g1.get_global_rib()) == 0
 
     @staticmethod
     def executor(env):
@@ -347,15 +322,10 @@ class MalformedRouteFamily(object):
         e1 = env.e1
         e2 = env.e2
 
-        def f():
-            for line in e1.log().split('\n'):
-                if 'UPDATE message error / Attribute Flags Error / 0x600E150002011020010DB800000000000000000000000100' in line:
-                    return True
-            return False
-
-        wait_for(f)
-        # check e2 is still established
+        # RFC 7606: gobgp treats malformed attribute flags as withdraw (no session reset)
+        g1.wait_for(BGP_FSM_ESTABLISHED, e1)
         g1.wait_for(BGP_FSM_ESTABLISHED, e2)
+        assert len(g1.get_global_rib()) == 0
 
     @staticmethod
     def executor(env):
@@ -398,15 +368,10 @@ class MalformedAsPathSegmentLengthInvalid(object):
         e1 = env.e1
         e2 = env.e2
 
-        def f():
-            for line in e1.log().split('\n'):
-                if 'UPDATE message error / Malformed AS_PATH / 0x4002040202FFDC' in line:
-                    return True
-            return False
-
-        wait_for(f)
-        # check e2 is still established
+        # RFC 7606: gobgp treats malformed AS_PATH as withdraw (no session reset)
+        g1.wait_for(BGP_FSM_ESTABLISHED, e1)
         g1.wait_for(BGP_FSM_ESTABLISHED, e2)
+        assert len(g1.get_global_rib()) == 0
 
     @staticmethod
     def executor(env):
@@ -444,15 +409,10 @@ class MalformedNexthopLoopbackAddr(object):
         e1 = env.e1
         e2 = env.e2
 
-        def f():
-            for line in e1.log().split('\n'):
-                if 'UPDATE message error / Invalid NEXT_HOP Attribute / 0x4003047F000001' in line:
-                    return True
-            return False
-
-        wait_for(f)
-        # check e2 is still established
+        # RFC 7606: gobgp treats invalid NEXT_HOP as withdraw (no session reset)
+        g1.wait_for(BGP_FSM_ESTABLISHED, e1)
         g1.wait_for(BGP_FSM_ESTABLISHED, e2)
+        assert len(g1.get_global_rib()) == 0
 
     @staticmethod
     def executor(env):
@@ -493,15 +453,10 @@ class MalformedOriginType(object):
         e1 = env.e1
         e2 = env.e2
 
-        def f():
-            for line in e1.log().split('\n'):
-                if 'UPDATE message error / Invalid ORIGIN Attribute / 0x40010104' in line:
-                    return True
-            return False
-
-        wait_for(f)
-        # check e2 is still established
+        # RFC 7606: gobgp treats invalid ORIGIN as withdraw (no session reset)
+        g1.wait_for(BGP_FSM_ESTABLISHED, e1)
         g1.wait_for(BGP_FSM_ESTABLISHED, e2)
+        assert len(g1.get_global_rib()) == 0
 
     @staticmethod
     def executor(env):
@@ -539,6 +494,7 @@ class TestGoBGPBase(unittest.TestCase):
 
     def test(self):
         for e in self.executors:
-            yield e
+            e(self)
+            print('[PASS] %s' % e.__qualname__.split('.')[0], file=sys.stderr, flush=True)
 
 

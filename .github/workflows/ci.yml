@@ -45,10 +45,15 @@ jobs:
       # proto/buf.yaml has declared `breaking: use: [FILE]` since the config was
       # written, but nothing ever ran it. A wire-breaking change - a reused field
       # number, a changed type - reached main unremarked.
+      # Only meaningful on a pull request: the question is "what would merging
+      # this change for a consumer", and after it lands main is its own
+      # baseline. A deliberate break - the planned field renumbering - is
+      # allowed through by labelling the PR `proto-break`, which leaves the
+      # intent recorded on the PR rather than in a commit that edits this file
+      # twice.
       - name: buf breaking
+        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'proto-break')
         run: buf breaking proto/ --against "https://github.com/purelb/gobgp-netlink.git#branch=main,subdir=proto"
-        # A deliberate wire break (the planned field renumbering) fails here by
-        # design; that PR removes this step for one commit and restores it.
 
       # api/*.pb.go is generated and committed. Nothing checked that it still
       # matches the .proto, so a hand edit or a stale regeneration was invisible.
@@ -61,6 +66,67 @@ jobs:
             echo "::error::api/ is stale - run 'buf generate proto/' and commit the result"
             exit 1
           fi
+
+  yang-check:
+    name: generated YANG files check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # The model repositories are pinned. osrg/public and osrg/yang are forks
+      # that stopped tracking upstream, but osrg/pyang follows upstream pyang,
+      # where a new release can change the generated output. Without a pin, an
+      # unrelated pull request starts failing here. These land under
+      # .yang-models/, which is untracked, so the diff check below ignores them.
+      - uses: actions/checkout@v7
+        with:
+          repository: osrg/public
+          ref: 0d3376ef325b982124de8360e00eb36fc6367de5
+          path: .yang-models/public
+      - uses: actions/checkout@v7
+        with:
+          repository: osrg/yang
+          ref: 63f9a3563c2b31832e9e2046529fa61f3d31f6dd
+          path: .yang-models/yang
+      - uses: actions/checkout@v7
+        with:
+          repository: osrg/pyang
+          ref: fc9a965c3ae80688cc2889aefa183cf1aa6d55c2
+          path: .yang-models/pyang
+
+      # pyang imports pkg_resources, which setuptools 82 removes.
+      - name: install pyang dependencies
+        run: python -m pip install 'setuptools<82' -r .yang-models/pyang/requirements.txt
+
+      # shell: bash adds -o pipefail, so pyang's exit status is not hidden by
+      # gofmt. Write to a temporary file so a failed run leaves the checked-in
+      # file alone.
+      - name: generate YANG files
+        shell: bash
+        run: |
+          models="$GITHUB_WORKSPACE/.yang-models"
+          cd "$models/pyang"
+          source ./env.sh
+          PYTHONPATH=. ./bin/pyang --plugindir "$GITHUB_WORKSPACE/tools/pyang_plugins" \
+            -p "$models/yang/standard/ietf/RFC" \
+            -p "$models/public/release/models" \
+            -p "$models/public/release/models/bgp" \
+            -p "$models/public/release/models/policy" \
+            -f golang \
+            "$models/public/release/models/policy/openconfig-routing-policy.yang" \
+            "$models/public/release/models/bgp/openconfig-bgp.yang" \
+            "$GITHUB_WORKSPACE/tools/pyang_plugins/gobgp.yang" \
+            | gofmt > "$RUNNER_TEMP/bgp_configs.go"
+          mv "$RUNNER_TEMP/bgp_configs.go" "$GITHUB_WORKSPACE/pkg/config/oc/bgp_configs.go"
+
+      - name: generated files are up to date
+        run: git diff --exit-code
 
   golangci:
     name: lint
@@ -92,6 +158,29 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+
+      # Nothing checked the files that define all 41 jobs. A workflow can be
+      # valid YAML and still be rejected by GitHub: a step with two `with:`
+      # blocks parses fine, because YAML keeps the last duplicate key, and the
+      # run then starts with zero jobs and a bare "workflow file issue" - which
+      # presents as an empty check list rather than a red one. actionlint
+      # rejects that, along with unknown keys, bad `needs:` references and
+      # undefined context expressions.
+      #
+      # Its shellcheck integration is off. It reports 33 findings here and all
+      # of them are false: 30 are SC2209 on lines like
+      #   PYTHONPATH=test python3 -m pytest ...
+      # where shellcheck reads `test` as the shell builtin rather than this
+      # repository's directory. Leaving it on would mean 33 permanent warnings
+      # and a check nobody reads.
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" -color -shellcheck=
+
       - run: |
           npm install markdownlint-cli
           ./node_modules/.bin/markdownlint $(find . -type d -name 'node_modules' -prune -o -type f -name '*.md' -print)
@@ -110,11 +199,9 @@ jobs:
           go-version: "stable"
       - name: container image
         run: |
-          sudo apt-get install python3-setuptools
-          sudo pip3 install -r test/pip-requires.txt
-          fab -r test/lib make-gobgp-ctn --tag gobgp --from-image osrg/quagga
+          test/lib/make-gobgp-ctn.sh --tag gobgp --from-image osrg/quagga
           docker save gobgp > gobgp.tar
-          fab -r test/lib make-gobgp-ctn --tag gobgp-oq --from-image osrg/quagga:v1.0
+          test/lib/make-gobgp-ctn.sh --tag gobgp-oq --from-image osrg/quagga:v1.0
           docker save gobgp-oq > gobgp-oq.tar
 
       - name: upload image file
@@ -649,13 +736,51 @@ jobs:
             -c "/test/scenario_test/netlink_test.sh"
 
   # Summary job for branch protection - reports single "ci" status
+  tcp-md5:
+    name: tcp-md5
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: artifact
+          path: artifact
+      - name: test
+        run: |
+          docker load < artifact/gobgp.tar
+          sudo apt-get update
+          sudo apt-get install -y linux-modules-extra-$(uname -r)
+          sudo modprobe vrf
+          sudo pip3 install -r test/pip-requires.txt
+          PYTHONPATH=test python3 -m pytest test/scenario_test/tcp_md5_test.py --gobgp-image gobgp -x -s
+  unit386:
+    name: unit386
+    runs-on: ubuntu-24.04
+    env:
+      GOARCH: 386
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+      - run: |
+          sudo apt update
+          sudo apt install -y gcc-multilib g++-multilib
+          go env GOARCH CGO_ENABLED
+          go test -v -timeout 240s ./...
+
   ci:
     name: ci
     runs-on: ubuntu-22.04
     if: always()
     needs:
       - unit
+      - unit386
+      - tcp-md5
       - protobuf-check
+      - yang-check
       - golangci
       - embedded
       - lintdoc
