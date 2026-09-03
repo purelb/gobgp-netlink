@@ -53,7 +53,8 @@ bgp_sent_message_total{peer="100.75.128.54"} 546
 
 ## Exported metrics
 
-The metrics are all prefixed with the `bgp` Prometheus namespace.  
+Most metrics are prefixed with the `bgp` Prometheus namespace. The FSM loop
+histograms are the exception: they use `fsm_loop`.  
 
 | **Metric**                         | **Description**                                                              | **Labels**                             |
 | ---------------------------------- | ---------------------------------------------------------------------------- |----------------------------------------|
@@ -89,6 +90,74 @@ The metrics are all prefixed with the `bgp` Prometheus namespace.
 | bgp_received_withdraw_prefix_total | Number of received BGP WITHDRAW-PREFIX messages from peer                    | `peer`                                 |
 | bgp_received_withdraw_update_total | Number of received BGP WITHDRAW-UPDATE messages from peer                    | `peer`                                 |
 
+### Fork additions
+
+These are specific to `purelb/gobgp-netlink` and are not present upstream.
+
+BFD liveness, per peer:
+
+| **Metric** | **Description** | **Labels** |
+| --- | --- | --- |
+| bgp_peer_bfd_enabled | Whether BFD is configured for the peer (1) or not (0). Emitted for every peer, so "configured but not up" is a comparison rather than a missing series | `peer` |
+| bgp_peer_bfd_state | Current BFD session state, carried as a label. Always 1 | `peer`, `session_state` |
+| bgp_peer_bfd_transmitted_packets_total | BFD control packets sent to the peer | `peer` |
+| bgp_peer_bfd_received_packets_total | BFD control packets received from the peer | `peer` |
+| bgp_peer_bfd_failure_transitions_total | Times the session has gone from up to down | `peer` |
+
+BFD server, receive path:
+
+| **Metric** | **Description** | **Labels** |
+| --- | --- | --- |
+| bgp_bfd_received_packet_total | Control packets received and matched to a peer | |
+| bgp_bfd_received_drop_total | Control packets dropped because a peer's receive queue was full. The queue holds one packet, so any advance means an event loop stalled longer than one transmit interval | |
+| bgp_bfd_received_error_total | Errors reading from the BFD server socket | |
+| bgp_bfd_invalid_packet_total | Datagrams that could not be decoded as BFD control packets | |
+| bgp_bfd_unknown_peer_total | Control packets from an address with no configured peer. Advancing while a peer is configured but stuck down indicates an address mismatch, typically a link-local neighbor configured without its zone | |
+
+Netlink import and export:
+
+| **Metric** | **Description** | **Labels** |
+| --- | --- | --- |
+| bgp_netlink_import_enabled | Whether netlink route import (kernel to BGP) is active | |
+| bgp_netlink_imported_total | Routes imported from the kernel into the BGP RIB | |
+| bgp_netlink_import_withdrawn_total | Imported routes withdrawn from the BGP RIB | |
+| bgp_netlink_import_errors_total | Errors encountered while importing kernel routes | |
+| bgp_netlink_import_loop_ticks_total | Import scan iterations. Stops advancing once the scan loop exits, so a flat value after shutdown confirms the loop stopped | |
+| bgp_netlink_export_enabled | Whether netlink route export (BGP to kernel) is active | |
+| bgp_netlink_exported_total | Routes programmed into the kernel FIB | |
+| bgp_netlink_export_withdrawn_total | Routes removed from the kernel FIB | |
+| bgp_netlink_export_errors_total | Errors encountered while programming the kernel FIB | |
+| bgp_netlink_nexthop_validation_total | Nexthop reachability checks attempted before export | |
+| bgp_netlink_nexthop_failed_total | Nexthop reachability checks that failed, suppressing an export | |
+| bgp_netlink_dampened_updates_total | Route updates deferred by export dampening | |
+| bgp_netlink_cleanup_routes_deleted_total | Stale routes deleted by the startup sweep | |
+| bgp_netlink_cleanup_routes_skipped_total | Routes the startup sweep examined and deliberately left in place | |
+
+Build identity:
+
+| **Metric** | **Description** | **Labels** |
+| --- | --- | --- |
+| bgp_build_info | Build identity of the running daemon. Always 1; read the labels. An empty `commit` label means the binary was not built by `build.sh` | `version`, `commit`, `base` |
+
+### FSM loop histograms
+
+These use the `fsm_loop` namespace rather than `bgp`, and are histograms with
+default buckets. `timing_sec` measures how long the operation took;
+`wait_sec` measures how long it waited on its channel first, so a rising
+`wait_sec` with flat `timing_sec` points at a saturated FSM loop rather than
+slow work.
+
+| **Metric** | **Description** | **Labels** |
+| --- | --- | --- |
+| fsm_loop_mgmt_op_timing_sec | Histogram of management operation timings | |
+| fsm_loop_mgmt_op_wait_sec | Histogram of management operation channel delays | |
+| fsm_loop_accept_timing_sec | Histogram of TCP accept timings | |
+| fsm_loop_accept_wait_sec | Histogram of TCP accept channel delays | |
+| fsm_loop_event_timing_sec | Histogram of event timings | |
+| fsm_loop_event_wait_sec | Histogram of event channel delays | |
+| fsm_loop_message_timing_sec | Histogram of BGP message timings | |
+| fsm_loop_message_wait_sec | Histogram of BGP message channel delays | |
+
 ## Label values
 
 Some labels can have specific values depending on the state of GoBGP or of the peers:
@@ -97,6 +166,13 @@ Some labels can have specific values depending on the state of GoBGP or of the p
 - `session_state`: the BGP FSM status of the peer, can be either `UNKNOWN`, `IDLE`, `CONNECT`, `IDLE`, `ACTIVE`, `OPENSENT`, `OPENCONFIRM` or `ESTABLISHED`
 - `admin_state`: administrative state of the peer, can be either `DOWN`, `UP` or `PFX_CNT` if prefix limit is reached
 - `route_family`: any address family supported by GoBGP (e.g `ipv4`, `ipv6`, `evpn`)
+- `session_state` on `bgp_peer_bfd_state`: the BFD session state, one of
+  `BFD_SESSION_STATE_UNSPECIFIED`, `BFD_SESSION_STATE_UP`,
+  `BFD_SESSION_STATE_DOWN`, `BFD_SESSION_STATE_ADMIN_DOWN` or
+  `BFD_SESSION_STATE_INIT`. Note these are the protobuf enum names, whose
+  numbering differs from RFC 5880 §6.8.1 — read the name, not the number
+- `version`, `commit`, `base` on `bgp_build_info`: the fork version, the git
+  commit stamped by `build.sh`, and the upstream GoBGP release it is based on
 
 ## Grafana dashboard
 
