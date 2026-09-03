@@ -166,12 +166,31 @@ func exportPrefixKey(path *table.Path) (string, error) {
 // dampenEntry tracks pending route updates for dampening
 type dampenEntry struct {
 	path      *table.Path
-	timer     *time.Timer
 	updatedAt time.Time
+	// dueAt is when this prefix may be written. Entries no longer carry their
+	// own timer; a single flush timer walks the map. See flushDampened.
+	dueAt time.Time
 	// firstDeferred is when this run of deferrals began, used to cap how long a
 	// continuously-updating prefix can be held back.
 	firstDeferred time.Time
 }
+
+// dampenFlushBudget caps how many routes one flush programs before yielding.
+//
+// Every write is a netlink syscall serialised on one socket. With a timer per
+// prefix, a peer flap scheduled N timers inside a single dampening interval and
+// they all fired together: 300 VIPs is comfortably more CPU than a 500m cgroup
+// quota allows in 100ms, so the container throttled for the rest of the period.
+// That matters more once BFD is enabled, because the stall lands on exactly the
+// event BFD is watching for - a peer flap - and can expire sessions to peers
+// that are perfectly healthy.
+//
+// The remainder is re-armed after dampenFlushYield rather than a full interval,
+// so a burst is spread across scheduler slices rather than delayed.
+const (
+	dampenFlushBudget = 64
+	dampenFlushYield  = 5 * time.Millisecond
+)
 
 // exportStats tracks export operation statistics
 type exportStats struct {
@@ -226,6 +245,13 @@ type netlinkExportClient struct {
 	dampeningMaxDelay time.Duration
 	pendingUpdates    map[string]*dampenEntry // prefix -> entry
 	dampenMu          sync.Mutex
+	// flushTimer is the one timer that drains pendingUpdates, replacing the
+	// timer that used to live on every entry.
+	flushTimer *time.Timer
+	// flushArmedAt is when flushTimer will fire. It lets scheduleUpdate skip
+	// re-arming when the pending timer is already early enough, which keeps
+	// the hot path O(1) instead of rescanning pendingUpdates per update.
+	flushArmedAt time.Time
 
 	// Statistics
 	stats   exportStats
@@ -1256,22 +1282,97 @@ func (e *netlinkExportClient) withdrawRoute(path *table.Path, vrfName string) er
 	return nil
 }
 
-// processDampenedUpdate processes a route update after dampening delay
-// processDampenedUpdate applies the most recent update deferred for a prefix.
+// flushDampened programs the prefixes whose deferral has elapsed, at most
+// dampenFlushBudget of them, then re-arms for whatever is left.
 //
-// It takes the prefix rather than a path so the entry's current path is used.
-// The timer closure captured a path at scheduling time, so a re-arm could carry
-// a stale one; keying by prefix means the newest update always wins.
-func (e *netlinkExportClient) processDampenedUpdate(prefix string) {
+// It reads each entry's current path rather than one captured when the update
+// was scheduled, so the newest update for a prefix always wins.
+func (e *netlinkExportClient) flushDampened() {
+	now := time.Now()
+
 	e.dampenMu.Lock()
-	entry, ok := e.pendingUpdates[prefix]
-	delete(e.pendingUpdates, prefix)
+	due := make([]*dampenEntry, 0, dampenFlushBudget)
+	for prefix, entry := range e.pendingUpdates {
+		if len(due) >= dampenFlushBudget {
+			break
+		}
+		if !entry.dueAt.After(now) {
+			due = append(due, entry)
+			delete(e.pendingUpdates, prefix)
+		}
+	}
 	e.dampenMu.Unlock()
 
-	if !ok || entry.path == nil {
+	// Outside the lock: each of these is a netlink syscall.
+	for _, entry := range due {
+		if entry.path != nil {
+			e.processUpdate(entry.path)
+		}
+	}
+
+	e.dampenMu.Lock()
+	e.rearmFlushLocked()
+	e.dampenMu.Unlock()
+}
+
+// rearmFlushLocked rescans pendingUpdates and schedules the next flush.
+// Caller must hold dampenMu.
+//
+// Only flushDampened calls this: it is O(len(pendingUpdates)) and runs once per
+// flush. The per-update path uses armFlushAtLocked instead.
+func (e *netlinkExportClient) rearmFlushLocked() {
+	if e.flushTimer != nil {
+		e.flushTimer.Stop()
+		e.flushTimer = nil
+	}
+	e.flushArmedAt = time.Time{}
+
+	if len(e.pendingUpdates) == 0 {
 		return
 	}
-	e.processUpdate(entry.path)
+
+	next := time.Time{}
+	for _, entry := range e.pendingUpdates {
+		if next.IsZero() || entry.dueAt.Before(next) {
+			next = entry.dueAt
+		}
+	}
+	e.armFlushAtLocked(next)
+}
+
+// armFlushAtLocked ensures a flush is scheduled to run no later than at.
+// Caller must hold dampenMu.
+//
+// This is the per-update path, so it must not scan pendingUpdates: a burst of N
+// prefixes calls it N times, and it runs under dampenMu, which serialises the
+// export hook. If a timer is already armed early enough it does nothing.
+//
+// If anything is already due - which is the case whenever a flush hit its
+// budget - it arms after a short yield rather than a full interval, so a large
+// burst is spread rather than delayed.
+func (e *netlinkExportClient) armFlushAtLocked(at time.Time) {
+	if e.flushTimer != nil && !e.flushArmedAt.After(at) {
+		// Already firing by then, so a later due time needs no new timer.
+		//
+		// The comparison is an invariant guard, not a live branch: callers only
+		// ever pass a dueAt at or after the armed time, so it is unreachable
+		// today and no test covers it. It is kept so the O(1) skip enforces
+		// "the timer fires no later than the earliest dueAt" locally, rather
+		// than resting on that monotonicity holding everywhere dueAt is
+		// assigned. Delete it only together with that argument.
+		return
+	}
+
+	delay := time.Until(at)
+	if delay < dampenFlushYield {
+		delay = dampenFlushYield
+	}
+
+	if e.flushTimer != nil {
+		e.flushTimer.Stop()
+	}
+	e.flushArmedAt = time.Now().Add(delay)
+	e.flushTimer = time.AfterFunc(delay, e.flushDampened)
 }
 
 // scheduleUpdate schedules a route update with dampening.
@@ -1299,38 +1400,38 @@ func (e *netlinkExportClient) scheduleUpdate(path *table.Path) {
 	e.dampenMu.Lock()
 	defer e.dampenMu.Unlock()
 
+	now := time.Now()
+
 	if entry, exists := e.pendingUpdates[prefix]; exists {
 		entry.path = path
 
 		// Once the first deferral of a run has been outstanding for the maximum
-		// delay, stop pushing it back and let the next firing through.
-		if time.Since(entry.firstDeferred) >= e.maxDampeningDelay() {
+		// delay, stop pushing it back and let the next flush take it.
+		if now.Sub(entry.firstDeferred) >= e.maxDampeningDelay() {
 			e.logger.Debug("Dampening cap reached, allowing update through",
 				slog.String("Topic", "netlink"),
 				slog.String("Prefix", prefix))
+			e.armFlushAtLocked(entry.dueAt)
 			return
 		}
 
-		entry.timer.Stop()
-		entry.updatedAt = time.Now()
-		entry.timer = time.AfterFunc(e.dampeningInterval, func() {
-			e.processDampenedUpdate(prefix)
-		})
+		entry.updatedAt = now
+		entry.dueAt = now.Add(e.dampeningInterval)
 		e.statsMu.Lock()
 		e.stats.DampenedUpdates++
 		e.statsMu.Unlock()
+		e.armFlushAtLocked(entry.dueAt)
 		return
 	}
 
-	now := time.Now()
-	e.pendingUpdates[prefix] = &dampenEntry{
+	entry := &dampenEntry{
 		path:          path,
 		updatedAt:     now,
+		dueAt:         now.Add(e.dampeningInterval),
 		firstDeferred: now,
-		timer: time.AfterFunc(e.dampeningInterval, func() {
-			e.processDampenedUpdate(prefix)
-		}),
 	}
+	e.pendingUpdates[prefix] = entry
+	e.armFlushAtLocked(entry.dueAt)
 }
 
 // maxDampeningDelay bounds how long a flapping prefix can be held back.
@@ -1621,8 +1722,9 @@ func (e *netlinkExportClient) stop(flushRoutes bool) error {
 
 	// Cancel pending dampened updates with proper locking
 	e.dampenMu.Lock()
-	for _, entry := range e.pendingUpdates {
-		entry.timer.Stop()
+	if e.flushTimer != nil {
+		e.flushTimer.Stop()
+		e.flushTimer = nil
 	}
 	e.pendingUpdates = make(map[string]*dampenEntry)
 	e.dampenMu.Unlock()

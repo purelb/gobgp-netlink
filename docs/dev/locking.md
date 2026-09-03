@@ -62,10 +62,25 @@ per-path closure that holds `propagateBucket(path)`. So:
 ## What this does not prove
 
 `go test -race` will catch a corrupted map. It will **not** catch the export hook
-interleaving differently with `netlink_export.go`'s per-prefix dampening timers,
-because those fire from `time.AfterFunc` goroutines that were always outside the
-lock. That interaction is the residual risk of this merge, and the reason the
-hardware gate matters more here than anywhere else in the plan.
+interleaving differently with `netlink_export.go`'s dampening flush, because that
+fires from a `time.AfterFunc` goroutine that was always outside the lock. That
+interaction is the residual risk of this merge, and the reason the hardware gate
+matters more here than anywhere else in the plan.
+
+There is now exactly **one** flush timer for the whole client, not one per
+prefix. `flushDampened` drains at most `dampenFlushBudget` due prefixes per pass,
+issues their netlink writes **outside** `dampenMu`, then re-arms under it. Two
+consequences for this contract:
+
+- The window in which a prefix can be re-scheduled while its own write is in
+  flight is now the whole budgeted pass, not a single prefix's write. That is
+  safe because the flush deletes an entry from `pendingUpdates` before releasing
+  the lock, so a concurrent `scheduleUpdate` creates a fresh entry rather than
+  mutating one being written.
+- `scheduleUpdate` runs under `dampenMu` on the export hook's path, so anything
+  it does that scales with the number of pending prefixes serialises the hook.
+  It must stay O(1); `armFlushAtLocked` exists for that reason, and
+  `BenchmarkScheduleBurst*` is what detects a regression.
 
 ## Acceptance
 

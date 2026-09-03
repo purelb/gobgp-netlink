@@ -2782,12 +2782,26 @@ func (s *BgpServer) ListVrf(ctx context.Context, r *api.ListVrfRequest, fn func(
 		d, _ := apiutil.MarshalRD(v.Rd)
 		irt, _ := apiutil.MarshalRTs(v.ImportRt.ToSlice())
 		ert, _ := apiutil.MarshalRTs(v.ExportRt)
+
+		// Netlink import is configured per VRF in bgpConfig, not on the RIB's
+		// VRF, so it has to be looked up. Without this the Netlink Import
+		// column of `gobgp vrf` is always empty.
+		netlink := &api.VrfNetlinkInfo{}
+		for _, vrfConfig := range s.bgpConfig.Vrfs {
+			if vrfConfig.Config.Name == v.Name && vrfConfig.NetlinkImport.Enabled {
+				netlink.ImportEnabled = true
+				netlink.ImportInterfaces = vrfConfig.NetlinkImport.InterfaceList
+				break
+			}
+		}
+
 		return &api.Vrf{
 			Name:     v.Name,
 			Rd:       d,
 			Id:       v.Id,
 			ImportRt: irt,
 			ExportRt: ert,
+			Netlink:  netlink,
 		}
 	}
 	var l []*api.Vrf

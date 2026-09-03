@@ -20,6 +20,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -133,7 +134,7 @@ func TestCleanupStaleRoutesRunsOnce(t *testing.T) {
 
 // newTestExportClient builds an export client over a fake kernel. The server is
 // nil because none of the cleanup or export paths under test reach back into it.
-func newTestExportClient(t *testing.T, f *fakeNetlink, rules ...*exportRule) *netlinkExportClient {
+func newTestExportClient(t testing.TB, f *fakeNetlink, rules ...*exportRule) *netlinkExportClient {
 	t.Helper()
 	e, err := newNetlinkExportClientWithHandle(nil, logger, f, RTPROT_BGP, 0)
 	assert.NoError(t, err)
@@ -261,7 +262,7 @@ func testVpnPath(t *testing.T, rd, cidr, nexthop string) *table.Path {
 	return p
 }
 
-func testUnicastPath(t *testing.T, cidr, nexthop string) *table.Path {
+func testUnicastPath(t testing.TB, cidr, nexthop string) *table.Path {
 	t.Helper()
 	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(cidr))
 	assert.NoError(t, err)
@@ -889,3 +890,134 @@ func TestNetlinkSocketTimeoutIsSet(t *testing.T) {
 	assert.GreaterOrEqual(t, netlinkSocketTimeout, 30*time.Second,
 		"must stay generous: cleanupStaleRoutes dumps whole routing tables")
 }
+
+// TestListVrfReportsNetlinkImport gates the netlink import information that
+// `gobgp vrf` shows.
+//
+// Netlink import is configured per VRF in bgpConfig, not on the RIB's VRF, so
+// ListVrf has to look it up. Nothing asserted that it did, and the v4.9.0 merge
+// dropped the lookup while still compiling: the column simply went blank. That
+// is the same shape as the other hooks the merge lost - a call site inside a
+// function that was replaced wholesale - and it is invisible to the compiler
+// because the field just stays at its zero value.
+func TestListVrfReportsNetlinkImport(t *testing.T) {
+	s := newVrfTestServer(t)
+	addTestVrf(t, s, "vrf1", "100:1")
+
+	// Configure netlink import for it, the way EnableVrfNetlinkImport does.
+	assert.NoError(t, s.EnableVrfNetlinkImport(context.Background(),
+		&api.EnableVrfNetlinkImportRequest{Vrf: "vrf1", Interfaces: []string{"eth0", "eth1"}}))
+
+	var got *api.Vrf
+	assert.NoError(t, s.ListVrf(context.Background(), &api.ListVrfRequest{Name: "vrf1"},
+		func(v *api.Vrf) { got = v }))
+
+	if assert.NotNil(t, got, "the VRF must be listed") {
+		assert.True(t, got.GetNetlink().GetImportEnabled(),
+			"ListVrf must report netlink import; a blank column is the symptom")
+		assert.Equal(t, []string{"eth0", "eth1"}, got.GetNetlink().GetImportInterfaces())
+	}
+}
+
+// TestDampeningFlushIsBudgeted gates the burst bound that BFD depends on.
+//
+// Dampening used to arm a time.AfterFunc per prefix. A peer flap therefore
+// scheduled N timers inside one dampening interval and they all fired together,
+// each doing a RouteReplace serialised on a single netlink socket. Several
+// hundred VIPs is more CPU than a 500m cgroup quota allows in 100ms, so the
+// container throttled for the remainder of the period - landing the stall on
+// exactly the event BFD is watching for, and able to expire sessions to peers
+// that are perfectly healthy.
+//
+// One timer now drains the map, at most dampenFlushBudget prefixes per pass,
+// re-arming after a short yield so a burst is spread rather than delayed. This
+// asserts the whole burst still lands, and that it takes more than one pass to
+// do it.
+func TestDampeningFlushIsBudgeted(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f, &exportRule{Name: "r", TableId: 0, Metric: 20})
+	e.dampeningInterval = 20 * time.Millisecond
+	e.dampeningMaxDelay = 5 * time.Second
+
+	const total = dampenFlushBudget + 25
+	for i := range total {
+		e.scheduleUpdate(testUnicastPath(t, fmt.Sprintf("10.%d.%d.0/24", i/256, i%256), "192.168.1.1"))
+	}
+
+	// One timer for the whole map, not one per prefix.
+	e.dampenMu.Lock()
+	pending := len(e.pendingUpdates)
+	armed := e.flushTimer != nil
+	e.dampenMu.Unlock()
+	assert.Equal(t, total, pending, "every prefix should be pending")
+	assert.True(t, armed, "a single flush timer should be armed")
+
+	// The first pass must not program everything: that is the burst bound.
+	assert.Eventually(t, func() bool {
+		replace, _, _ := f.counts()
+		return replace > 0
+	}, 2*time.Second, 5*time.Millisecond, "the flush should start")
+
+	replace, _, _ := f.counts()
+	assert.LessOrEqual(t, replace, dampenFlushBudget,
+		"one pass must not exceed the budget; that is what throttles the cgroup")
+
+	// But everything still lands, and reasonably promptly.
+	assert.Eventually(t, func() bool {
+		replace, _, _ := f.counts()
+		return replace == total
+	}, 5*time.Second, 10*time.Millisecond, "the whole burst must still be programmed")
+
+	e.dampenMu.Lock()
+	left := len(e.pendingUpdates)
+	timer := e.flushTimer
+	e.dampenMu.Unlock()
+	assert.Zero(t, left, "nothing should remain pending")
+	assert.Nil(t, timer, "the flush timer should be disarmed when the map empties")
+}
+
+// BenchmarkScheduleBurst measures the cost of scheduling a burst of distinct
+// prefixes, which is the peer-flap shape §7.4 exists to bound.
+//
+// It exists because the flush rewrite has a failure mode the correctness tests
+// cannot see: scheduleUpdate holds dampenMu while it re-arms, so any per-update
+// work that scales with the number of pending prefixes is quadratic across a
+// burst AND serialises the export hook. Growth much beyond linear in the
+// reported ns/op is the regression.
+func benchmarkScheduleBurst(b *testing.B, n int) {
+	prefixes := make([]string, n)
+	for i := range prefixes {
+		prefixes[i] = fmt.Sprintf("10.%d.%d.0/24", i/256, i%256)
+	}
+
+	for b.Loop() {
+		b.StopTimer()
+		f := newFakeNetlink()
+		e := newTestExportClient(b, f, &exportRule{Name: "bench", TableId: 254})
+		// Long enough that nothing fires mid-burst: this measures scheduling,
+		// not flushing.
+		e.dampeningInterval = time.Hour
+		paths := make([]*table.Path, n)
+		for i, p := range prefixes {
+			paths[i] = testUnicastPath(b, p, "192.168.1.1")
+		}
+		b.StartTimer()
+
+		for _, p := range paths {
+			e.scheduleUpdate(p)
+		}
+
+		b.StopTimer()
+		e.dampenMu.Lock()
+		if e.flushTimer != nil {
+			e.flushTimer.Stop()
+			e.flushTimer = nil
+		}
+		e.dampenMu.Unlock()
+		b.StartTimer()
+	}
+}
+
+func BenchmarkScheduleBurst100(b *testing.B)  { benchmarkScheduleBurst(b, 100) }
+func BenchmarkScheduleBurst400(b *testing.B)  { benchmarkScheduleBurst(b, 400) }
+func BenchmarkScheduleBurst1600(b *testing.B) { benchmarkScheduleBurst(b, 1600) }

@@ -309,6 +309,8 @@ func showNeighbor(args []string) error {
 	fmt.Printf("  Hold time is %d, keepalive interval is %d seconds\n", int(p.Timers.State.NegotiatedHoldTime), int(p.Timers.State.KeepaliveInterval))
 	fmt.Printf("  Configured hold time is %d, keepalive interval is %d seconds\n", int(p.Timers.Config.HoldTime), int(p.Timers.Config.KeepaliveInterval))
 
+	showBfdNeighbor(p)
+
 	elems := make([]string, 0, 3)
 	if as := p.Conf.AllowOwnAsn; as > 0 {
 		elems = append(elems, fmt.Sprintf("Allow Own AS: %d", as))
@@ -648,8 +650,8 @@ func makeShowRouteArgs(p *api.Path, idx int, now time.Time, showAge, showBest, s
 	attrs, _ := apiutil.GetNativePathAttributes(p)
 	// Next Hop
 	nexthop := "fictitious"
-	if p.IsNetlink {
-		nexthop = p.NetlinkIfName
+	if p.GetNetlink().GetIsNetlink() {
+		nexthop = p.GetNetlink().GetIfName()
 	} else if n := getNextHopFromPathAttributes(attrs); n.IsValid() {
 		nexthop = n.String()
 	}

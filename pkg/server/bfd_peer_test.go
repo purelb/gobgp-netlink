@@ -377,3 +377,48 @@ func Test_TxPacket(t *testing.T) {
 
 	p.Stop()
 }
+
+// Test_BfdFailureTransitionsCountOnlyRealFlaps pins the counter that answers
+// "has this session been flapping?".
+//
+// It exists because api.BfdPeerState.FailureTransitions was in the proto, copied
+// through pkg/config/oc, and never written by anything - so it read as a
+// confident zero on a session that had just been torn down repeatedly on
+// hardware. The distinction that matters is that only a transition out of UP is
+// a failure: a session that has never come up re-enters DOWN on every detect
+// interval, and counting those would report a permanently broken peer as a
+// wildly flapping one.
+func Test_BfdFailureTransitionsCountOnlyRealFlaps(t *testing.T) {
+	assert := assert.New(t)
+
+	ps := &mockPeerState{}
+	p := NewBfdPeer(ps, slog.Default(), netip.MustParseAddr("127.0.0.1"), oc.BfdConfig{
+		Port:                     13784,
+		Enabled:                  true,
+		DetectionMultiplier:      3,
+		RequiredMinimumReceive:   300000,
+		DesiredMinimumTxInterval: 300000,
+	}, "")
+	defer p.Stop()
+
+	// A session that never came up: DOWN -> DOWN, repeatedly.
+	p.setStateDown()
+	p.setStateDown()
+	assert.Equal(uint64(0), p.stats.downTransitions.Load(),
+		"a session that never came up has not failed; counting these would report "+
+			"an unreachable peer as a flapping one")
+
+	// INIT -> DOWN is also not a failure: it never reached UP.
+	p.setStateInit(1)
+	p.setStateDown()
+	assert.Equal(uint64(0), p.stats.downTransitions.Load())
+
+	// UP -> DOWN is the real thing.
+	p.setStateUp(1)
+	p.setStateDown()
+	assert.Equal(uint64(1), p.stats.downTransitions.Load())
+
+	p.setStateUp(1)
+	p.setStateDown()
+	assert.Equal(uint64(2), p.stats.downTransitions.Load())
+}

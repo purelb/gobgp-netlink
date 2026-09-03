@@ -658,3 +658,38 @@ func TestNewPrefixFromApiStructRTC(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, p.Prefix.Contains(full.Prefix.Addr()))
 }
+
+// TestToPathAPINetlinkPresenceIsMeaningful pins the contract NetlinkPathInfo's
+// comment states: the message is present only on netlink-sourced paths.
+//
+// It was written because the first version of the nested-message refactor set
+// the submessage on every path. Nothing in-tree noticed, because every in-tree
+// reader goes through the nil-safe GetNetlink() getter - but a consumer testing
+// `path.Netlink != nil`, which the proto comment invites, would have seen every
+// path in every ListPath response as netlink sourced.
+func TestToPathAPINetlinkPresenceIsMeaningful(t *testing.T) {
+	newPath := func(isNetlink bool, ifName string) *apiutil.Path {
+		return &apiutil.Path{
+			Family:        bgp.RF_IPv4_UC,
+			Age:           time.Now().Unix(),
+			IsNetlink:     isNetlink,
+			NetlinkIfName: ifName,
+		}
+	}
+
+	t.Run("netlink path carries the message", func(t *testing.T) {
+		p := toPathAPI(nil, nil, nil, nil, newPath(true, "eth0"))
+		assert.NotNil(t, p.Netlink, "a netlink path must carry NetlinkPathInfo")
+		assert.True(t, p.GetNetlink().GetIsNetlink())
+		assert.Equal(t, "eth0", p.GetNetlink().GetIfName())
+	})
+
+	t.Run("peer-learned path omits the message", func(t *testing.T) {
+		p := toPathAPI(nil, nil, nil, nil, newPath(false, ""))
+		assert.Nil(t, p.Netlink,
+			"presence marks a path as netlink sourced, so a peer-learned path must not carry it")
+		// The nil-safe getters still answer correctly for such a path.
+		assert.False(t, p.GetNetlink().GetIsNetlink())
+		assert.Empty(t, p.GetNetlink().GetIfName())
+	})
+}
