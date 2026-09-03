@@ -272,7 +272,6 @@ func TestBfdMetricsExposeTheSilentFailure(t *testing.T) {
 			NeighborAddress: "fe80::1",
 			BfdState: &api.BfdPeerState{
 				SessionState:       api.BfdSessionState_BFD_SESSION_STATE_DOWN,
-				RemoteSessionState: api.BfdSessionState_BFD_SESSION_STATE_DOWN,
 				FailureTransitions: 2,
 				BfdAsync: &api.BfdAsyncCounters{
 					TransmittedPackets: 63,

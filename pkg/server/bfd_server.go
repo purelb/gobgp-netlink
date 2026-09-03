@@ -353,10 +353,17 @@ func (s *bfdServer) getPeerState(address netip.Addr) *bfdPeerState {
 		return nil
 	}
 
+	// Only the fields the peer actually maintains are set. RemoteSessionState,
+	// the diagnostic codes, LastFailureTime and RemoteMinimumReceiveInterval are
+	// not tracked anywhere, so they are left unset rather than reported as a
+	// zero that reads like real data. The discriminators are deliberately not
+	// exposed: they are plain fields written by the peer's own goroutine, and
+	// reading them here would be a data race for no operational benefit.
 	return &bfdPeerState{
 		peerAddress: peer.peerAddress,
 		state: api.BfdPeerState{
-			SessionState: api.BfdSessionState(peer.state.Load()),
+			SessionState:       api.BfdSessionState(peer.state.Load()),
+			FailureTransitions: peer.stats.downTransitions.Load(),
 			BfdAsync: &api.BfdAsyncCounters{
 				ReceivedPackets:    peer.stats.rxPacket.Load(),
 				TransmittedPackets: peer.stats.txPacket.Load(),

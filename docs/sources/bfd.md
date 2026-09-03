@@ -166,7 +166,7 @@ explicit answer rather than a missing section.
 ```bash
 $ gobgp neighbor 192.0.2.2
 ...
-  BFD: enabled, session UP (remote UP), diagnostic: no diagnostic
+  BFD: enabled, session UP
     Intervals: tx 300ms, rx 300ms, multiplier 3 (detect 900ms), port 3784
     Packets: tx 4133, rx 4722, failure transitions 0
 ```
@@ -176,8 +176,8 @@ counters:
 
 ```bash
 $ gobgp bfd
-Peer                             State  Remote Tx        Rx        Transitions
-192.0.2.2                        UP     UP     4133      4722      0
+Peer                             State  Tx         Rx         Transitions
+192.0.2.2                        UP     4133       4722       0
 
 Server: rx 8859  drop 0  error 0  invalid 0  unknown-peer 0
 ```
@@ -195,6 +195,12 @@ Two of those server counters diagnose failures that are otherwise silent:
 
 Intervals are printed as durations because they are configured in
 **microseconds**: `300` means 300 microseconds, not 300 milliseconds.
+
+`remote_session_state`, the diagnostic codes, `last_failure_time` and
+`remote_minimum_receive_interval` exist in `BfdPeerState` but are not maintained
+by the BFD peer, so they are always unset and are deliberately not displayed.
+`failure_transitions` counts sessions going from up to down; a session that has
+never come up does not increment it.
 
 ### JSON output
 

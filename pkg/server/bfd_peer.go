@@ -36,6 +36,10 @@ type bfdPeerStats struct {
 	invalidDiscriminator atomic.Uint64
 	invalidMultiplier    atomic.Uint64
 	expired              atomic.Uint64
+	// downTransitions counts sessions going up -> down, which is what an
+	// operator means by a flap. expired counts only the detect-timer path, so it
+	// misses a peer that signalled DOWN explicitly.
+	downTransitions atomic.Uint64
 }
 
 type bfdPeer struct {
@@ -490,6 +494,13 @@ func (p *bfdPeer) setStateDown() {
 		slog.String("Topic", "bfd"),
 		slog.String("Peer", p.peerAddress.String()),
 	)
+
+	// Only a transition out of UP is a failure. Re-entering DOWN from DOWN or
+	// INIT is a session that never came up, which is a different condition and
+	// must not inflate the flap count.
+	if api.BfdSessionState(p.state.Load()) == api.BfdSessionState_BFD_SESSION_STATE_UP {
+		p.stats.downTransitions.Add(1)
+	}
 
 	p.state.Store(int32(api.BfdSessionState_BFD_SESSION_STATE_DOWN))
 	p.yourDiscriminator = 0
