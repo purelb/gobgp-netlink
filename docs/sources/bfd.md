@@ -196,11 +196,12 @@ Two of those server counters diagnose failures that are otherwise silent:
 Intervals are printed as durations because they are configured in
 **microseconds**: `300` means 300 microseconds, not 300 milliseconds.
 
-`remote_session_state`, the diagnostic codes, `last_failure_time` and
-`remote_minimum_receive_interval` exist in `BfdPeerState` but are not maintained
-by the BFD peer, so they are always unset and are deliberately not displayed.
-`failure_transitions` counts sessions going from up to down; a session that has
-never come up does not increment it.
+All ten `BfdPeerState` fields are populated: the local and remote session
+states, both diagnostic codes, both discriminators, the remote receive interval,
+the last failure time, the failure count and the packet counters.
+`failure_transitions` counts sessions going from up to down, so a session that
+has never come up does not increment it, and `local_diagnostic_code` reports why
+this end last declared the session down.
 
 ### JSON output
 

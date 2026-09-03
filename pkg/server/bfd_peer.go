@@ -72,12 +72,25 @@ type bfdPeer struct {
 
 	expiryInterval time.Duration
 
-	state             atomic.Int32
-	myDiscriminator   uint32
-	yourDiscriminator uint32
-	multiplier        uint8
-	rxInterval        time.Duration
-	txInterval        time.Duration
+	state           atomic.Int32
+	myDiscriminator uint32
+	// yourDiscriminator and the remote/local state below are written by the
+	// event loop and read by GetPeerState from whichever goroutine asks, so
+	// they are atomic. They were previously either plain fields or not tracked
+	// at all, which is why five of BfdPeerState's ten fields werepermanently unset.
+	yourDiscriminator atomic.Uint32
+	// remoteState, remoteDiag and remoteMinRx are the peer's own view, taken
+	// from each accepted control packet.
+	remoteState atomic.Int32
+	remoteDiag  atomic.Int32
+	remoteMinRx atomic.Uint32
+	// localDiag is why we last declared the session down, per RFC 5880 4.1.
+	localDiag atomic.Int32
+	// lastFailure is when the session last went up -> down, in Unix seconds.
+	lastFailure atomic.Int64
+	multiplier  uint8
+	rxInterval  time.Duration
+	txInterval  time.Duration
 
 	// lastRxAccept is when a packet last passed validation and re-armed the
 	// detect timer. Only the event loop touches it, so it needs no lock.
@@ -318,6 +331,24 @@ func (p *bfdPeer) startClient() {
 	)
 }
 
+// wireStateToAPI maps RFC 5880's on-the-wire state numbering onto the API
+// enum. They are deliberately not the same numbers: the wire uses AdminDown=0,
+// Down=1, Init=2, Up=3, while the proto reserves 0 for UNSPECIFIED.
+func wireStateToAPI(s bfd.StateType) api.BfdSessionState {
+	switch s {
+	case bfd.StateAdminDown:
+		return api.BfdSessionState_BFD_SESSION_STATE_ADMIN_DOWN
+	case bfd.StateDown:
+		return api.BfdSessionState_BFD_SESSION_STATE_DOWN
+	case bfd.StateInit:
+		return api.BfdSessionState_BFD_SESSION_STATE_INIT
+	case bfd.StateUp:
+		return api.BfdSessionState_BFD_SESSION_STATE_UP
+	default:
+		return api.BfdSessionState_BFD_SESSION_STATE_UNSPECIFIED
+	}
+}
+
 func (p *bfdPeer) rxPacket(h *bfd.BFDHeader) {
 	// RFC 5880 Section 6.8.6: if the Detect Mult field is zero, the packet
 	// MUST be discarded.
@@ -351,13 +382,19 @@ func (p *bfdPeer) rxPacket(h *bfd.BFDHeader) {
 		// Once the remote discriminator is bound, a packet that omits Your
 		// Discriminator still has to come from that same remote system, or
 		// it can tear the session down without ever having seen it.
-		if p.yourDiscriminator != 0 && h.MyDiscriminator != p.yourDiscriminator {
+		if yd := p.yourDiscriminator.Load(); yd != 0 && h.MyDiscriminator != yd {
 			p.stats.invalidDiscriminator.Add(1)
 			return
 		}
 	}
 
 	p.stats.rxPacket.Add(1)
+
+	// The peer's own view, which the API exposes and which was previously
+	// never recorded anywhere.
+	p.remoteState.Store(int32(wireStateToAPI(h.State)))
+	p.remoteDiag.Store(int32(h.Diagnostic))
+	p.remoteMinRx.Store(h.RequiredMinRxInterval)
 
 	// RFC 5880 Section 6.8.4: Detection Time is the remote Detect Mult
 	// multiplied by the negotiated receive interval, i.e. the greater of our
@@ -420,9 +457,9 @@ func (p *bfdPeer) jitteredTxInterval() time.Duration {
 func (p *bfdPeer) tx() {
 	switch p.sessionState() {
 	case api.BfdSessionState_BFD_SESSION_STATE_UP:
-		p.sendPacket(bfd.StateUp, false, false, p.yourDiscriminator)
+		p.sendPacket(bfd.StateUp, false, false, p.yourDiscriminator.Load())
 	case api.BfdSessionState_BFD_SESSION_STATE_INIT:
-		p.sendPacket(bfd.StateInit, false, false, p.yourDiscriminator)
+		p.sendPacket(bfd.StateInit, false, false, p.yourDiscriminator.Load())
 	default:
 		p.sendPacket(bfd.StateDown, false, false, 0)
 	}
@@ -465,6 +502,8 @@ func (p *bfdPeer) expiry() {
 	)
 
 	p.stats.expired.Add(1)
+	// RFC 5880 4.1: this is why we are declaring the session down.
+	p.localDiag.Store(int32(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_DETECTION_TIMEOUT))
 
 	p.resetPeer()
 	p.setStateDown()
@@ -571,10 +610,11 @@ func (p *bfdPeer) setStateDown() {
 	// must not inflate the flap count.
 	if api.BfdSessionState(p.state.Load()) == api.BfdSessionState_BFD_SESSION_STATE_UP {
 		p.stats.downTransitions.Add(1)
+		p.lastFailure.Store(time.Now().Unix())
 	}
 
 	p.state.Store(int32(api.BfdSessionState_BFD_SESSION_STATE_DOWN))
-	p.yourDiscriminator = 0
+	p.yourDiscriminator.Store(0)
 
 	p.eventExpiry.Stop()
 }
@@ -586,7 +626,7 @@ func (p *bfdPeer) setStateInit(yourDiscriminator uint32) {
 	)
 
 	p.state.Store(int32(api.BfdSessionState_BFD_SESSION_STATE_INIT))
-	p.yourDiscriminator = yourDiscriminator
+	p.yourDiscriminator.Store(yourDiscriminator)
 }
 
 func (p *bfdPeer) setStateUp(yourDiscriminator uint32) {
@@ -596,7 +636,8 @@ func (p *bfdPeer) setStateUp(yourDiscriminator uint32) {
 	)
 
 	p.state.Store(int32(api.BfdSessionState_BFD_SESSION_STATE_UP))
-	p.yourDiscriminator = yourDiscriminator
+	p.yourDiscriminator.Store(yourDiscriminator)
+	p.localDiag.Store(int32(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_NO_DIAGNOSTIC))
 
 	p.eventExpiry.Reset(p.expiryInterval)
 

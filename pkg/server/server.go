@@ -859,9 +859,14 @@ func (s *BgpServer) toConfig(peer *peer, getAdvertised bool) *oc.Neighbor {
 		if err == nil {
 			st := &bfdPeer.state
 			conf.Bfd.State.SessionState = apiBfdSessionStateToOC(st.SessionState)
+			conf.Bfd.State.RemoteSessionState = apiBfdSessionStateToOC(st.RemoteSessionState)
+			conf.Bfd.State.LocalDiagnosticCode = apiBfdDiagnosticCodeToOC(st.LocalDiagnosticCode)
+			conf.Bfd.State.RemoteDiagnosticCode = apiBfdDiagnosticCodeToOC(st.RemoteDiagnosticCode)
+			conf.Bfd.State.RemoteMinimumReceiveInterval = st.RemoteMinimumReceiveInterval
 			conf.Bfd.State.LastFailureTime = st.LastFailureTime
 			conf.Bfd.State.FailureTransitions = st.FailureTransitions
 			conf.Bfd.State.LocalDiscriminator = st.LocalDiscriminator
+			conf.Bfd.State.RemoteDiscriminator = st.RemoteDiscriminator
 			if st.BfdAsync != nil {
 				conf.Bfd.State.BfdAsync.TransmittedPackets = st.BfdAsync.TransmittedPackets
 				conf.Bfd.State.BfdAsync.ReceivedPackets = st.BfdAsync.ReceivedPackets
@@ -3737,6 +3742,15 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 	}
 	s.startFsmHandler(peer)
 	return nil
+}
+
+// apiBfdDiagnosticCodeToOC mirrors the API enum onto the oc one. RFC 5880 4.1
+// numbers these identically in both, so the bound check is the whole job.
+func apiBfdDiagnosticCodeToOC(code api.BfdDiagnosticCode) oc.BfdDiagnosticCode {
+	if code < 0 || int(code) > int(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_REVERSE_CONCATENATED_PATH_DOWN) {
+		return oc.BFD_DIAGNOSTIC_CODE_NO_DIAGNOSTIC
+	}
+	return oc.IntToBfdDiagnosticCodeMap[int(code)]
 }
 
 func apiBfdSessionStateToOC(state api.BfdSessionState) oc.BfdSessionState {

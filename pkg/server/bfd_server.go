@@ -459,21 +459,31 @@ func (s *bfdServer) getPeerState(address netip.Addr) *bfdPeerState {
 		return nil
 	}
 
-	// Only the fields the peer actually maintains are set. RemoteSessionState,
-	// the diagnostic codes, LastFailureTime and RemoteMinimumReceiveInterval are
-	// not tracked anywhere, so they are left unset rather than reported as a
-	// zero that reads like real data. The discriminators are deliberately not
-	// exposed: they are plain fields written by the peer's own goroutine, and
-	// reading them here would be a data race for no operational benefit.
-	return &bfdPeerState{
-		peerAddress: peer.peerAddress,
-		state: api.BfdPeerState{
-			SessionState:       api.BfdSessionState(peer.state.Load()),
-			FailureTransitions: peer.stats.downTransitions.Load(),
-			BfdAsync: &api.BfdAsyncCounters{
-				ReceivedPackets:    peer.stats.rxPacket.Load(),
-				TransmittedPackets: peer.stats.txPacket.Load(),
-			},
+	return &bfdPeerState{peerAddress: peer.peerAddress, state: peerStateSnapshot(peer)}
+}
+
+// peerStateSnapshot builds the API view of one peer.
+//
+// Shared by getPeerState and getPeerStateList so the two cannot report
+// different subsets: the list form used to expose fewer fields than the single
+// lookup, and both omitted five that nothing populated at all.
+//
+// Every field read here is atomic, because the event loop writes them while
+// callers on other goroutines read them.
+func peerStateSnapshot(peer *bfdPeer) api.BfdPeerState {
+	return api.BfdPeerState{
+		SessionState:                 api.BfdSessionState(peer.state.Load()),
+		RemoteSessionState:           api.BfdSessionState(peer.remoteState.Load()),
+		LocalDiagnosticCode:          api.BfdDiagnosticCode(peer.localDiag.Load()),
+		RemoteDiagnosticCode:         api.BfdDiagnosticCode(peer.remoteDiag.Load()),
+		LocalDiscriminator:           peer.myDiscriminator,
+		RemoteDiscriminator:          peer.yourDiscriminator.Load(),
+		RemoteMinimumReceiveInterval: peer.remoteMinRx.Load(),
+		LastFailureTime:              uint64(peer.lastFailure.Load()),
+		FailureTransitions:           peer.stats.downTransitions.Load(),
+		BfdAsync: &api.BfdAsyncCounters{
+			ReceivedPackets:    peer.stats.rxPacket.Load(),
+			TransmittedPackets: peer.stats.txPacket.Load(),
 		},
 	}
 }
@@ -484,13 +494,7 @@ func (s *bfdServer) getPeerStateList() []*bfdPeerState {
 	for _, peer := range s.peers {
 		list = append(list, &bfdPeerState{
 			peerAddress: peer.peerAddress,
-			state: api.BfdPeerState{
-				SessionState: api.BfdSessionState(peer.state.Load()),
-				BfdAsync: &api.BfdAsyncCounters{
-					ReceivedPackets:    peer.stats.rxPacket.Load(),
-					TransmittedPackets: peer.stats.txPacket.Load(),
-				},
-			},
+			state:       peerStateSnapshot(peer),
 		})
 	}
 	s.peersMutex.RUnlock()

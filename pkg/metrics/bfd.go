@@ -75,7 +75,7 @@ var (
 // BFD surface is in one file, but they are emitted from the bgpCollector's
 // ListPeer loop, which already carries the api.Peer these read from.
 var (
-	bfdPeerStateLabels = []string{"peer", "session_state"}
+	bfdPeerStateLabels = []string{"peer", "session_state", "remote_session_state"}
 
 	bgpPeerBfdEnabledDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "peer", "bfd_enabled"),
@@ -180,12 +180,11 @@ func collectPeerBfd(out chan<- prometheus.Metric, p *api.Peer, peerAddr string) 
 	}
 
 	state := p.GetState().GetBfdState()
-	// Remote session state is not tracked by the BFD peer, so it is not a label:
-	// every series would carry the same UNSPECIFIED value.
 	out <- prometheus.MustNewConstMetric(
 		bgpPeerBfdStateDesc, prometheus.GaugeValue, 1.0,
 		peerAddr,
 		state.GetSessionState().String(),
+		state.GetRemoteSessionState().String(),
 	)
 
 	async := state.GetBfdAsync()

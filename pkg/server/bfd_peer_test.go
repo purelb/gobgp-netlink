@@ -121,7 +121,7 @@ func Test_RxPacketRemoteDownResetsPeer(t *testing.T) {
 	defer p.Stop()
 
 	p.state.Store(int32(api.BfdSessionState_BFD_SESSION_STATE_UP))
-	p.yourDiscriminator = 12345
+	p.yourDiscriminator.Store(12345)
 
 	p.rxPacket(&bfd.BFDHeader{
 		State:                bfd.StateDown,
@@ -154,7 +154,7 @@ func Test_RxPacketRFCStateTransitions(t *testing.T) {
 		DetectTimeMultiplier: 5,
 	})
 	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_INIT, api.BfdSessionState(p.state.Load()))
-	assert.Equal(uint32(111), p.yourDiscriminator)
+	assert.Equal(uint32(111), p.yourDiscriminator.Load())
 
 	p.setStateDown()
 	p.rxPacket(&bfd.BFDHeader{
@@ -173,7 +173,7 @@ func Test_RxPacketRFCStateTransitions(t *testing.T) {
 		DetectTimeMultiplier: 5,
 	})
 	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_UP, api.BfdSessionState(p.state.Load()))
-	assert.Equal(uint32(444), p.yourDiscriminator)
+	assert.Equal(uint32(444), p.yourDiscriminator.Load())
 }
 
 // Test_RxPacketDetectionTimeFromRemote pins RFC 5880 Section 6.8.4: the detection time
@@ -282,7 +282,7 @@ func Test_RxPacketUnboundDiscriminatorDiscarded(t *testing.T) {
 		DetectTimeMultiplier: 3,
 	})
 	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
-	assert.Equal(uint32(0), p.yourDiscriminator)
+	assert.Equal(uint32(0), p.yourDiscriminator.Load())
 	assert.Equal(uint64(2), p.stats.invalidDiscriminator.Load())
 
 	// A Down packet with a zero Your Discriminator is still accepted: that is
@@ -294,7 +294,7 @@ func Test_RxPacketUnboundDiscriminatorDiscarded(t *testing.T) {
 		DetectTimeMultiplier: 3,
 	})
 	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_INIT, p.sessionState())
-	assert.Equal(uint32(222), p.yourDiscriminator)
+	assert.Equal(uint32(222), p.yourDiscriminator.Load())
 }
 
 func Test_RxPacketZeroYourDiscriminatorForeignRemoteDiscarded(t *testing.T) {
@@ -311,7 +311,7 @@ func Test_RxPacketZeroYourDiscriminatorForeignRemoteDiscarded(t *testing.T) {
 	defer p.Stop()
 
 	p.state.Store(int32(api.BfdSessionState_BFD_SESSION_STATE_UP))
-	p.yourDiscriminator = 12345
+	p.yourDiscriminator.Store(12345)
 
 	// The remote discriminator is already bound, so a Down packet that omits
 	// Your Discriminator and carries a different My Discriminator did not come
@@ -323,7 +323,7 @@ func Test_RxPacketZeroYourDiscriminatorForeignRemoteDiscarded(t *testing.T) {
 		DetectTimeMultiplier: 3,
 	})
 	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_UP, p.sessionState())
-	assert.Equal(uint32(12345), p.yourDiscriminator)
+	assert.Equal(uint32(12345), p.yourDiscriminator.Load())
 	assert.Equal(int64(0), atomic.LoadInt64(&ps.resetPeerCount))
 	assert.Equal(uint64(1), p.stats.invalidDiscriminator.Load())
 
@@ -525,4 +525,54 @@ func Test_BfdRxQueueIsDeeperThanOne(t *testing.T) {
 	assert.Equal(bfdRxQueueDepth, cap(p.eventRxPacket))
 	assert.GreaterOrEqual(bfdRxQueueDepth, 3,
 		"the queue must absorb a whole detection window at the default multiplier")
+}
+
+// Test_BfdPeerStateSnapshotPopulatesEveryField proves no BfdPeerState field is
+// reported as a confident zero.
+//
+// Five of the ten - the remote session state, both diagnostic codes, the last
+// failure time and the remote receive interval - were written by nothing at
+// all, and two more were only reachable through one of the two accessors. A
+// session that had just flapped therefore reported "remote -" and "0 failure
+// transitions", both false, which is worse than reporting nothing.
+func Test_BfdPeerStateSnapshotPopulatesEveryField(t *testing.T) {
+	assert := assert.New(t)
+
+	ps := &mockPeerState{}
+	p := NewBfdPeer(ps, slog.Default(), netip.MustParseAddr("127.0.0.1"), oc.BfdConfig{
+		Port: 13784, Enabled: true, DetectionMultiplier: 3,
+		RequiredMinimumReceive: 300000, DesiredMinimumTxInterval: 300000,
+	}, "")
+	defer p.Stop()
+
+	// Drive a session up, then fail it, entirely through the state machine.
+	p.rxPacket(&bfd.BFDHeader{
+		State: bfd.StateDown, Diagnostic: bfd.DiagnosticNoDiagnostic,
+		MyDiscriminator: 4242, DetectTimeMultiplier: 3,
+		RequiredMinRxInterval: 500000, DesiredMinTxInterval: 500000,
+	})
+	p.rxPacket(&bfd.BFDHeader{
+		State: bfd.StateInit, Diagnostic: bfd.DiagnosticNoDiagnostic,
+		MyDiscriminator: 4242, YourDiscriminator: p.myDiscriminator,
+		DetectTimeMultiplier: 3, RequiredMinRxInterval: 500000, DesiredMinTxInterval: 500000,
+	})
+	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_UP, p.sessionState())
+
+	p.lastRxAccept = time.Now().Add(-time.Hour) // force a real expiry
+	p.expiry()
+
+	s := peerStateSnapshot(p)
+
+	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, s.GetSessionState())
+	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_INIT, s.GetRemoteSessionState(),
+		"the peer's own advertised state must be recorded, not left unset")
+	assert.Equal(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_DETECTION_TIMEOUT,
+		s.GetLocalDiagnosticCode(), "we timed the session out, so say so")
+	assert.Equal(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_NO_DIAGNOSTIC, s.GetRemoteDiagnosticCode())
+	assert.Equal(uint32(500000), s.GetRemoteMinimumReceiveInterval())
+	assert.NotZero(s.GetLocalDiscriminator())
+	assert.Equal(uint64(1), s.GetFailureTransitions())
+	assert.NotZero(s.GetLastFailureTime(), "a session that just failed has a failure time")
+	assert.NotNil(s.GetBfdAsync())
+	assert.Equal(uint64(2), s.GetBfdAsync().GetReceivedPackets())
 }
