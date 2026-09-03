@@ -309,6 +309,29 @@ peer := &api.Peer{
 
 `ListPeer` returns peer state with `state.bfd_state`.
 
+`GetBfdServerState` returns the BFD server's receive-path counters, which are
+server-wide rather than per-peer:
+
+```protobuf
+rpc GetBfdServerState(GetBfdServerStateRequest) returns (GetBfdServerStateResponse);
+
+message GetBfdServerStateResponse {
+  BfdState state = 1;
+}
+
+message BfdState {
+  uint64 received_packet = 1;
+  uint64 received_drop = 2;
+  uint64 received_error = 3;
+  uint64 invalid_packet = 4;
+  uint64 unknown_peer = 5;
+}
+```
+
+`unknown_peer` is the counter to reach for when a session will not come up: it
+counts packets that arrived for an address with no configured peer, which no
+other API reports and which the daemon logs only at DEBUG.
+
 ## Troubleshooting
 
 If the BFD session does not come up:
@@ -319,7 +342,13 @@ If the BFD session does not come up:
 - verify that the remote system accepts source ports from `49152..65535`;
 - avoid setting a non-default `port` unless the remote peer is known to listen
   there;
-- check JSON peer output for `state.bfd_state.session_state`;
+- give a link-local neighbor address its zone (`fe80::1%eth0`). Without it the
+  receive lookup cannot match the zoned address the kernel reports, so the
+  session stays down. If the peer also sets a bind interface, transmit still
+  works and BGP stays up, which makes this failure look like success;
+- run `gobgp bfd` and compare the per-peer `Tx` and `Rx` columns. Tx advancing
+  while Rx stays flat means the packets are leaving but the replies are not
+  being matched to this peer; check `unknown-peer` in the same output;
 - capture traffic and confirm that BFD control packets are being exchanged.
 
 ```bash
