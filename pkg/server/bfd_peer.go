@@ -26,6 +26,25 @@ const (
 	defaultMultiplier = 3
 	defaultRxInterval = 1000 * time.Millisecond
 	defaultTxInterval = 1000 * time.Millisecond
+
+	// bfdRxQueueDepth is how many received control packets may wait for the
+	// peer's event loop.
+	//
+	// It was 1, with Rx() dropping on a full queue. Any stall longer than one
+	// transmit interval therefore discarded proof that the peer was alive,
+	// which is the opposite of what the queue is for: under exactly the CPU
+	// pressure that makes a stall likely, BFD would manufacture a session-down
+	// on a healthy peer. Depth covers a whole detection window at the default
+	// multiplier of 3, doubled for headroom, and stays bounded so a wedged
+	// loop cannot grow memory.
+	bfdRxQueueDepth = 8
+
+	// RFC 5880 6.8.7: the transmit interval is jittered down by up to 25% so
+	// peers do not synchronise. With a multiplier of 1 the reduction is at
+	// least 10%, so a single lost packet cannot immediately expire the session.
+	bfdTxJitterMaxPercent   = 25
+	bfdTxJitterMinPercent   = 0
+	bfdTxJitterMinPercentM1 = 10
 )
 
 type bfdPeerStats struct {
@@ -60,9 +79,13 @@ type bfdPeer struct {
 	rxInterval        time.Duration
 	txInterval        time.Duration
 
+	// lastRxAccept is when a packet last passed validation and re-armed the
+	// detect timer. Only the event loop touches it, so it needs no lock.
+	lastRxAccept time.Time
+
 	eventStart    *time.Ticker
 	eventRxPacket chan *bfd.BFDHeader
-	eventTx       *time.Ticker
+	eventTx       *time.Timer
 	eventExpiry   *time.Ticker
 	eventShutdown chan struct{}
 	shutdownOnce  sync.Once
@@ -91,7 +114,7 @@ func NewBfdPeer(ps peerState, logger *slog.Logger, peerAddress netip.Addr, confi
 		txInterval:      defaultTxInterval,
 
 		eventStart:    time.NewTicker(time.Second),
-		eventRxPacket: make(chan *bfd.BFDHeader, 1),
+		eventRxPacket: make(chan *bfd.BFDHeader, bfdRxQueueDepth),
 		eventShutdown: make(chan struct{}),
 	}
 
@@ -110,7 +133,7 @@ func NewBfdPeer(ps peerState, logger *slog.Logger, peerAddress netip.Addr, confi
 	}
 
 	p.expiryInterval = time.Duration(p.multiplier) * p.rxInterval
-	p.eventTx = time.NewTicker(p.txInterval)
+	p.eventTx = time.NewTimer(p.jitteredTxInterval())
 
 	p.eventExpiry = time.NewTicker(p.expiryInterval)
 	p.eventExpiry.Stop()
@@ -157,7 +180,14 @@ func (p *bfdPeer) loop() {
 			p.rxPacket(bfdPacket)
 		case <-p.eventTx.C:
 			p.tx()
+			// A Timer, not a Ticker, because each period is jittered.
+			p.eventTx.Reset(p.jitteredTxInterval())
 		case <-p.eventExpiry.C:
+			// Drain first. select picks uniformly among ready cases, so a
+			// queued valid packet and a fired detect timer give a coin flip
+			// on declaring a live session down with the proof of life still
+			// sitting in the channel.
+			p.drainRxPacket()
 			p.expiry()
 		case <-p.eventShutdown:
 			p.shutdown()
@@ -367,8 +397,24 @@ func (p *bfdPeer) rxPacket(h *bfd.BFDHeader) {
 
 	if p.sessionState() == api.BfdSessionState_BFD_SESSION_STATE_INIT ||
 		p.sessionState() == api.BfdSessionState_BFD_SESSION_STATE_UP {
+		p.lastRxAccept = time.Now()
 		p.eventExpiry.Reset(p.expiryInterval)
 	}
+}
+
+// jitteredTxInterval returns the next transmit interval, reduced by a random
+// percentage per RFC 5880 6.8.7.
+//
+// Without this every peer transmits on a fixed period. Across a DaemonSet that
+// synchronises every node's transmit phase, so a fabric event lines up every
+// node's BGP reset instead of spreading them.
+func (p *bfdPeer) jitteredTxInterval() time.Duration {
+	minPct := bfdTxJitterMinPercent
+	if p.multiplier == 1 {
+		minPct = bfdTxJitterMinPercentM1
+	}
+	reduction := randRange(minPct, bfdTxJitterMaxPercent)
+	return time.Duration(int64(p.txInterval) * int64(100-reduction) / 100)
 }
 
 func (p *bfdPeer) tx() {
@@ -382,10 +428,35 @@ func (p *bfdPeer) tx() {
 	}
 }
 
+// drainRxPacket processes every control packet already queued, without
+// blocking. Called from the event loop only.
+func (p *bfdPeer) drainRxPacket() {
+	for {
+		select {
+		case packet := <-p.eventRxPacket:
+			p.rxPacket(packet)
+		default:
+			return
+		}
+	}
+}
+
 func (p *bfdPeer) expiry() {
 	if p.sessionState() == api.BfdSessionState_BFD_SESSION_STATE_DOWN {
 		p.eventExpiry.Stop()
 		return
+	}
+
+	// The timer firing is not proof the session is dead; the absence of a
+	// recent valid packet is. Draining above may have accepted one, and a
+	// packet can also land between the timer firing and this check. Either way
+	// the deadline is authoritative, so re-arm for the remaining time instead
+	// of tearing down a session that is demonstrably alive.
+	if !p.lastRxAccept.IsZero() {
+		if since := time.Since(p.lastRxAccept); since < p.expiryInterval {
+			p.eventExpiry.Reset(p.expiryInterval - since)
+			return
+		}
 	}
 
 	p.logger.Warn("Expired",

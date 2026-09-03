@@ -422,3 +422,107 @@ func Test_BfdFailureTransitionsCountOnlyRealFlaps(t *testing.T) {
 	p.setStateDown()
 	assert.Equal(uint64(2), p.stats.downTransitions.Load())
 }
+
+// newBareBfdPeer builds a peer without starting its event loop, so state
+// machine behaviour can be driven deterministically from the test.
+func newBareBfdPeer(t *testing.T, state api.BfdSessionState, expiry time.Duration) *bfdPeer {
+	t.Helper()
+	p := &bfdPeer{
+		peerState:      &mockPeerState{},
+		logger:         slog.Default(),
+		peerAddress:    netip.MustParseAddr("127.0.0.1"),
+		expiryInterval: expiry,
+		eventExpiry:    time.NewTicker(time.Hour),
+	}
+	p.state.Store(int32(state))
+	return p
+}
+
+// Test_BfdExpiryHonoursTheDetectDeadline is the §7.3 false-session-down fix.
+//
+// loop() selects over rx, tx and expiry, and Go picks uniformly among ready
+// cases. With a valid packet queued and the detect timer fired, there was a
+// coin flip on tearing down a live session while the proof of life sat in the
+// channel. The timer firing is not evidence the peer is gone; the absence of a
+// recent accepted packet is, so expiry re-checks the deadline.
+func Test_BfdExpiryHonoursTheDetectDeadline(t *testing.T) {
+	assert := assert.New(t)
+	const expiry = 900 * time.Millisecond
+
+	t.Run("a packet inside the window keeps the session up", func(t *testing.T) {
+		p := newBareBfdPeer(t, api.BfdSessionState_BFD_SESSION_STATE_UP, expiry)
+		p.lastRxAccept = time.Now()
+
+		p.expiry()
+
+		assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_UP, p.sessionState(),
+			"the detect timer fired but a packet was accepted well inside the "+
+				"window; tearing down here is the false session-down")
+		assert.Equal(uint64(0), p.stats.expired.Load())
+		assert.Equal(int64(0), p.peerState.(*mockPeerState).resetPeerCount,
+			"a live session must not reset its BGP peer")
+	})
+
+	t.Run("no packet within the window expires the session", func(t *testing.T) {
+		p := newBareBfdPeer(t, api.BfdSessionState_BFD_SESSION_STATE_UP, expiry)
+		p.lastRxAccept = time.Now().Add(-2 * expiry)
+
+		p.expiry()
+
+		assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
+		assert.Equal(uint64(1), p.stats.expired.Load())
+		assert.Equal(int64(1), p.peerState.(*mockPeerState).resetPeerCount)
+	})
+
+	t.Run("a session that never received anything still expires", func(t *testing.T) {
+		p := newBareBfdPeer(t, api.BfdSessionState_BFD_SESSION_STATE_UP, expiry)
+		// lastRxAccept is the zero time: the deadline check must not read that
+		// as "recently seen" and pin an unreachable peer up forever.
+		p.expiry()
+
+		assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
+	})
+}
+
+// Test_BfdTxIntervalIsJittered covers RFC 5880 §6.8.7. Without jitter every
+// peer transmits on a fixed period, which across a DaemonSet synchronises every
+// node's transmit phase and lines up every node's BGP reset on a fabric event.
+func Test_BfdTxIntervalIsJittered(t *testing.T) {
+	assert := assert.New(t)
+
+	p := &bfdPeer{txInterval: 300 * time.Millisecond, multiplier: 3}
+	seen := map[time.Duration]bool{}
+	for range 200 {
+		d := p.jitteredTxInterval()
+		assert.LessOrEqual(d, p.txInterval, "jitter reduces the interval, never extends it")
+		assert.GreaterOrEqual(d, p.txInterval*75/100, "RFC 5880 §6.8.7 bounds the reduction at 25%")
+		seen[d] = true
+	}
+	assert.Greater(len(seen), 1, "a fixed interval is what this exists to prevent")
+
+	// With a multiplier of 1 a single lost packet expires the session, so the
+	// reduction is at least 10% to keep a margin.
+	p1 := &bfdPeer{txInterval: 300 * time.Millisecond, multiplier: 1}
+	for range 200 {
+		d := p1.jitteredTxInterval()
+		assert.LessOrEqual(d, p1.txInterval*90/100)
+		assert.GreaterOrEqual(d, p1.txInterval*75/100)
+	}
+}
+
+// Test_BfdRxQueueIsDeeperThanOne: the queue was depth 1 with Rx() dropping when
+// full, so any stall longer than one transmit interval discarded proof that the
+// peer was alive - under exactly the CPU pressure that makes a stall likely.
+func Test_BfdRxQueueIsDeeperThanOne(t *testing.T) {
+	assert := assert.New(t)
+	ps := &mockPeerState{}
+	p := NewBfdPeer(ps, slog.Default(), netip.MustParseAddr("127.0.0.1"), oc.BfdConfig{
+		Port: 13784, Enabled: true, DetectionMultiplier: 3,
+		RequiredMinimumReceive: 300000, DesiredMinimumTxInterval: 300000,
+	}, "")
+	defer p.Stop()
+
+	assert.Equal(bfdRxQueueDepth, cap(p.eventRxPacket))
+	assert.GreaterOrEqual(bfdRxQueueDepth, 3,
+		"the queue must absorb a whole detection window at the default multiplier")
+}
