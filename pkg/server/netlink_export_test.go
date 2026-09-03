@@ -20,6 +20,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -916,4 +917,61 @@ func TestListVrfReportsNetlinkImport(t *testing.T) {
 			"ListVrf must report netlink import; a blank column is the symptom")
 		assert.Equal(t, []string{"eth0", "eth1"}, got.GetNetlink().GetImportInterfaces())
 	}
+}
+
+// TestDampeningFlushIsBudgeted gates the burst bound that BFD depends on.
+//
+// Dampening used to arm a time.AfterFunc per prefix. A peer flap therefore
+// scheduled N timers inside one dampening interval and they all fired together,
+// each doing a RouteReplace serialised on a single netlink socket. Several
+// hundred VIPs is more CPU than a 500m cgroup quota allows in 100ms, so the
+// container throttled for the remainder of the period - landing the stall on
+// exactly the event BFD is watching for, and able to expire sessions to peers
+// that are perfectly healthy.
+//
+// One timer now drains the map, at most dampenFlushBudget prefixes per pass,
+// re-arming after a short yield so a burst is spread rather than delayed. This
+// asserts the whole burst still lands, and that it takes more than one pass to
+// do it.
+func TestDampeningFlushIsBudgeted(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f, &exportRule{Name: "r", TableId: 0, Metric: 20})
+	e.dampeningInterval = 20 * time.Millisecond
+	e.dampeningMaxDelay = 5 * time.Second
+
+	const total = dampenFlushBudget + 25
+	for i := range total {
+		e.scheduleUpdate(testUnicastPath(t, fmt.Sprintf("10.%d.%d.0/24", i/256, i%256), "192.168.1.1"))
+	}
+
+	// One timer for the whole map, not one per prefix.
+	e.dampenMu.Lock()
+	pending := len(e.pendingUpdates)
+	armed := e.flushTimer != nil
+	e.dampenMu.Unlock()
+	assert.Equal(t, total, pending, "every prefix should be pending")
+	assert.True(t, armed, "a single flush timer should be armed")
+
+	// The first pass must not program everything: that is the burst bound.
+	assert.Eventually(t, func() bool {
+		replace, _, _ := f.counts()
+		return replace > 0
+	}, 2*time.Second, 5*time.Millisecond, "the flush should start")
+
+	replace, _, _ := f.counts()
+	assert.LessOrEqual(t, replace, dampenFlushBudget,
+		"one pass must not exceed the budget; that is what throttles the cgroup")
+
+	// But everything still lands, and reasonably promptly.
+	assert.Eventually(t, func() bool {
+		replace, _, _ := f.counts()
+		return replace == total
+	}, 5*time.Second, 10*time.Millisecond, "the whole burst must still be programmed")
+
+	e.dampenMu.Lock()
+	left := len(e.pendingUpdates)
+	timer := e.flushTimer
+	e.dampenMu.Unlock()
+	assert.Zero(t, left, "nothing should remain pending")
+	assert.Nil(t, timer, "the flush timer should be disarmed when the map empties")
 }
