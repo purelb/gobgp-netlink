@@ -264,6 +264,8 @@ BFD exports the following Prometheus series:
 | `bgp_bfd_received_error_total` | Errors reading from the BFD server socket. |
 | `bgp_bfd_invalid_packet_total` | Datagrams that would not decode. |
 | `bgp_bfd_unknown_peer_total` | Packets from an address with no configured peer. |
+| `bgp_bfd_wrong_hop_limit_total` | Packets discarded for a TTL/hop limit other than 255 (RFC 5881 §5). |
+| `bgp_bfd_server_up` | Whether the BFD socket is bound. Zero while peers have BFD enabled means no detection is happening. |
 
 A session that is configured but never comes up is expressible as:
 
@@ -331,6 +333,32 @@ message BfdState {
 `unknown_peer` is the counter to reach for when a session will not come up: it
 counts packets that arrived for an address with no configured peer, which no
 other API reports and which the daemon logs only at DEBUG.
+
+## Deployment requirements
+
+### CAP_NET_RAW
+
+GoBGP's BFD requires `CAP_NET_RAW`. Binding a session to an interface uses
+`SO_BINDTODEVICE`, which needs that capability, and interface binding is exactly
+the unnumbered link-local case BFD is most often deployed for.
+
+This is a decision rather than an observation: a security review of the daemon
+would otherwise recommend dropping `NET_RAW` as unused, which is true only while
+BFD is disabled. Enabling BFD without it produces a session that cannot bind to
+its interface.
+
+**Blocker:** the pod manifest lives in the consumer repository (k8gobgp), not
+here, so this requirement has to be applied there. Nothing in this repository
+can enforce it.
+
+### Hop limit validation
+
+Control packets are sent with TTL / hop limit 255 as RFC 5881 §5 requires, and
+received packets carrying any other value are discarded. The receive check needs
+the kernel to report each datagram's TTL, via `IP_RECVTTL` and
+`IPV6_RECVHOPLIMIT`. Where that cannot be enabled the server logs a warning and
+continues **without** the check rather than dropping every packet; the
+`bgp_bfd_wrong_hop_limit_total` metric counts what it does discard.
 
 ## Troubleshooting
 

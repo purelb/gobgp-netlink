@@ -14505,8 +14505,14 @@ type BfdState struct {
 	ReceivedError  uint64                 `protobuf:"varint,3,opt,name=received_error,json=receivedError,proto3" json:"received_error,omitempty"`
 	InvalidPacket  uint64                 `protobuf:"varint,4,opt,name=invalid_packet,json=invalidPacket,proto3" json:"invalid_packet,omitempty"`
 	UnknownPeer    uint64                 `protobuf:"varint,5,opt,name=unknown_peer,json=unknownPeer,proto3" json:"unknown_peer,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Whether the BFD socket is actually bound. Configured-but-not-listening is
+	// the dangerous state: BGP comes up, peers exist, and nothing detects a
+	// failure, so an operator believes they have sub-second failover.
+	Listening bool `protobuf:"varint,6,opt,name=listening,proto3" json:"listening,omitempty"`
+	// Packets discarded for a TTL/hop limit other than 255, per RFC 5881 5.
+	WrongHopLimit uint64 `protobuf:"varint,7,opt,name=wrong_hop_limit,json=wrongHopLimit,proto3" json:"wrong_hop_limit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *BfdState) Reset() {
@@ -14570,6 +14576,20 @@ func (x *BfdState) GetInvalidPacket() uint64 {
 func (x *BfdState) GetUnknownPeer() uint64 {
 	if x != nil {
 		return x.UnknownPeer
+	}
+	return 0
+}
+
+func (x *BfdState) GetListening() bool {
+	if x != nil {
+		return x.Listening
+	}
+	return false
+}
+
+func (x *BfdState) GetWrongHopLimit() uint64 {
+	if x != nil {
+		return x.WrongHopLimit
 	}
 	return 0
 }
@@ -16894,13 +16914,15 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x04port\x18\x02 \x01(\rR\x04port\x12=\n" +
 	"\x1bdesired_minimum_tx_interval\x18\x03 \x01(\rR\x18desiredMinimumTxInterval\x128\n" +
 	"\x18required_minimum_receive\x18\x04 \x01(\rR\x16requiredMinimumReceive\x121\n" +
-	"\x14detection_multiplier\x18\x05 \x01(\rR\x13detectionMultiplier\"\xc9\x01\n" +
+	"\x14detection_multiplier\x18\x05 \x01(\rR\x13detectionMultiplier\"\x8f\x02\n" +
 	"\bBfdState\x12'\n" +
 	"\x0freceived_packet\x18\x01 \x01(\x04R\x0ereceivedPacket\x12#\n" +
 	"\rreceived_drop\x18\x02 \x01(\x04R\freceivedDrop\x12%\n" +
 	"\x0ereceived_error\x18\x03 \x01(\x04R\rreceivedError\x12%\n" +
 	"\x0einvalid_packet\x18\x04 \x01(\x04R\rinvalidPacket\x12!\n" +
-	"\funknown_peer\x18\x05 \x01(\x04R\vunknownPeer\"\x1a\n" +
+	"\funknown_peer\x18\x05 \x01(\x04R\vunknownPeer\x12\x1c\n" +
+	"\tlistening\x18\x06 \x01(\bR\tlistening\x12&\n" +
+	"\x0fwrong_hop_limit\x18\a \x01(\x04R\rwrongHopLimit\"\x1a\n" +
 	"\x18GetBfdServerStateRequest\"@\n" +
 	"\x19GetBfdServerStateResponse\x12#\n" +
 	"\x05state\x18\x01 \x01(\v2\r.api.BfdStateR\x05state\"\xc9\x01\n" +

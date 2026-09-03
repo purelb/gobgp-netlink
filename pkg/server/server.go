@@ -3727,11 +3727,12 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 		if err != nil {
 			return fmt.Errorf("failed to parse IP address: %v", err)
 		}
+		// Hard failure, not a warning. BFD configured but not listening means
+		// BGP comes up and nothing detects a peer failure, so the operator
+		// believes they have sub-second failover and has none. Refusing the
+		// neighbour surfaces that at config time instead.
 		if err := s.bfdServer.AddPeer(context.Background(), ipAddr, c.Bfd.Config, c.Transport.Config.BindInterface); err != nil {
-			s.logger.Warn("failed to add BFD peer",
-				slog.String("Topic", "Peer"),
-				slog.String("Key", addr),
-				slog.String("Err", err.Error()))
+			return fmt.Errorf("neighbor %s: %w", addr, err)
 		}
 	}
 	s.startFsmHandler(peer)

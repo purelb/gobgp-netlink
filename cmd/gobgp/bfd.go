@@ -152,9 +152,22 @@ func showBfd() error {
 		return nil
 	}
 
-	fmt.Printf("\nServer: rx %d  drop %d  error %d  invalid %d  unknown-peer %d\n",
+	listening := "LISTENING"
+	if !st.GetListening() {
+		listening = "NOT LISTENING"
+	}
+	fmt.Printf("\nServer: %s  rx %d  drop %d  error %d  invalid %d  unknown-peer %d\n",
+		listening,
 		st.GetReceivedPacket(), st.GetReceivedDrop(), st.GetReceivedError(),
 		st.GetInvalidPacket(), st.GetUnknownPeer())
+
+	// Worth spelling out: peers can be configured and BGP can be up while this
+	// is false, and nothing else says so.
+	if !st.GetListening() && len(peers) > 0 {
+		fmt.Printf("  %d peer(s) have BFD enabled but the server is not listening:\n"+
+			"    no failure detection is happening. Check for another process on the\n"+
+			"    BFD port, such as FRR's bfdd.\n", len(peers))
+	}
 
 	// These two are the ones worth explaining at the point of use, because both
 	// are silent everywhere else in the daemon.

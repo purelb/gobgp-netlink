@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -26,6 +27,16 @@ type bfdServerStats struct {
 	rxError       atomic.Uint64
 	invalidPacket atomic.Uint64
 	unknownPeer   atomic.Uint64
+	wrongHopLimit atomic.Uint64
+}
+
+// bfdRequiredHopLimit is RFC 5881 5's mandated TTL/hop limit for single-hop
+// BFD, both on transmit and on receive.
+const bfdRequiredHopLimit = 255
+
+type bfdEventConfig struct {
+	config *oc.BfdConfig
+	ack    chan struct{}
 }
 
 type bfdEventPeerUpdate struct {
@@ -33,6 +44,13 @@ type bfdEventPeerUpdate struct {
 	peerAddress   netip.Addr
 	config        oc.BfdConfig
 	bindInterface string
+	// result, when non-nil, receives whether the listener is up after this
+	// peer was added. The socket is bound lazily - binding at Start would
+	// claim UDP/3784 even for a daemon with no BFD peers, and on a host also
+	// running FRR's bfdd that is silent packet theft rather than a clean
+	// error. Lazy binding is therefore correct, but it used to mean a failure
+	// surfaced only as a 1s retry loop while BGP came up regardless.
+	result chan error
 }
 
 type bfdPeerState struct {
@@ -50,14 +68,21 @@ type bfdServer struct {
 
 	config *oc.BfdConfig
 
-	udpServer       *net.UDPConn
+	udpServer *net.UDPConn
+	// udpServerLive mirrors whether udpServer is bound. udpServer is only
+	// touched by the event loop, so a separate atomic lets metrics and the API
+	// read the state without racing that goroutine.
+	udpServerLive atomic.Bool
+	// gtsmRxAvailable records whether the kernel will report each datagram's
+	// TTL, which is what makes RFC 5881 5 enforceable on receive.
+	gtsmRxAvailable atomic.Bool
 	listenInterface string
 
 	peersMutex sync.RWMutex
 	peers      map[netip.Addr]*bfdPeer
 
 	eventStartStop  *time.Ticker
-	eventConfig     chan *oc.BfdConfig
+	eventConfig     chan *bfdEventConfig
 	eventPeerUpdate chan *bfdEventPeerUpdate
 	eventShutdown   chan struct{}
 	shutdownOnce    sync.Once
@@ -79,7 +104,7 @@ func NewBfdServer(ps peerState, logger *slog.Logger) *bfdServer {
 		peers: make(map[netip.Addr]*bfdPeer),
 
 		eventStartStop:  time.NewTicker(time.Second),
-		eventConfig:     make(chan *oc.BfdConfig, 1),
+		eventConfig:     make(chan *bfdEventConfig, 1),
 		eventPeerUpdate: make(chan *bfdEventPeerUpdate, 1),
 		eventShutdown:   make(chan struct{}),
 	}
@@ -94,12 +119,26 @@ func (s *bfdServer) Start(ctx context.Context, config oc.BfdConfig) error {
 		return errors.New("bfd server stopped")
 	}
 
+	// Acknowledged rather than fire-and-forget. Start and AddPeer post to
+	// different channels and select picks randomly among ready ones, so without
+	// this a peer could be processed while s.config is still nil - the listener
+	// would be skipped, and AddPeer would report a bind failure that is really
+	// just an ordering artefact.
+	ack := make(chan struct{}, 1)
+
 	select {
-	case s.eventConfig <- &config:
+	case s.eventConfig <- &bfdEventConfig{config: &config, ack: ack}:
 		if s.stopped.Load() {
 			return errors.New("bfd server stopped")
 		}
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.eventShutdown:
+		return errors.New("bfd server stopped")
+	}
 
+	select {
+	case <-ack:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -125,13 +164,25 @@ func (s *bfdServer) AddPeer(ctx context.Context, peerAddress netip.Addr, config 
 		return nil
 	}
 
+	// Buffered so the event loop never blocks if this caller goes away.
+	result := make(chan error, 1)
+
 	select {
-	case s.eventPeerUpdate <- &bfdEventPeerUpdate{isAdd: true, peerAddress: peerAddress, config: config, bindInterface: bindInterface}:
+	case s.eventPeerUpdate <- &bfdEventPeerUpdate{isAdd: true, peerAddress: peerAddress, config: config, bindInterface: bindInterface, result: result}:
 		if s.stopped.Load() {
 			return errors.New("bfd server stopped")
 		}
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.eventShutdown:
+		return errors.New("bfd server stopped")
+	}
 
-		return nil
+	// Wait for the listener outcome. Enabling BFD on a peer while the socket
+	// cannot be bound used to succeed here and retry forever in the background.
+	select {
+	case err := <-result:
+		return err
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-s.eventShutdown:
@@ -170,8 +221,29 @@ func (s *bfdServer) GetPeerStateList() []*bfdPeerState {
 	return s.getPeerStateList()
 }
 
+// listenPort is the UDP port the server listens on, defaulting to RFC 5881's
+// 3784 before any config has been applied.
+func (s *bfdServer) listenPort() uint16 {
+	if s.config != nil && s.config.Port != 0 {
+		return s.config.Port
+	}
+	return BfdServerPort
+}
+
+// IsListening reports whether the BFD socket is actually bound.
+//
+// A BFD server that is configured but not listening is the dangerous state:
+// BGP comes up, the peers exist, and nothing detects anything. It has to be
+// observable, because the operator's belief that they have sub-second failover
+// is otherwise unfalsifiable.
+func (s *bfdServer) IsListening() bool {
+	return s.udpServerLive.Load()
+}
+
 func (s *bfdServer) GetServerStats() *api.BfdState {
 	return &api.BfdState{
+		Listening:      s.udpServerLive.Load(),
+		WrongHopLimit:  s.stats.wrongHopLimit.Load(),
 		ReceivedPacket: s.stats.rxPacket.Load(),
 		ReceivedDrop:   s.stats.rxDrop.Load(),
 		ReceivedError:  s.stats.rxError.Load(),
@@ -202,12 +274,26 @@ func (s *bfdServer) loop() {
 				s.eventStartStop.Stop()
 			}
 		case ev := <-s.eventConfig:
-			s.config = ev
+			s.config = ev.config
+			if ev.ack != nil {
+				ev.ack <- struct{}{}
+			}
 		case ev := <-s.eventPeerUpdate:
+			var err error
 			if ev.isAdd {
 				s.addBfdPeer(ev.peerAddress, ev.config, ev.bindInterface)
+				// Bind now rather than waiting for the next tick, so the
+				// caller can be told. Retrying invisibly is what let an
+				// operator believe they had sub-second failover.
+				if !s.start() {
+					err = fmt.Errorf("BFD is enabled for %s but the server cannot listen on UDP %d",
+						ev.peerAddress, s.listenPort())
+				}
 			} else {
 				s.deleteBfdPeer(ev.peerAddress)
+			}
+			if ev.result != nil {
+				ev.result <- err
 			}
 
 			s.eventStartStop.Reset(time.Second)
@@ -243,12 +329,29 @@ func (s *bfdServer) startServer() {
 			}
 		}
 
+		// RFC 5881 5 requires discarding packets whose TTL/hop limit is not
+		// 255. Without this the receive path cannot see the value, so the
+		// protection was transmit-only. Recorded rather than fatal: on a
+		// platform that cannot report it, BFD should still run, just without
+		// the check, and say so.
+		if err := netutils.SetRecvHopLimitSockopt(sc); err != nil {
+			s.gtsmRxAvailable.Store(false)
+			s.logger.Warn("cannot enable receive hop-limit reporting; RFC 5881 GTSM validation is disabled",
+				slog.String("Topic", "bfd"),
+				slog.Any("Error", err),
+			)
+		} else {
+			s.gtsmRxAvailable.Store(true)
+		}
+
 		return netutils.SetReuseAddrSockopt(sc)
 	}
 
 	l, err := lc.ListenPacket(context.Background(), "udp", addressString)
 	if err != nil {
-		s.logger.Error("Can't listen UDP",
+		// Spelled out because the consequence is not obvious from a bind error:
+		// peers stay configured, BGP comes up, and nothing detects a failure.
+		s.logger.Error("BFD server cannot listen; sub-second failover is NOT active",
 			slog.String("Topic", "bfd"),
 			slog.String("Address", addressString),
 			slog.Any("Error", err),
@@ -266,6 +369,8 @@ func (s *bfdServer) startServer() {
 		)
 		return
 	}
+
+	s.udpServerLive.Store(true)
 
 	s.logger.Info("BFD server is started",
 		slog.String("Topic", "bfd"),
@@ -286,6 +391,7 @@ func (s *bfdServer) stop() {
 	s.udpServer.Close()
 	s.serverWait.Wait()
 	s.udpServer = nil
+	s.udpServerLive.Store(false)
 
 	s.logger.Info("BFD server is stopped",
 		slog.String("Topic", "bfd"),
@@ -414,8 +520,9 @@ func (s *bfdServer) serverLoop() {
 
 	// buffer size must be more than BFD Control Packet size
 	buffer := make([]byte, 4096)
+	oob := make([]byte, 128)
 	for {
-		length, address, err := s.udpServer.ReadFromUDP(buffer)
+		length, oobLen, _, address, err := s.udpServer.ReadMsgUDP(buffer, oob)
 		if err != nil {
 			select {
 			case <-s.serverStop:
@@ -425,6 +532,23 @@ func (s *bfdServer) serverLoop() {
 			}
 
 			continue
+		}
+
+		// RFC 5881 5: a single-hop session must discard anything that did not
+		// arrive with TTL/hop limit 255, which is what stops an off-path
+		// sender reaching the session at all. Only enforced when the kernel
+		// actually reports the value; otherwise the check is skipped rather
+		// than failing every packet closed.
+		if s.gtsmRxAvailable.Load() {
+			if hopLimit, ok := netutils.ParseHopLimit(oob[:oobLen]); ok && hopLimit != bfdRequiredHopLimit {
+				s.logger.Debug("Discarding BFD packet with wrong hop limit",
+					slog.String("Topic", "bfd"),
+					slog.Any("Peer", address),
+					slog.Int("HopLimit", hopLimit),
+				)
+				s.stats.wrongHopLimit.Add(1)
+				continue
+			}
 		}
 
 		bfdPacket := &bfd.BFDHeader{}

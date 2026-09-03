@@ -19,9 +19,13 @@ package netutils
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"fmt"
+	"net"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/stretchr/testify/require"
@@ -139,5 +143,80 @@ func Test_buildTcpMD5Sig_CIDR(t *testing.T) {
 				t.Error("Something wrong with cidr")
 			}
 		})
+	}
+}
+
+// TestRecvHopLimitReportsTheTTL proves RFC 5881 §5 is actually enforceable on
+// receive, on a real socket.
+//
+// Transmission already set TTL 255, but the receive path used ReadFromUDP and
+// never asked the kernel for the value, so the discard rule could not be
+// applied and GTSM was one-directional. A unit test of the parser alone would
+// not have caught that: the gap was that nothing ever requested the control
+// message.
+func TestRecvHopLimitReportsTheTTL(t *testing.T) {
+	// Both shapes matter. The BFD server binds ":3784", which is dual-stack,
+	// but a v4-only socket rejects the IPv6 option outright - and returning
+	// that error disabled the check on exactly the sockets where IP_RECVTTL
+	// had in fact been applied.
+	for _, addr := range []string{"127.0.0.1:0", ":0"} {
+		t.Run(addr, func(t *testing.T) { testRecvHopLimit(t, addr) })
+	}
+}
+
+func testRecvHopLimit(t *testing.T, listenAddr string) {
+	var setErr error
+	var lc net.ListenConfig
+	lc.Control = func(_, _ string, sc syscall.RawConn) error {
+		setErr = SetRecvHopLimitSockopt(sc)
+		return nil
+	}
+
+	c, err := lc.ListenPacket(context.Background(), "udp", listenAddr)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer c.Close()
+	if setErr != nil {
+		t.Fatalf("SetRecvHopLimitSockopt: %v", setErr)
+	}
+
+	uc, ok := c.(*net.UDPConn)
+	if !ok {
+		t.Fatal("not a UDP connection")
+	}
+
+	target := uc.LocalAddr().String()
+	if listenAddr == ":0" {
+		target = fmt.Sprintf("127.0.0.1:%d", uc.LocalAddr().(*net.UDPAddr).Port)
+	}
+	d, err := net.Dial("udp", target)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer d.Close()
+	if _, err := d.Write([]byte("probe")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := uc.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("deadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	oob := make([]byte, 128)
+	_, oobn, _, _, err := uc.ReadMsgUDP(buf, oob)
+	if err != nil {
+		t.Fatalf("readmsg: %v", err)
+	}
+
+	hopLimit, present := ParseHopLimit(oob[:oobn])
+	if !present {
+		t.Fatal("no TTL control message: the discard rule cannot be enforced, " +
+			"which is exactly the gap this exists to close")
+	}
+	// Loopback delivers the sender's default TTL, not 255; the point is that a
+	// value is reported at all, so a wrong one can be rejected.
+	if hopLimit <= 0 || hopLimit > 255 {
+		t.Fatalf("implausible hop limit %d", hopLimit)
 	}
 }
