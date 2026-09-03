@@ -23,6 +23,12 @@ jobs:
   protobuf-check:
     name: protobuf lint and format check
     runs-on: ubuntu-22.04
+    # buf breaking reads the PR's labels through the API, so the token needs to
+    # see pull requests. Declared explicitly because naming any permission drops
+    # the rest to none, and checkout still needs contents.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v7
       # buf-setup-action still declares node20 and there is no release that
@@ -52,8 +58,26 @@ jobs:
       # intent recorded on the PR rather than in a commit that edits this file
       # twice.
       - name: buf breaking
-        if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'proto-break')
-        run: buf breaking proto/ --against "https://github.com/purelb/gobgp-netlink.git#branch=main,subdir=proto"
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # The label is read live rather than from github.event.pull_request.labels.
+        # That payload is frozen when the event fires, and `gh pr create --label`
+        # attaches labels *after* creating the PR - a few seconds after the opened
+        # event - so the payload arrives with an empty labels array and the gate
+        # fires on a break that was already approved. Adding the label afterwards
+        # does not help either: `pull_request` defaults to opened/synchronize/
+        # reopened, so a `labeled` event never re-runs this. Asking the API at run
+        # time removes the race without widening the trigger, which would re-run
+        # all 40 jobs on every label change.
+        run: |
+          if gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' \
+              | grep -qx 'proto-break'; then
+            echo "proto-break label present: deliberate wire break, skipping."
+            exit 0
+          fi
+          buf breaking proto/ --against "https://github.com/purelb/gobgp-netlink.git#branch=main,subdir=proto"
 
       # api/*.pb.go is generated and committed. Nothing checked that it still
       # matches the .proto, so a hand edit or a stale regeneration was invisible.
@@ -162,7 +186,7 @@ jobs:
         with:
           go-version: "stable"
 
-      # Nothing checked the files that define all 41 jobs. A workflow can be
+      # Nothing checked the files that define all 40 jobs. A workflow can be
       # valid YAML and still be rejected by GitHub: a step with two `with:`
       # blocks parses fine, because YAML keeps the last duplicate key, and the
       # run then starts with zero jobs and a bare "workflow file issue" - which
