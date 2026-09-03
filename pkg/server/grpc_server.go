@@ -1060,6 +1060,10 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 		return oc.BfdConfig{}, fmt.Errorf("invalid BFD detection multiplier: %d", a.DetectionMultiplier)
 	}
 
+	// No timing floor here: these values are pre-default, so an unset interval
+	// is still zero. BfdConfig.Validate runs from SetDefaultNeighborConfigValues,
+	// which addNeighbor calls for the API path too, so the floor is enforced once
+	// against the values the session will actually run with.
 	return oc.BfdConfig{
 		Enabled:                  a.Enabled,
 		Port:                     uint16(a.Port),

@@ -283,9 +283,12 @@ func Test_BgpAddDeletePeer(t *testing.T) {
 		},
 		Bfd: oc.Bfd{
 			Config: oc.BfdConfig{
-				Enabled:                  true,
-				DetectionMultiplier:      7,
-				RequiredMinimumReceive:   123000,
+				Enabled:             true,
+				DetectionMultiplier: 7,
+				// Distinctive values to prove peer-group inheritance. They must
+				// stay at or above the 300ms floor BfdConfig.Validate enforces;
+				// the exact numbers carry no meaning beyond being recognisable.
+				RequiredMinimumReceive:   321000,
 				DesiredMinimumTxInterval: 456000,
 			},
 		},
@@ -413,9 +416,12 @@ func Test_BgpAddDeletePeerWithDisabledBfd(t *testing.T) {
 		},
 		Bfd: oc.Bfd{
 			Config: oc.BfdConfig{
-				Enabled:                  true,
-				DetectionMultiplier:      7,
-				RequiredMinimumReceive:   123000,
+				Enabled:             true,
+				DetectionMultiplier: 7,
+				// Distinctive values to prove peer-group inheritance. They must
+				// stay at or above the 300ms floor BfdConfig.Validate enforces;
+				// the exact numbers carry no meaning beyond being recognisable.
+				RequiredMinimumReceive:   321000,
 				DesiredMinimumTxInterval: 456000,
 			},
 		},

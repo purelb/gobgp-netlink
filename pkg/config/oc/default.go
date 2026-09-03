@@ -277,6 +277,11 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 	if n.Bfd.Config.RequiredMinimumReceive == 0 {
 		n.Bfd.Config.RequiredMinimumReceive = 1000000 // 1s in microseconds
 	}
+	// After defaulting, so an omitted interval is checked as the value it will
+	// actually run with rather than as zero.
+	if err := n.Bfd.Config.Validate(); err != nil {
+		return fmt.Errorf("neighbor %s: %w", n.State.NeighborAddress, err)
+	}
 	return nil
 }
 

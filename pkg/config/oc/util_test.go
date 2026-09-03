@@ -371,3 +371,110 @@ func TestNewAPIPrefixFromConfigStructRtc(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(&api.Prefix{RtcPrefix: "0:0:0/0", MaskLengthMin: 0, MaskLengthMax: 96}, out)
 }
+
+// TestBfdConfigValidateEnforcesTheSupportedProfile pins plan §7.2's floor.
+//
+// The knob was unbounded: the only check anywhere was that the detection
+// multiplier fits in a uint8, and any positive interval went straight into a
+// time.Ticker. Two things make that dangerous rather than merely permissive.
+//
+// The units are microseconds and the pyang-generated Go drops the `units`
+// comment, so 300 written by someone thinking in milliseconds is 300us - about
+// 3,300 packets a second per peer. And under limits.cpu 500m a CFS stall of
+// ~75ms is 8% of a 900ms detection budget but 50% of a 150ms one, so fast
+// timers turn a scheduling hiccup into a false session-down.
+func TestBfdConfigValidateEnforcesTheSupportedProfile(t *testing.T) {
+	base := func() BfdConfig {
+		return BfdConfig{
+			Enabled:                  true,
+			DetectionMultiplier:      3,
+			RequiredMinimumReceive:   300000,
+			DesiredMinimumTxInterval: 300000,
+		}
+	}
+
+	t.Run("the supported profile is accepted", func(t *testing.T) {
+		c := base()
+		assert.NoError(t, c.Validate())
+	})
+
+	t.Run("disabled BFD is never validated", func(t *testing.T) {
+		c := base()
+		c.Enabled = false
+		c.RequiredMinimumReceive = 1
+		c.DetectionMultiplier = 1
+		assert.NoError(t, c.Validate(),
+			"timings on a disabled session never reach a ticker")
+	})
+
+	t.Run("milliseconds mistaken for microseconds are rejected", func(t *testing.T) {
+		c := base()
+		c.RequiredMinimumReceive = 300 // meant 300ms, is 300us
+		err := c.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "MICROSECONDS",
+			"the error has to name the unit; a bare bound is what makes this mistake repeatable")
+	})
+
+	t.Run("intervals below the floor are rejected", func(t *testing.T) {
+		c := base()
+		c.DesiredMinimumTxInterval = BfdMinIntervalMicros - 1
+		assert.Error(t, c.Validate())
+
+		c = base()
+		c.RequiredMinimumReceive = BfdMinIntervalMicros - 1
+		assert.Error(t, c.Validate())
+	})
+
+	t.Run("a multiplier below 3 is rejected", func(t *testing.T) {
+		c := base()
+		c.DetectionMultiplier = 1
+		err := c.Validate()
+		assert.Error(t, err, "multiplier 1 expires the session on one lost packet")
+		assert.Contains(t, err.Error(), "detection-multiplier")
+	})
+}
+
+// TestSetDefaultNeighborConfigValuesEnforcesBfdFloor proves the floor is
+// actually wired into the config path, not merely implemented.
+//
+// A validator nobody calls is the failure mode this fork has hit repeatedly:
+// the function survives, the call site is dropped, everything compiles and every
+// unit test of the function still passes. Deleting the Validate call from
+// SetDefaultNeighborConfigValues was caught by no test until this one existed.
+func TestSetDefaultNeighborConfigValuesEnforcesBfdFloor(t *testing.T) {
+	neighbor := func(rx uint32) *Neighbor {
+		return &Neighbor{
+			Config: NeighborConfig{
+				NeighborAddress: netip.MustParseAddr("192.0.2.1"),
+				PeerAs:          65001,
+			},
+			Bfd: Bfd{Config: BfdConfig{
+				Enabled:                  true,
+				DetectionMultiplier:      3,
+				DesiredMinimumTxInterval: 300000,
+				RequiredMinimumReceive:   rx,
+			}},
+		}
+	}
+
+	err := SetDefaultNeighborConfigValues(neighbor(300000), nil, &Global{})
+	assert.NoError(t, err, "the supported profile must survive defaulting")
+
+	err = SetDefaultNeighborConfigValues(neighbor(1000), nil, &Global{})
+	require.Error(t, err, "a sub-floor interval must be rejected where configs are built")
+	assert.Contains(t, err.Error(), "192.0.2.1",
+		"the error must name the neighbor, or an operator cannot tell which one")
+
+	// Omitted timings are defaulted to 1s x 3, comfortably above the floor, so
+	// defaulting must not trip the validator it now runs.
+	bare := &Neighbor{
+		Config: NeighborConfig{
+			NeighborAddress: netip.MustParseAddr("192.0.2.2"),
+			PeerAs:          65001,
+		},
+		Bfd: Bfd{Config: BfdConfig{Enabled: true}},
+	}
+	assert.NoError(t, SetDefaultNeighborConfigValues(bare, nil, &Global{}),
+		"an enabled peer with no explicit timings must default, not fail")
+}
