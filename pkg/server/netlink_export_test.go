@@ -889,3 +889,31 @@ func TestNetlinkSocketTimeoutIsSet(t *testing.T) {
 	assert.GreaterOrEqual(t, netlinkSocketTimeout, 30*time.Second,
 		"must stay generous: cleanupStaleRoutes dumps whole routing tables")
 }
+
+// TestListVrfReportsNetlinkImport gates the netlink import information that
+// `gobgp vrf` shows.
+//
+// Netlink import is configured per VRF in bgpConfig, not on the RIB's VRF, so
+// ListVrf has to look it up. Nothing asserted that it did, and the v4.9.0 merge
+// dropped the lookup while still compiling: the column simply went blank. That
+// is the same shape as the other hooks the merge lost - a call site inside a
+// function that was replaced wholesale - and it is invisible to the compiler
+// because the field just stays at its zero value.
+func TestListVrfReportsNetlinkImport(t *testing.T) {
+	s := newVrfTestServer(t)
+	addTestVrf(t, s, "vrf1", "100:1")
+
+	// Configure netlink import for it, the way EnableVrfNetlinkImport does.
+	assert.NoError(t, s.EnableVrfNetlinkImport(context.Background(),
+		&api.EnableVrfNetlinkImportRequest{Vrf: "vrf1", Interfaces: []string{"eth0", "eth1"}}))
+
+	var got *api.Vrf
+	assert.NoError(t, s.ListVrf(context.Background(), &api.ListVrfRequest{Name: "vrf1"},
+		func(v *api.Vrf) { got = v }))
+
+	if assert.NotNil(t, got, "the VRF must be listed") {
+		assert.True(t, got.GetNetlink().GetImportEnabled(),
+			"ListVrf must report netlink import; a blank column is the symptom")
+		assert.Equal(t, []string{"eth0", "eth1"}, got.GetNetlink().GetImportInterfaces())
+	}
+}

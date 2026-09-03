@@ -871,8 +871,20 @@ message Path {
   bytes nlri_binary = 20;
   repeated bytes pattrs_binary = 21;
   bool send_max_filtered = 22;
-  bool is_netlink = 23;
-  string netlink_if_name = 24;
+  // Fork-local fields live at 200+ so upstream keeps the low numbers. 23 and 24
+  // were one upstream field away from colliding, which is exactly how
+  // PeerState.ipv4_nexthop met BfdPeerState.
+  NetlinkPathInfo netlink = 200;
+}
+
+// NetlinkPathInfo describes a path this daemon learned from the Linux kernel
+// rather than from a peer. Its presence is what marks the path as netlink
+// sourced; is_netlink is kept so a consumer reading the field directly does not
+// have to test for the message.
+message NetlinkPathInfo {
+  bool is_netlink = 1;
+  // Interface the connected route was read from.
+  string if_name = 2;
 }
 
 message Destination {
@@ -1512,8 +1524,15 @@ message Vrf {
   repeated RouteTarget import_rt = 3;
   repeated RouteTarget export_rt = 4;
   uint32 id = 5;
-  bool netlink_import_enabled = 6;
-  repeated string netlink_import_interfaces = 7;
+  // Fork-local, at 200+ for the same reason as Path.netlink. Upstream's Vrf
+  // currently stops at 5, so 6 and 7 were the next numbers it would take.
+  VrfNetlinkInfo netlink = 200;
+}
+
+// VrfNetlinkInfo is the netlink import state of a VRF.
+message VrfNetlinkInfo {
+  bool import_enabled = 1;
+  repeated string import_interfaces = 2;
 }
 
 message DefaultRouteDistance {

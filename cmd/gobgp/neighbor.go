@@ -648,8 +648,8 @@ func makeShowRouteArgs(p *api.Path, idx int, now time.Time, showAge, showBest, s
 	attrs, _ := apiutil.GetNativePathAttributes(p)
 	// Next Hop
 	nexthop := "fictitious"
-	if p.IsNetlink {
-		nexthop = p.NetlinkIfName
+	if p.GetNetlink().GetIsNetlink() {
+		nexthop = p.GetNetlink().GetIfName()
 	} else if n := getNextHopFromPathAttributes(attrs); n.IsValid() {
 		nexthop = n.String()
 	}

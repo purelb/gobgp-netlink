@@ -72,7 +72,7 @@ func showVrfs() error {
 	// Check if any VRF has netlink import enabled
 	hasNetlinkImport := false
 	for _, v := range vrfs {
-		if v.NetlinkImportEnabled {
+		if v.GetNetlink().GetImportEnabled() {
 			hasNetlinkImport = true
 			break
 		}
@@ -119,8 +119,8 @@ func showVrfs() error {
 		var line []string
 		if hasNetlinkImport {
 			netlinkImport := ""
-			if v.NetlinkImportEnabled {
-				netlinkImport = strings.Join(v.NetlinkImportInterfaces, ", ")
+			if v.GetNetlink().GetImportEnabled() {
+				netlinkImport = strings.Join(v.GetNetlink().GetImportInterfaces(), ", ")
 			}
 			line = []string{name, rdStr, importRts, exportRts, fmt.Sprintf("%d", v.Id), netlinkImport}
 			for i, val := range []int{len(name), len(rdStr), len(importRts), len(exportRts), 0, len(netlinkImport)} {

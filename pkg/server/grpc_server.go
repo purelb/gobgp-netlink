@@ -233,8 +233,10 @@ func toPathAPI(binNlri []byte, binPattrs [][]byte, anyNlri *api.NLRI, anyPattrs 
 		SendMaxFiltered: path.SendMaxFiltered,
 		Filtered:        path.Filtered,
 		Validation:      path.Validation,
-		IsNetlink:       path.IsNetlink,
-		NetlinkIfName:   path.NetlinkIfName,
+		Netlink: &api.NetlinkPathInfo{
+			IsNetlink: path.IsNetlink,
+			IfName:    path.NetlinkIfName,
+		},
 	}
 	if path.PeerID.IsValid() {
 		p.SourceId = path.PeerID.String()
