@@ -260,15 +260,9 @@ Set it per family only to enable GR for some families and not others: a
 neighbour with GR enabled and no family flagged advertises the capability with
 an empty AFI/SAFI list, which negotiates successfully and retains nothing.
 
-### Deployment requirement
-
-A graceful shutdown needs time to happen. Under Kubernetes the pod must set
-`terminationGracePeriodSeconds` long enough for gobgpd to close its sessions,
-and a `preStop` hook if anything must drain first; otherwise SIGKILL arrives
-mid-shutdown and the result is indistinguishable from an ungraceful stop.
-
-**Blocker:** that manifest lives in the consumer repository, not here. Nothing
-in this repository can enforce it.
+Closing sessions takes a moment, so whatever supervises `gobgpd` has to allow
+time between SIGTERM and SIGKILL. Killed mid-shutdown, the result is
+indistinguishable from an ungraceful stop.
 
 ### Interaction with BFD
 
