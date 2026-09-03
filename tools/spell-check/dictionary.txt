@@ -17,6 +17,7 @@ enlp
 ethernet
 etree
 evpn
+failover
 fapm
 flowspec
 gobgp
@@ -24,6 +25,7 @@ gobgpd
 goroutine
 goroutines
 grpc
+gtsm
 gzip
 ibgp
 interwork
@@ -50,6 +52,10 @@ ospf
 pmsi
 prepend
 reachability
+readmsg
+recv
+recvhoplimit
+recvttl
 regexp
 reservable
 reuseaddr
@@ -57,6 +63,7 @@ rpki
 rtprot
 sadb
 safi
+sockopt
 srgb
 srlg
 subcode

@@ -282,3 +282,49 @@ func DialerControl(logger *slog.Logger, network, address string, c syscall.RawCo
 	}
 	return nil
 }
+
+// SetRecvHopLimitSockoptImpl asks the kernel to attach the received TTL (IPv4)
+// and hop limit (IPv6) to each datagram as a control message.
+//
+// RFC 5881 §5 requires a single-hop BFD implementation to discard packets whose
+// TTL or hop limit is not 255. Transmission already sets 255, but without these
+// options the receive path cannot see the value at all, so the check could not
+// be made and the protection was one-directional.
+//
+// The socket is dual-stack, so both options are set. IPv4 is best-effort: on a
+// v6-only socket IP_RECVTTL is not meaningful and its failure must not stop the
+// v6 option being applied.
+func SetRecvHopLimitSockopt(sc syscall.RawConn) error {
+	// Both are attempted because the family of the socket is not known here.
+	// A v4-only socket rejects the IPv6 option with ENOPROTOOPT and vice versa,
+	// so success is "at least one applied": requiring both would disable the
+	// check on every single-family listener.
+	errV4 := setSockOptInt(sc, syscall.IPPROTO_IP, syscall.IP_RECVTTL, 1)
+	errV6 := setSockOptInt(sc, syscall.IPPROTO_IPV6, unix.IPV6_RECVHOPLIMIT, 1)
+	if errV4 != nil && errV6 != nil {
+		return fmt.Errorf("neither IP_RECVTTL (%v) nor IPV6_RECVHOPLIMIT (%v) could be set", errV4, errV6)
+	}
+	return nil
+}
+
+// ParseHopLimitImpl extracts the received TTL (IPv4) or hop limit (IPv6) from a
+// datagram's control messages. The second return is false when neither is
+// present, which a caller must not treat as a hop limit of zero.
+func ParseHopLimit(oob []byte) (int, bool) {
+	msgs, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return 0, false
+	}
+	for _, m := range msgs {
+		switch {
+		case m.Header.Level == syscall.IPPROTO_IP && m.Header.Type == syscall.IP_TTL,
+			m.Header.Level == syscall.IPPROTO_IPV6 && m.Header.Type == unix.IPV6_HOPLIMIT:
+			if len(m.Data) >= 1 {
+				// Both are delivered as a C int in native byte order; the low
+				// byte carries the value for any plausible TTL.
+				return int(m.Data[0]), true
+			}
+		}
+	}
+	return 0, false
+}

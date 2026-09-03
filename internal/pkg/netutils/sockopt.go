@@ -89,3 +89,15 @@ func DialerControl(logger *slog.Logger, network, address string, c syscall.RawCo
 	}
 	return nil
 }
+
+// SetRecvHopLimitSockopt enables per-datagram TTL/hop-limit reporting so a
+// receiver can enforce RFC 5881 §5.
+func SetRecvHopLimitSockopt(sc syscall.RawConn) error {
+	return SetRecvHopLimitSockoptImpl(sc)
+}
+
+// ParseHopLimit returns the received TTL or hop limit from a datagram's control
+// messages, and whether one was present.
+func ParseHopLimit(oob []byte) (int, bool) {
+	return ParseHopLimitImpl(oob)
+}

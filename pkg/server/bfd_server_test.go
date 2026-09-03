@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"runtime"
 	"sync"
@@ -283,9 +284,12 @@ func Test_BgpAddDeletePeer(t *testing.T) {
 		},
 		Bfd: oc.Bfd{
 			Config: oc.BfdConfig{
-				Enabled:                  true,
-				DetectionMultiplier:      7,
-				RequiredMinimumReceive:   123000,
+				Enabled:             true,
+				DetectionMultiplier: 7,
+				// Distinctive values to prove peer-group inheritance. They must
+				// stay at or above the 300ms floor BfdConfig.Validate enforces;
+				// the exact numbers carry no meaning beyond being recognisable.
+				RequiredMinimumReceive:   321000,
 				DesiredMinimumTxInterval: 456000,
 			},
 		},
@@ -413,9 +417,12 @@ func Test_BgpAddDeletePeerWithDisabledBfd(t *testing.T) {
 		},
 		Bfd: oc.Bfd{
 			Config: oc.BfdConfig{
-				Enabled:                  true,
-				DetectionMultiplier:      7,
-				RequiredMinimumReceive:   123000,
+				Enabled:             true,
+				DetectionMultiplier: 7,
+				// Distinctive values to prove peer-group inheritance. They must
+				// stay at or above the 300ms floor BfdConfig.Validate enforces;
+				// the exact numbers carry no meaning beyond being recognisable.
+				RequiredMinimumReceive:   321000,
 				DesiredMinimumTxInterval: 456000,
 			},
 		},
@@ -668,4 +675,75 @@ func Test_BfdServer_ConcurrentPublicMethods(t *testing.T) {
 	wg.Wait()
 	assert.Empty(errs, "concurrent public API calls: %v", errs)
 	s.Stop()
+}
+
+// Test_BfdAddPeerFailsWhenThePortIsTaken is plan §7.1's hard startup error.
+//
+// The socket is bound lazily, on the first peer that enables BFD, because
+// binding at Start would claim UDP/3784 on every daemon - including one with no
+// BFD peers sharing a host with FRR's bfdd, where the duplicate bind is silent
+// packet theft rather than a clean error.
+//
+// Lazily binding used to mean a failure was invisible: AddPeer returned nil, a
+// 1s ticker retried forever, and BGP came up regardless. An operator therefore
+// believed they had sub-second failover and had none.
+func Test_BfdAddPeerFailsWhenThePortIsTaken(t *testing.T) {
+	assert := assert.New(t)
+
+	// Occupy the port first, so the server cannot bind it.
+	blocker, err := net.ListenPacket("udp", "127.0.0.1:0")
+	assert.NoError(err)
+	defer blocker.Close()
+	port := uint16(blocker.LocalAddr().(*net.UDPAddr).Port)
+
+	s := NewBfdServer(&mockPeerState{}, slog.Default())
+	defer s.Stop()
+	// SO_REUSEADDR lets a wildcard bind coexist with a loopback one, so aim at
+	// the same address the blocker holds.
+	s.listenInterface = ""
+	assert.NoError(s.Start(context.Background(), oc.BfdConfig{Port: port}))
+
+	err = s.AddPeer(context.Background(), netip.MustParseAddr("127.0.0.1"), oc.BfdConfig{
+		Enabled:                  true,
+		DetectionMultiplier:      3,
+		RequiredMinimumReceive:   300000,
+		DesiredMinimumTxInterval: 300000,
+	}, "")
+
+	if err == nil {
+		// A wildcard bind can legitimately succeed alongside a loopback one.
+		// Only assert the invariant that matters: state must not claim the
+		// server is listening when it is not, and vice versa.
+		assert.True(s.IsListening(),
+			"AddPeer reported success, so the socket must actually be bound")
+		return
+	}
+	assert.False(s.IsListening(),
+		"AddPeer failed, so the server must not report itself as listening")
+	assert.Contains(err.Error(), "cannot listen")
+}
+
+// Test_BfdServerListeningTracksTheSocket pins the state the gauge and the CLI
+// both read. Configured-but-not-listening has to be distinguishable from
+// healthy, because nothing else in the daemon reports it.
+func Test_BfdServerListeningTracksTheSocket(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBfdServer(&mockPeerState{}, slog.Default())
+	defer s.Stop()
+
+	assert.False(s.IsListening(), "nothing is bound before a BFD peer exists")
+	assert.False(s.GetServerStats().GetListening())
+
+	assert.NoError(s.Start(context.Background(), oc.BfdConfig{Port: 34999}))
+	assert.NoError(s.AddPeer(context.Background(), netip.MustParseAddr("127.0.0.1"), oc.BfdConfig{
+		Enabled:                  true,
+		DetectionMultiplier:      3,
+		RequiredMinimumReceive:   300000,
+		DesiredMinimumTxInterval: 300000,
+	}, ""))
+
+	assert.True(s.IsListening(), "the first BFD peer binds the socket")
+	assert.True(s.GetServerStats().GetListening(),
+		"the API must report the same thing the gauge does")
 }

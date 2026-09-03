@@ -994,3 +994,50 @@ func NewAPIDefinedSetsFromConfigStruct(t *DefinedSets) ([]*api.DefinedSet, error
 
 	return definedSets, nil
 }
+
+// BFD timing floor. The plan's CFS arithmetic: under limits.cpu 500m, Go gives
+// GOMAXPROCS=2 and the quota exhausts after ~25ms, leaving a ~75ms worst-case
+// freeze. Against a 900ms detection time that stall is 8% of the budget; at
+// 300ms detection it is 25%, and at 150ms it is 50% and no longer viable.
+//
+// So 300ms x 3 is the fastest profile that survives a scheduling stall on a
+// CPU-limited node. Anything faster needs requests.cpu == limits.cpu, which is
+// a deployment decision this daemon cannot verify, so the knob is bounded here
+// rather than shipped open.
+const (
+	BfdMinIntervalMicros      = 300000
+	BfdMinDetectionMultiplier = 3
+)
+
+// Validate rejects BFD timings below the supported profile.
+//
+// The units are the trap this exists to catch. The YANG declares these in
+// microseconds and the generated Go drops the `units` comment, so `300` written
+// by someone thinking in milliseconds is 300us - roughly 3,300 packets a second
+// per peer. The error says so explicitly rather than reporting a bare bound.
+func (c *BfdConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.DetectionMultiplier < BfdMinDetectionMultiplier {
+		return fmt.Errorf("bfd detection-multiplier %d is below the minimum of %d: "+
+			"a lower multiplier expires the session on a single lost packet",
+			c.DetectionMultiplier, BfdMinDetectionMultiplier)
+	}
+	for _, f := range []struct {
+		name  string
+		value uint32
+	}{
+		{"desired-minimum-tx-interval", c.DesiredMinimumTxInterval},
+		{"required-minimum-receive", c.RequiredMinimumReceive},
+	} {
+		if f.value < BfdMinIntervalMicros {
+			return fmt.Errorf("bfd %s is %d microseconds (%v), below the minimum of %d (%v); "+
+				"note these intervals are in MICROSECONDS, so 300ms is %d, not 300",
+				f.name, f.value, time.Duration(f.value)*time.Microsecond,
+				BfdMinIntervalMicros, time.Duration(BfdMinIntervalMicros)*time.Microsecond,
+				BfdMinIntervalMicros)
+		}
+	}
+	return nil
+}

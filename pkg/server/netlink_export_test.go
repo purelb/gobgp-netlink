@@ -952,21 +952,42 @@ func TestDampeningFlushIsBudgeted(t *testing.T) {
 	assert.Equal(t, total, pending, "every prefix should be pending")
 	assert.True(t, armed, "a single flush timer should be armed")
 
-	// The first pass must not program everything: that is the burst bound.
-	assert.Eventually(t, func() bool {
-		replace, _, _ := f.counts()
-		return replace > 0
-	}, 2*time.Second, 5*time.Millisecond, "the flush should start")
+	// The flush is driven directly rather than waited for. Polling for the
+	// first pass raced the re-arm: the yield and the poll interval are both
+	// 5ms, so a second pass could complete between the poll observing a
+	// non-zero count and the assertion re-reading it, and under load that gap
+	// widens. Calling flushDampened makes "one pass" exact instead of
+	// approximate.
+	makeDue := func() {
+		e.dampenMu.Lock()
+		if e.flushTimer != nil {
+			e.flushTimer.Stop()
+			e.flushTimer = nil
+		}
+		for _, entry := range e.pendingUpdates {
+			entry.dueAt = time.Now().Add(-time.Millisecond)
+		}
+		e.dampenMu.Unlock()
+	}
+
+	makeDue()
+	e.flushDampened()
 
 	replace, _, _ := f.counts()
-	assert.LessOrEqual(t, replace, dampenFlushBudget,
-		"one pass must not exceed the budget; that is what throttles the cgroup")
+	assert.Equal(t, dampenFlushBudget, replace,
+		"one pass must program exactly the budget; that is what throttles the cgroup")
 
-	// But everything still lands, and reasonably promptly.
-	assert.Eventually(t, func() bool {
-		replace, _, _ := f.counts()
-		return replace == total
-	}, 5*time.Second, 10*time.Millisecond, "the whole burst must still be programmed")
+	// Everything still lands across subsequent passes.
+	for range 10 {
+		if r, _, _ := f.counts(); r == total {
+			break
+		}
+		makeDue()
+		e.flushDampened()
+	}
+
+	replace, _, _ = f.counts()
+	assert.Equal(t, total, replace, "the whole burst must still be programmed")
 
 	e.dampenMu.Lock()
 	left := len(e.pendingUpdates)

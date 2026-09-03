@@ -51,6 +51,15 @@ func bfdStateName(s api.BfdSessionState) string {
 	return name
 }
 
+// bfdDiagName renders a diagnostic code without its enum prefix, lowercased.
+func bfdDiagName(d api.BfdDiagnosticCode) string {
+	name := strings.TrimPrefix(d.String(), "BFD_DIAGNOSTIC_CODE_")
+	if name == "" {
+		return "-"
+	}
+	return strings.ToLower(strings.ReplaceAll(name, "_", " "))
+}
+
 // bfdInterval renders a microsecond interval the way it was almost certainly
 // meant to be read.
 func bfdInterval(micros uint32) string {
@@ -72,10 +81,10 @@ func showBfdNeighbor(p *api.Peer) {
 	detect := time.Duration(conf.GetDetectionMultiplier()) *
 		time.Duration(conf.GetRequiredMinimumReceive()) * time.Microsecond
 
-	// Remote session state and the diagnostic codes exist in the proto but are
-	// never populated by the BFD peer, so they are not printed: a blank "remote"
-	// or a default "no diagnostic" reads as knowledge we do not have.
-	fmt.Printf("  BFD: enabled, session %s\n", bfdStateName(state.GetSessionState()))
+	fmt.Printf("  BFD: enabled, session %s (remote %s), diagnostic: %s\n",
+		bfdStateName(state.GetSessionState()),
+		bfdStateName(state.GetRemoteSessionState()),
+		bfdDiagName(state.GetLocalDiagnosticCode()))
 	fmt.Printf("    Intervals: tx %s, rx %s, multiplier %d (detect %s), port %d\n",
 		bfdInterval(conf.GetDesiredMinimumTxInterval()),
 		bfdInterval(conf.GetRequiredMinimumReceive()),
@@ -131,14 +140,15 @@ func showBfd() error {
 	if len(peers) == 0 {
 		fmt.Println("No peers have BFD enabled.")
 	} else {
-		fmt.Printf("%-32s %-6s %-10s %-10s %s\n",
-			"Peer", "State", "Tx", "Rx", "Transitions")
+		fmt.Printf("%-32s %-6s %-6s %-9s %-9s %s\n",
+			"Peer", "State", "Remote", "Tx", "Rx", "Transitions")
 		for _, p := range peers {
 			s := p.GetState().GetBfdState()
 			a := s.GetBfdAsync()
-			fmt.Printf("%-32s %-6s %-10d %-10d %d\n",
+			fmt.Printf("%-32s %-6s %-6s %-9d %-9d %d\n",
 				p.GetState().GetNeighborAddress(),
 				bfdStateName(s.GetSessionState()),
+				bfdStateName(s.GetRemoteSessionState()),
 				a.GetTransmittedPackets(), a.GetReceivedPackets(),
 				s.GetFailureTransitions())
 		}
@@ -152,9 +162,22 @@ func showBfd() error {
 		return nil
 	}
 
-	fmt.Printf("\nServer: rx %d  drop %d  error %d  invalid %d  unknown-peer %d\n",
+	listening := "LISTENING"
+	if !st.GetListening() {
+		listening = "NOT LISTENING"
+	}
+	fmt.Printf("\nServer: %s  rx %d  drop %d  error %d  invalid %d  unknown-peer %d\n",
+		listening,
 		st.GetReceivedPacket(), st.GetReceivedDrop(), st.GetReceivedError(),
 		st.GetInvalidPacket(), st.GetUnknownPeer())
+
+	// Worth spelling out: peers can be configured and BGP can be up while this
+	// is false, and nothing else says so.
+	if !st.GetListening() && len(peers) > 0 {
+		fmt.Printf("  %d peer(s) have BFD enabled but the server is not listening:\n"+
+			"    no failure detection is happening. Check for another process on the\n"+
+			"    BFD port, such as FRR's bfdd.\n", len(peers))
+	}
 
 	// These two are the ones worth explaining at the point of use, because both
 	// are silent everywhere else in the daemon.

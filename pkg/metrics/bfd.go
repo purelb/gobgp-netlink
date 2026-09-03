@@ -54,6 +54,16 @@ var (
 	bfdInvalidPacketTotalDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "bfd", "invalid_packet_total"),
 		"Received datagrams that could not be decoded as a BFD control packet.", nil, nil)
+	bfdWrongHopLimitTotalDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "bfd", "wrong_hop_limit_total"),
+		"BFD control packets discarded because their TTL or hop limit was not 255, "+
+			"which RFC 5881 5 requires for single-hop sessions.", nil, nil)
+	bfdServerUpDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "bfd", "server_up"),
+		"Whether the BFD server's socket is bound (1) or not (0). Zero while any "+
+			"peer has BFD enabled means no failure detection is happening at all, "+
+			"which is otherwise invisible: BGP stays up and the peers stay configured.",
+		nil, nil)
 	bfdUnknownPeerTotalDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "bfd", "unknown_peer_total"),
 		"BFD control packets received from an address with no configured peer. "+
@@ -65,7 +75,7 @@ var (
 // BFD surface is in one file, but they are emitted from the bgpCollector's
 // ListPeer loop, which already carries the api.Peer these read from.
 var (
-	bfdPeerStateLabels = []string{"peer", "session_state"}
+	bfdPeerStateLabels = []string{"peer", "session_state", "remote_session_state"}
 
 	bgpPeerBfdEnabledDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "peer", "bfd_enabled"),
@@ -105,6 +115,8 @@ func (c *bfdCollector) Describe(out chan<- *prometheus.Desc) {
 	out <- bfdReceivedErrorTotalDesc
 	out <- bfdInvalidPacketTotalDesc
 	out <- bfdUnknownPeerTotalDesc
+	out <- bfdServerUpDesc
+	out <- bfdWrongHopLimitTotalDesc
 }
 
 func (c *bfdCollector) Collect(out chan<- prometheus.Metric) {
@@ -129,6 +141,14 @@ func (c *bfdCollector) Collect(out chan<- prometheus.Metric) {
 	counter(bfdReceivedErrorTotalDesc, s.GetReceivedError())
 	counter(bfdInvalidPacketTotalDesc, s.GetInvalidPacket())
 	counter(bfdUnknownPeerTotalDesc, s.GetUnknownPeer())
+
+	counter(bfdWrongHopLimitTotalDesc, s.GetWrongHopLimit())
+
+	up := 0.0
+	if s.GetListening() {
+		up = 1.0
+	}
+	out <- prometheus.MustNewConstMetric(bfdServerUpDesc, prometheus.GaugeValue, up)
 }
 
 // describePeerBfd advertises the per-peer BFD series. Called from the
@@ -160,12 +180,11 @@ func collectPeerBfd(out chan<- prometheus.Metric, p *api.Peer, peerAddr string) 
 	}
 
 	state := p.GetState().GetBfdState()
-	// Remote session state is not tracked by the BFD peer, so it is not a label:
-	// every series would carry the same UNSPECIFIED value.
 	out <- prometheus.MustNewConstMetric(
 		bgpPeerBfdStateDesc, prometheus.GaugeValue, 1.0,
 		peerAddr,
 		state.GetSessionState().String(),
+		state.GetRemoteSessionState().String(),
 	)
 
 	async := state.GetBfdAsync()

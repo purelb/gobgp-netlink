@@ -859,9 +859,14 @@ func (s *BgpServer) toConfig(peer *peer, getAdvertised bool) *oc.Neighbor {
 		if err == nil {
 			st := &bfdPeer.state
 			conf.Bfd.State.SessionState = apiBfdSessionStateToOC(st.SessionState)
+			conf.Bfd.State.RemoteSessionState = apiBfdSessionStateToOC(st.RemoteSessionState)
+			conf.Bfd.State.LocalDiagnosticCode = apiBfdDiagnosticCodeToOC(st.LocalDiagnosticCode)
+			conf.Bfd.State.RemoteDiagnosticCode = apiBfdDiagnosticCodeToOC(st.RemoteDiagnosticCode)
+			conf.Bfd.State.RemoteMinimumReceiveInterval = st.RemoteMinimumReceiveInterval
 			conf.Bfd.State.LastFailureTime = st.LastFailureTime
 			conf.Bfd.State.FailureTransitions = st.FailureTransitions
 			conf.Bfd.State.LocalDiscriminator = st.LocalDiscriminator
+			conf.Bfd.State.RemoteDiscriminator = st.RemoteDiscriminator
 			if st.BfdAsync != nil {
 				conf.Bfd.State.BfdAsync.TransmittedPackets = st.BfdAsync.TransmittedPackets
 				conf.Bfd.State.BfdAsync.ReceivedPackets = st.BfdAsync.ReceivedPackets
@@ -3727,15 +3732,25 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 		if err != nil {
 			return fmt.Errorf("failed to parse IP address: %v", err)
 		}
+		// Hard failure, not a warning. BFD configured but not listening means
+		// BGP comes up and nothing detects a peer failure, so the operator
+		// believes they have sub-second failover and has none. Refusing the
+		// neighbour surfaces that at config time instead.
 		if err := s.bfdServer.AddPeer(context.Background(), ipAddr, c.Bfd.Config, c.Transport.Config.BindInterface); err != nil {
-			s.logger.Warn("failed to add BFD peer",
-				slog.String("Topic", "Peer"),
-				slog.String("Key", addr),
-				slog.String("Err", err.Error()))
+			return fmt.Errorf("neighbor %s: %w", addr, err)
 		}
 	}
 	s.startFsmHandler(peer)
 	return nil
+}
+
+// apiBfdDiagnosticCodeToOC mirrors the API enum onto the oc one. RFC 5880 4.1
+// numbers these identically in both, so the bound check is the whole job.
+func apiBfdDiagnosticCodeToOC(code api.BfdDiagnosticCode) oc.BfdDiagnosticCode {
+	if code < 0 || int(code) > int(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_REVERSE_CONCATENATED_PATH_DOWN) {
+		return oc.BFD_DIAGNOSTIC_CODE_NO_DIAGNOSTIC
+	}
+	return oc.IntToBfdDiagnosticCodeMap[int(code)]
 }
 
 func apiBfdSessionStateToOC(state api.BfdSessionState) oc.BfdSessionState {

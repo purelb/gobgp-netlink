@@ -122,3 +122,16 @@ func DialerControl(logger *slog.Logger, network, address string, c syscall.RawCo
 	}
 	return nil
 }
+
+// SetRecvHopLimitSockoptImpl is unimplemented here; RFC 5881 §5 receive-side
+// validation is only wired up on Linux, which is the only platform this fork
+// builds netlink support for. Returning an error makes the BFD server report
+// that the check is unavailable rather than silently accepting any hop limit.
+func SetRecvHopLimitSockopt(sc syscall.RawConn) error {
+	return fmt.Errorf("receive hop limit not supported on this platform")
+}
+
+// ParseHopLimitImpl is unimplemented here; see SetRecvHopLimitSockoptImpl.
+func ParseHopLimit(oob []byte) (int, bool) {
+	return 0, false
+}
