@@ -221,8 +221,20 @@ func NewBgpServer(opt ...ServerOption) *BgpServer {
 	return s
 }
 
+// Stop shuts the server down, allowing peers that negotiated Graceful Restart
+// to retain this speaker's routes.
+//
+// This used to pass a zero-value request, so AllowGracefulRestart was false and
+// every peer received Cease/PEER_DECONFIGURED. Under RFC 4724 a NOTIFICATION is
+// the explicit instruction to discard the routes immediately, which is the
+// opposite of what Graceful Restart is for: on a rolling restart each neighbour
+// dropped this node's routes at once rather than holding them.
+//
+// Peers that did not negotiate GR are unaffected - StopBgp still notifies them,
+// because the decision is per peer: sendNotification is
+// !AllowGracefulRestart || !isGracefulRestartEnabled().
 func (s *BgpServer) Stop() {
-	if err := s.StopBgp(context.Background(), &api.StopBgpRequest{}); err != nil {
+	if err := s.StopBgp(context.Background(), &api.StopBgpRequest{AllowGracefulRestart: true}); err != nil {
 		s.logger.Error("failed to stop BGP server",
 			slog.String("Topic", "BgpServer"),
 			slog.Any("Error", err),

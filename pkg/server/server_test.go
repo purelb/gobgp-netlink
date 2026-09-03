@@ -4997,3 +4997,87 @@ func TestResetPeerEstablishedSendsNotification(t *testing.T) {
 			n.ErrorSubcode == bgp.BGP_ERROR_SUB_ADMINISTRATIVE_RESET
 	}, 10*time.Second, 10*time.Millisecond)
 }
+
+// TestStopDoesNotNotifyGracefulRestartPeers is the first half of the GR fix.
+//
+// BgpServer.Stop passed a zero-value StopBgpRequest, so AllowGracefulRestart was
+// false and StopBgp notified every peer with Cease/PEER_DECONFIGURED. RFC 4724
+// makes a NOTIFICATION the explicit instruction to discard the routes, so on a
+// rolling restart each neighbour dropped this node's routes immediately instead
+// of holding them - the exact outcome Graceful Restart exists to prevent.
+//
+// The observable is peer-side: a GR peer must see the session close without a
+// NOTIFICATION.
+func TestStopDoesNotNotifyGracefulRestartPeers(t *testing.T) {
+	afiSafis := []*api.AfiSafi{{
+		Config: &api.AfiSafiConfig{
+			Family:  apiutil.ToApiFamily(bgp.AFI_IP, bgp.SAFI_UNICAST),
+			Enabled: true,
+		},
+		MpGracefulRestart: &api.MpGracefulRestart{
+			Config: &api.MpGracefulRestartConfig{Enabled: true},
+		},
+	}}
+
+	s1 := NewBgpServer()
+	go s1.Serve()
+	require.NoError(t, s1.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10279},
+	}))
+
+	require.NoError(t, s1.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport:       &api.Transport{PassiveMode: true},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 10},
+		AfiSafis:        afiSafis,
+	}}))
+
+	s2 := NewBgpServer()
+	go s2.Serve()
+	require.NoError(t, s2.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{})
+
+	require.NoError(t, s2.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 1},
+		Transport:       &api.Transport{RemotePort: 10279},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 10},
+		AfiSafis:        afiSafis,
+		Timers: &api.Timers{Config: &api.TimersConfig{
+			ConnectRetry: 1, HoldTime: 90, KeepaliveInterval: 30,
+		}},
+	}}))
+
+	peerState := func(s *BgpServer) (api.PeerState_SessionState, uint64) {
+		var st api.PeerState_SessionState
+		var notifications uint64
+		err := s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(p *api.Peer) {
+			st = p.GetState().GetSessionState()
+			notifications = p.GetState().GetMessages().GetReceived().GetNotification()
+		})
+		require.NoError(t, err)
+		return st, notifications
+	}
+
+	assert.Eventually(t, func() bool {
+		st, _ := peerState(s2)
+		return st == api.PeerState_SESSION_STATE_ESTABLISHED
+	}, 30*time.Second, 100*time.Millisecond, "peers must establish before the stop means anything")
+
+	_, before := peerState(s2)
+	require.Zero(t, before, "no notification should have been received while establishing")
+
+	// The behaviour under test.
+	s1.Stop()
+
+	assert.Eventually(t, func() bool {
+		st, _ := peerState(s2)
+		return st != api.PeerState_SESSION_STATE_ESTABLISHED
+	}, 30*time.Second, 100*time.Millisecond, "the session should go down when s1 stops")
+
+	_, after := peerState(s2)
+	assert.Equal(t, uint64(0), after,
+		"a graceful-restart peer must not be told to discard its routes: "+
+			"Stop() sent Cease/PEER_DECONFIGURED when it passed a zero-value request")
+}

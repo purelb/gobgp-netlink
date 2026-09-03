@@ -478,3 +478,45 @@ func TestSetDefaultNeighborConfigValuesEnforcesBfdFloor(t *testing.T) {
 	assert.NoError(t, SetDefaultNeighborConfigValues(bare, nil, &Global{}),
 		"an enabled peer with no explicit timings must default, not fail")
 }
+
+// TestGracefulRestartDerivesPerFamilyFlag pins the second half of the GR fix.
+//
+// fsm.go only emits a Graceful Restart capability tuple for families whose
+// mp-graceful-restart is enabled. A neighbour with graceful-restart enabled and
+// nothing set per family therefore advertised the capability with an *empty*
+// AFI/SAFI list: the peer negotiated GR and retained nothing, which looks
+// identical to working right up until a restart happens.
+func TestGracefulRestartDerivesPerFamilyFlag(t *testing.T) {
+	neighbor := func(grEnabled bool) *Neighbor {
+		return &Neighbor{
+			Config: NeighborConfig{
+				NeighborAddress: netip.MustParseAddr("192.0.2.1"),
+				PeerAs:          65001,
+			},
+			GracefulRestart: GracefulRestart{Config: GracefulRestartConfig{Enabled: grEnabled}},
+			AfiSafis: []AfiSafi{
+				{Config: AfiSafiConfig{AfiSafiName: AFI_SAFI_TYPE_IPV4_UNICAST}},
+				{Config: AfiSafiConfig{AfiSafiName: AFI_SAFI_TYPE_IPV6_UNICAST}},
+			},
+		}
+	}
+
+	t.Run("GR on the neighbour enables every configured family", func(t *testing.T) {
+		n := neighbor(true)
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, &Global{}))
+		for _, af := range n.AfiSafis {
+			assert.True(t, af.MpGracefulRestart.Config.Enabled,
+				"%s: without this the GR capability carries no tuples", af.Config.AfiSafiName)
+			assert.True(t, af.MpGracefulRestart.State.Enabled)
+		}
+	})
+
+	t.Run("GR off leaves families off", func(t *testing.T) {
+		n := neighbor(false)
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, &Global{}))
+		for _, af := range n.AfiSafis {
+			assert.False(t, af.MpGracefulRestart.Config.Enabled,
+				"a neighbour without GR must not advertise per-family GR")
+		}
+	})
+}
