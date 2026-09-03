@@ -38,6 +38,7 @@ service GoBgpService {
   rpc StartBgp(StartBgpRequest) returns (StartBgpResponse);
   rpc StopBgp(StopBgpRequest) returns (StopBgpResponse);
   rpc GetBgp(GetBgpRequest) returns (GetBgpResponse);
+  rpc GetBfdServerState(GetBfdServerStateRequest) returns (GetBfdServerStateResponse);
 
   rpc WatchEvent(WatchEventRequest) returns (stream WatchEventResponse);
 
@@ -1662,6 +1663,15 @@ message BfdState {
   uint64 received_error = 3;
   uint64 invalid_packet = 4;
   uint64 unknown_peer = 5;
+}
+
+message GetBfdServerStateRequest {}
+
+// GetBfdServerStateResponse carries the BFD server's receive-path counters.
+// state is unset when no peer has BFD enabled, so the server was never started -
+// which is deliberately distinguishable from a started server with zero counters.
+message GetBfdServerStateResponse {
+  BfdState state = 1;
 }
 
 enum TcpAoAlgorithm {

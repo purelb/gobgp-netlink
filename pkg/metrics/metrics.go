@@ -294,6 +294,7 @@ func (c *bgpCollector) Describe(out chan<- *prometheus.Desc) {
 	out <- bgpPeerAsnDesc
 	out <- bgpPeerLocalAsnDesc
 	out <- bgpPeerStateDesc
+	describePeerBfd(out)
 
 	out <- bgpRoutesReceivedDesc
 	out <- bgpRoutesAcceptedDesc
@@ -387,6 +388,9 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 			peerState.GetSessionState().String(),
 			peerState.GetAdminState().String(),
 		)
+
+		// BFD liveness for this peer. See pkg/metrics/bfd.go.
+		collectPeerBfd(out, p, peerAddr)
 
 		for _, afiSafi := range p.GetAfiSafis() {
 			if !afiSafi.GetConfig().GetEnabled() {

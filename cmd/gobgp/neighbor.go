@@ -309,6 +309,8 @@ func showNeighbor(args []string) error {
 	fmt.Printf("  Hold time is %d, keepalive interval is %d seconds\n", int(p.Timers.State.NegotiatedHoldTime), int(p.Timers.State.KeepaliveInterval))
 	fmt.Printf("  Configured hold time is %d, keepalive interval is %d seconds\n", int(p.Timers.Config.HoldTime), int(p.Timers.Config.KeepaliveInterval))
 
+	showBfdNeighbor(p)
+
 	elems := make([]string, 0, 3)
 	if as := p.Conf.AllowOwnAsn; as > 0 {
 		elems = append(elems, fmt.Sprintf("Allow Own AS: %d", as))

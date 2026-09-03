@@ -159,8 +159,46 @@ Changing BFD configuration through `UpdatePeer` is applied at runtime:
 
 ## Checking State
 
-The normal text output of `gobgp neighbor` does not print a dedicated BFD
-section. Use JSON output to inspect the BFD fields returned by `ListPeer`.
+`gobgp neighbor <address>` prints a BFD section for every peer, including a
+`not configured` line when BFD is off, so the absence of a session is always an
+explicit answer rather than a missing section.
+
+```bash
+$ gobgp neighbor 192.0.2.2
+...
+  BFD: enabled, session UP (remote UP), diagnostic: no diagnostic
+    Intervals: tx 300ms, rx 300ms, multiplier 3 (detect 900ms), port 3784
+    Packets: tx 4133, rx 4722, failure transitions 0
+```
+
+`gobgp bfd` summarises every BFD-enabled peer and the server's receive-path
+counters:
+
+```bash
+$ gobgp bfd
+Peer                             State  Remote Tx        Rx        Transitions
+192.0.2.2                        UP     UP     4133      4722      0
+
+Server: rx 8859  drop 0  error 0  invalid 0  unknown-peer 0
+```
+
+Two of those server counters diagnose failures that are otherwise silent:
+
+- `unknown-peer` counts control packets received from an address with no
+  configured peer. It advances when a link-local neighbor is configured without
+  its zone: packets arrive from `fe80::1%eth0`, the configured key is `fe80::1`,
+  and the receive lookup cannot match. If the peer also sets a bind interface,
+  transmission still succeeds, so BGP stays up and only the BFD session is dead.
+- `drop` counts packets discarded because a peer's receive queue was full. That
+  queue holds one packet, so any advance means an event loop stalled for longer
+  than one transmit interval.
+
+Intervals are printed as durations because they are configured in
+**microseconds**: `300` means 300 microseconds, not 300 milliseconds.
+
+### JSON output
+
+`-j` returns the raw `ListPeer` fields:
 
 ```bash
 $ gobgp -j neighbor 192.0.2.2
@@ -173,7 +211,11 @@ Relevant fields:
 - `state.bfd_state.bfd_async.transmitted_packets`: sent BFD control packets;
 - `state.bfd_state.bfd_async.received_packets`: received BFD control packets.
 
-Abbreviated JSON example:
+Note that `-j` uses Go's JSON encoder rather than protojson, so enums appear as
+**numbers**, and this proto numbers `BFD_SESSION_STATE_UP` as `1`. RFC 5880
+§6.8.1 numbers `Down` as 1 and `Up` as 3, so the raw value reads as the opposite
+of its meaning to anyone familiar with the protocol. Prefer the text output,
+which prints the state as a word.
 
 ```json
 {
@@ -190,7 +232,7 @@ Abbreviated JSON example:
   },
   "state": {
     "bfd_state": {
-      "session_state": "BFD_SESSION_STATE_UP",
+      "session_state": 1,
       "bfd_async": {
         "transmitted_packets": 100,
         "received_packets": 99
@@ -199,6 +241,33 @@ Abbreviated JSON example:
   }
 }
 ```
+
+## Metrics
+
+BFD exports the following Prometheus series:
+
+| Metric | Description |
+| --- | --- |
+| `bgp_peer_bfd_enabled` | Whether BFD is configured for the peer. Emitted for every peer. |
+| `bgp_peer_bfd_state` | Session state, as the `session_state` label. Always 1. |
+| `bgp_peer_bfd_transmitted_packets_total` | Control packets sent to the peer. |
+| `bgp_peer_bfd_received_packets_total` | Control packets received from the peer. |
+| `bgp_peer_bfd_failure_transitions_total` | Times the session went up to down. |
+| `bgp_bfd_received_packet_total` | Packets received and matched to a peer. |
+| `bgp_bfd_received_drop_total` | Packets dropped because a peer queue was full. |
+| `bgp_bfd_received_error_total` | Errors reading from the BFD server socket. |
+| `bgp_bfd_invalid_packet_total` | Datagrams that would not decode. |
+| `bgp_bfd_unknown_peer_total` | Packets from an address with no configured peer. |
+
+A session that is configured but never comes up is expressible as:
+
+```text
+bgp_peer_bfd_enabled == 1
+  unless on(peer) bgp_peer_bfd_state{session_state="BFD_SESSION_STATE_UP"}
+```
+
+`bgp_peer_bfd_enabled` is emitted for peers with BFD disabled as well, so this
+alert compares two present series rather than depending on one being absent.
 
 ## gRPC API
 

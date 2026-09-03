@@ -2512,6 +2512,18 @@ func (s *server) GetBgp(ctx context.Context, r *api.GetBgpRequest) (*api.GetBgpR
 	return s.bgpServer.GetBgp(ctx, r)
 }
 
+// GetBfdServerState exposes the BFD server's receive-path counters.
+//
+// These were previously computed and discarded: GetBfdServerStats had no caller
+// and api.BfdState was referenced by no RPC, so unknown_peer - the counter that
+// identifies a peer address mismatch - was unreachable outside the process.
+func (s *server) GetBfdServerState(ctx context.Context, r *api.GetBfdServerStateRequest) (*api.GetBfdServerStateResponse, error) {
+	// A nil state means no peer enabled BFD, so the server never started. Left
+	// unset rather than zeroed so a caller can tell that apart from a running
+	// server that has simply received nothing.
+	return &api.GetBfdServerStateResponse{State: s.bgpServer.GetBfdServerStats()}, nil
+}
+
 func newGlobalFromAPIStruct(a *api.Global) *oc.Global {
 	families := make([]oc.AfiSafi, 0, len(a.Families))
 	for _, f := range a.Families {

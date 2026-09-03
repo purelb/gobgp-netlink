@@ -2,6 +2,9 @@ package metrics
 
 import (
 	"context"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,4 +218,112 @@ func getMetric(metrics []*dto.MetricFamily, metricName string) *dto.MetricFamily
 		}
 	}
 	return nil
+}
+
+// gatherPeerBfd runs collectPeerBfd and returns the emitted series keyed by
+// metric name, with label values appended.
+func gatherPeerBfd(t *testing.T, p *api.Peer, addr string) map[string][]string {
+	t.Helper()
+	ch := make(chan prometheus.Metric, 16)
+	collectPeerBfd(ch, p, addr)
+	close(ch)
+
+	got := map[string][]string{}
+	for m := range ch {
+		var pb dto.Metric
+		require.NoError(t, m.Write(&pb))
+		// Key on fqName only. Desc.String() also contains the help text, and one
+		// help string names another metric, which silently aliased two series.
+		name := descFqName(m.Desc().String())
+		val := pb.GetGauge().GetValue()
+		if pb.Counter != nil {
+			val = pb.GetCounter().GetValue()
+		}
+		entry := []string{}
+		for _, l := range pb.GetLabel() {
+			entry = append(entry, l.GetName()+"="+l.GetValue())
+		}
+		entry = append(entry, "value="+strconv.FormatFloat(val, 'f', -1, 64))
+		got[strings.TrimPrefix(name, "bgp_peer_")] = entry
+	}
+	return got
+}
+
+var descFqNameRe = regexp.MustCompile(`fqName: "([^"]+)"`)
+
+func descFqName(desc string) string {
+	if m := descFqNameRe.FindStringSubmatch(desc); m != nil {
+		return m[1]
+	}
+	return desc
+}
+
+// TestBfdMetricsExposeTheSilentFailure pins the series that make a BFD session
+// that is configured, transmitting, and never coming up visible to an alert.
+//
+// That state was reached on hardware by configuring a link-local neighbor
+// without its zone: the receive lookup could not match the zoned address the
+// kernel reported, so BGP stayed up and healthy while BFD never left DOWN. The
+// only evidence in the whole daemon was a DEBUG log line.
+func TestBfdMetricsExposeTheSilentFailure(t *testing.T) {
+	peer := &api.Peer{
+		Bfd: &api.BfdPeerConfig{Enabled: true},
+		State: &api.PeerState{
+			NeighborAddress: "fe80::1",
+			BfdState: &api.BfdPeerState{
+				SessionState:       api.BfdSessionState_BFD_SESSION_STATE_DOWN,
+				RemoteSessionState: api.BfdSessionState_BFD_SESSION_STATE_DOWN,
+				FailureTransitions: 2,
+				BfdAsync: &api.BfdAsyncCounters{
+					TransmittedPackets: 63,
+					ReceivedPackets:    0,
+				},
+			},
+		},
+	}
+
+	got := gatherPeerBfd(t, peer, "fe80::1")
+
+	assert.Contains(t, got["bfd_enabled"], "value=1",
+		"a configured peer must report enabled even while its session is down")
+	assert.Contains(t, got["bfd_state"], "session_state=BFD_SESSION_STATE_DOWN")
+	// The diagnostic signature: our packets leave, none come back.
+	assert.Contains(t, got["bfd_transmitted_packets_total"], "value=63")
+	assert.Contains(t, got["bfd_received_packets_total"], "value=0")
+	assert.Contains(t, got["bfd_failure_transitions_total"], "value=2")
+}
+
+// TestBfdEnabledEmittedForPeersWithoutBfd: the enabled gauge must exist for
+// every peer, so "configured but down" is a query rather than the absence of a
+// series, which cannot be alerted on.
+func TestBfdEnabledEmittedForPeersWithoutBfd(t *testing.T) {
+	peer := &api.Peer{State: &api.PeerState{NeighborAddress: "10.0.0.1"}}
+	got := gatherPeerBfd(t, peer, "10.0.0.1")
+
+	assert.Contains(t, got["bfd_enabled"], "value=0")
+	assert.NotContains(t, got, "bfd_state",
+		"a peer without BFD must not report a session state")
+}
+
+// TestBfdServerMetricsAlwaysPresent: the server-level counters exist from
+// startup, so an alert on unknown_peer can be written before anything has gone
+// wrong. A series that only appears once it is non-zero cannot be alerted on.
+//
+// unknown_peer in particular is the counter that identifies a peer-address
+// mismatch, and it was previously unreachable entirely: GetBfdServerStats had no
+// caller and api.BfdState was named by no RPC.
+func TestBfdServerMetricsAlwaysPresent(t *testing.T) {
+	s := server.NewBgpServer()
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(NewBfdCollector(s))
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(families))
+	for _, f := range families {
+		names = append(names, f.GetName())
+	}
+	assert.Contains(t, names, "bgp_bfd_unknown_peer_total")
+	assert.Contains(t, names, "bgp_bfd_received_drop_total")
 }

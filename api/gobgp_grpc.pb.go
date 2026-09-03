@@ -44,6 +44,7 @@ const (
 	GoBgpService_StartBgp_FullMethodName                = "/api.GoBgpService/StartBgp"
 	GoBgpService_StopBgp_FullMethodName                 = "/api.GoBgpService/StopBgp"
 	GoBgpService_GetBgp_FullMethodName                  = "/api.GoBgpService/GetBgp"
+	GoBgpService_GetBfdServerState_FullMethodName       = "/api.GoBgpService/GetBfdServerState"
 	GoBgpService_WatchEvent_FullMethodName              = "/api.GoBgpService/WatchEvent"
 	GoBgpService_AddPeer_FullMethodName                 = "/api.GoBgpService/AddPeer"
 	GoBgpService_DeletePeer_FullMethodName              = "/api.GoBgpService/DeletePeer"
@@ -125,6 +126,7 @@ type GoBgpServiceClient interface {
 	StartBgp(ctx context.Context, in *StartBgpRequest, opts ...grpc.CallOption) (*StartBgpResponse, error)
 	StopBgp(ctx context.Context, in *StopBgpRequest, opts ...grpc.CallOption) (*StopBgpResponse, error)
 	GetBgp(ctx context.Context, in *GetBgpRequest, opts ...grpc.CallOption) (*GetBgpResponse, error)
+	GetBfdServerState(ctx context.Context, in *GetBfdServerStateRequest, opts ...grpc.CallOption) (*GetBfdServerStateResponse, error)
 	WatchEvent(ctx context.Context, in *WatchEventRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchEventResponse], error)
 	AddPeer(ctx context.Context, in *AddPeerRequest, opts ...grpc.CallOption) (*AddPeerResponse, error)
 	DeletePeer(ctx context.Context, in *DeletePeerRequest, opts ...grpc.CallOption) (*DeletePeerResponse, error)
@@ -229,6 +231,16 @@ func (c *goBgpServiceClient) GetBgp(ctx context.Context, in *GetBgpRequest, opts
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetBgpResponse)
 	err := c.cc.Invoke(ctx, GoBgpService_GetBgp_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *goBgpServiceClient) GetBfdServerState(ctx context.Context, in *GetBfdServerStateRequest, opts ...grpc.CallOption) (*GetBfdServerStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetBfdServerStateResponse)
+	err := c.cc.Invoke(ctx, GoBgpService_GetBfdServerState_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1082,6 +1094,7 @@ type GoBgpServiceServer interface {
 	StartBgp(context.Context, *StartBgpRequest) (*StartBgpResponse, error)
 	StopBgp(context.Context, *StopBgpRequest) (*StopBgpResponse, error)
 	GetBgp(context.Context, *GetBgpRequest) (*GetBgpResponse, error)
+	GetBfdServerState(context.Context, *GetBfdServerStateRequest) (*GetBfdServerStateResponse, error)
 	WatchEvent(*WatchEventRequest, grpc.ServerStreamingServer[WatchEventResponse]) error
 	AddPeer(context.Context, *AddPeerRequest) (*AddPeerResponse, error)
 	DeletePeer(context.Context, *DeletePeerRequest) (*DeletePeerResponse, error)
@@ -1170,6 +1183,9 @@ func (UnimplementedGoBgpServiceServer) StopBgp(context.Context, *StopBgpRequest)
 }
 func (UnimplementedGoBgpServiceServer) GetBgp(context.Context, *GetBgpRequest) (*GetBgpResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBgp not implemented")
+}
+func (UnimplementedGoBgpServiceServer) GetBfdServerState(context.Context, *GetBfdServerStateRequest) (*GetBfdServerStateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetBfdServerState not implemented")
 }
 func (UnimplementedGoBgpServiceServer) WatchEvent(*WatchEventRequest, grpc.ServerStreamingServer[WatchEventResponse]) error {
 	return status.Errorf(codes.Unimplemented, "method WatchEvent not implemented")
@@ -1452,6 +1468,24 @@ func _GoBgpService_GetBgp_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(GoBgpServiceServer).GetBgp(ctx, req.(*GetBgpRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GoBgpService_GetBfdServerState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetBfdServerStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GoBgpServiceServer).GetBfdServerState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GoBgpService_GetBfdServerState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GoBgpServiceServer).GetBfdServerState(ctx, req.(*GetBfdServerStateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2618,6 +2652,10 @@ var GoBgpService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetBgp",
 			Handler:    _GoBgpService_GetBgp_Handler,
+		},
+		{
+			MethodName: "GetBfdServerState",
+			Handler:    _GoBgpService_GetBfdServerState_Handler,
 		},
 		{
 			MethodName: "AddPeer",
