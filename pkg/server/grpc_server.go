@@ -233,10 +233,15 @@ func toPathAPI(binNlri []byte, binPattrs [][]byte, anyNlri *api.NLRI, anyPattrs 
 		SendMaxFiltered: path.SendMaxFiltered,
 		Filtered:        path.Filtered,
 		Validation:      path.Validation,
-		Netlink: &api.NetlinkPathInfo{
-			IsNetlink: path.IsNetlink,
+	}
+	// Set only for netlink paths, so the message's presence means what
+	// NetlinkPathInfo says it means. Every other path would otherwise carry an
+	// empty submessage on every ListPath response.
+	if path.IsNetlink {
+		p.Netlink = &api.NetlinkPathInfo{
+			IsNetlink: true,
 			IfName:    path.NetlinkIfName,
-		},
+		}
 	}
 	if path.PeerID.IsValid() {
 		p.SourceId = path.PeerID.String()

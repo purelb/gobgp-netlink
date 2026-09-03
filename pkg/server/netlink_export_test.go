@@ -134,7 +134,7 @@ func TestCleanupStaleRoutesRunsOnce(t *testing.T) {
 
 // newTestExportClient builds an export client over a fake kernel. The server is
 // nil because none of the cleanup or export paths under test reach back into it.
-func newTestExportClient(t *testing.T, f *fakeNetlink, rules ...*exportRule) *netlinkExportClient {
+func newTestExportClient(t testing.TB, f *fakeNetlink, rules ...*exportRule) *netlinkExportClient {
 	t.Helper()
 	e, err := newNetlinkExportClientWithHandle(nil, logger, f, RTPROT_BGP, 0)
 	assert.NoError(t, err)
@@ -262,7 +262,7 @@ func testVpnPath(t *testing.T, rd, cidr, nexthop string) *table.Path {
 	return p
 }
 
-func testUnicastPath(t *testing.T, cidr, nexthop string) *table.Path {
+func testUnicastPath(t testing.TB, cidr, nexthop string) *table.Path {
 	t.Helper()
 	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(cidr))
 	assert.NoError(t, err)
@@ -975,3 +975,49 @@ func TestDampeningFlushIsBudgeted(t *testing.T) {
 	assert.Zero(t, left, "nothing should remain pending")
 	assert.Nil(t, timer, "the flush timer should be disarmed when the map empties")
 }
+
+// BenchmarkScheduleBurst measures the cost of scheduling a burst of distinct
+// prefixes, which is the peer-flap shape §7.4 exists to bound.
+//
+// It exists because the flush rewrite has a failure mode the correctness tests
+// cannot see: scheduleUpdate holds dampenMu while it re-arms, so any per-update
+// work that scales with the number of pending prefixes is quadratic across a
+// burst AND serialises the export hook. Growth much beyond linear in the
+// reported ns/op is the regression.
+func benchmarkScheduleBurst(b *testing.B, n int) {
+	prefixes := make([]string, n)
+	for i := range prefixes {
+		prefixes[i] = fmt.Sprintf("10.%d.%d.0/24", i/256, i%256)
+	}
+
+	for b.Loop() {
+		b.StopTimer()
+		f := newFakeNetlink()
+		e := newTestExportClient(b, f, &exportRule{Name: "bench", TableId: 254})
+		// Long enough that nothing fires mid-burst: this measures scheduling,
+		// not flushing.
+		e.dampeningInterval = time.Hour
+		paths := make([]*table.Path, n)
+		for i, p := range prefixes {
+			paths[i] = testUnicastPath(b, p, "192.168.1.1")
+		}
+		b.StartTimer()
+
+		for _, p := range paths {
+			e.scheduleUpdate(p)
+		}
+
+		b.StopTimer()
+		e.dampenMu.Lock()
+		if e.flushTimer != nil {
+			e.flushTimer.Stop()
+			e.flushTimer = nil
+		}
+		e.dampenMu.Unlock()
+		b.StartTimer()
+	}
+}
+
+func BenchmarkScheduleBurst100(b *testing.B)  { benchmarkScheduleBurst(b, 100) }
+func BenchmarkScheduleBurst400(b *testing.B)  { benchmarkScheduleBurst(b, 400) }
+func BenchmarkScheduleBurst1600(b *testing.B) { benchmarkScheduleBurst(b, 1600) }

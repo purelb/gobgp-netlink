@@ -248,6 +248,10 @@ type netlinkExportClient struct {
 	// flushTimer is the one timer that drains pendingUpdates, replacing the
 	// timer that used to live on every entry.
 	flushTimer *time.Timer
+	// flushArmedAt is when flushTimer will fire. It lets scheduleUpdate skip
+	// re-arming when the pending timer is already early enough, which keeps
+	// the hot path O(1) instead of rescanning pendingUpdates per update.
+	flushArmedAt time.Time
 
 	// Statistics
 	stats   exportStats
@@ -1307,21 +1311,23 @@ func (e *netlinkExportClient) flushDampened() {
 	}
 
 	e.dampenMu.Lock()
-	e.armFlushLocked(time.Now())
+	e.rearmFlushLocked()
 	e.dampenMu.Unlock()
 }
 
-// armFlushLocked schedules the next flush. Caller must hold dampenMu.
+// rearmFlushLocked rescans pendingUpdates and schedules the next flush.
+// Caller must hold dampenMu.
 //
-// If anything is already due - which is the case whenever a flush hit its
-// budget - it re-arms after a short yield rather than a full interval, so a
-// large burst is spread rather than delayed.
-func (e *netlinkExportClient) armFlushLocked(now time.Time) {
+// Only flushDampened calls this: it is O(len(pendingUpdates)) and runs once per
+// flush. The per-update path uses armFlushAtLocked instead.
+func (e *netlinkExportClient) rearmFlushLocked() {
+	if e.flushTimer != nil {
+		e.flushTimer.Stop()
+		e.flushTimer = nil
+	}
+	e.flushArmedAt = time.Time{}
+
 	if len(e.pendingUpdates) == 0 {
-		if e.flushTimer != nil {
-			e.flushTimer.Stop()
-			e.flushTimer = nil
-		}
 		return
 	}
 
@@ -1331,7 +1337,33 @@ func (e *netlinkExportClient) armFlushLocked(now time.Time) {
 			next = entry.dueAt
 		}
 	}
-	delay := time.Until(next)
+	e.armFlushAtLocked(next)
+}
+
+// armFlushAtLocked ensures a flush is scheduled to run no later than at.
+// Caller must hold dampenMu.
+//
+// This is the per-update path, so it must not scan pendingUpdates: a burst of N
+// prefixes calls it N times, and it runs under dampenMu, which serialises the
+// export hook. If a timer is already armed early enough it does nothing.
+//
+// If anything is already due - which is the case whenever a flush hit its
+// budget - it arms after a short yield rather than a full interval, so a large
+// burst is spread rather than delayed.
+func (e *netlinkExportClient) armFlushAtLocked(at time.Time) {
+	if e.flushTimer != nil && !e.flushArmedAt.After(at) {
+		// Already firing by then, so a later due time needs no new timer.
+		//
+		// The comparison is an invariant guard, not a live branch: callers only
+		// ever pass a dueAt at or after the armed time, so it is unreachable
+		// today and no test covers it. It is kept so the O(1) skip enforces
+		// "the timer fires no later than the earliest dueAt" locally, rather
+		// than resting on that monotonicity holding everywhere dueAt is
+		// assigned. Delete it only together with that argument.
+		return
+	}
+
+	delay := time.Until(at)
 	if delay < dampenFlushYield {
 		delay = dampenFlushYield
 	}
@@ -1339,6 +1371,7 @@ func (e *netlinkExportClient) armFlushLocked(now time.Time) {
 	if e.flushTimer != nil {
 		e.flushTimer.Stop()
 	}
+	e.flushArmedAt = time.Now().Add(delay)
 	e.flushTimer = time.AfterFunc(delay, e.flushDampened)
 }
 
@@ -1378,7 +1411,7 @@ func (e *netlinkExportClient) scheduleUpdate(path *table.Path) {
 			e.logger.Debug("Dampening cap reached, allowing update through",
 				slog.String("Topic", "netlink"),
 				slog.String("Prefix", prefix))
-			e.armFlushLocked(now)
+			e.armFlushAtLocked(entry.dueAt)
 			return
 		}
 
@@ -1387,17 +1420,18 @@ func (e *netlinkExportClient) scheduleUpdate(path *table.Path) {
 		e.statsMu.Lock()
 		e.stats.DampenedUpdates++
 		e.statsMu.Unlock()
-		e.armFlushLocked(now)
+		e.armFlushAtLocked(entry.dueAt)
 		return
 	}
 
-	e.pendingUpdates[prefix] = &dampenEntry{
+	entry := &dampenEntry{
 		path:          path,
 		updatedAt:     now,
 		dueAt:         now.Add(e.dampeningInterval),
 		firstDeferred: now,
 	}
-	e.armFlushLocked(now)
+	e.pendingUpdates[prefix] = entry
+	e.armFlushAtLocked(entry.dueAt)
 }
 
 // maxDampeningDelay bounds how long a flapping prefix can be held back.
