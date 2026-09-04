@@ -9,7 +9,6 @@ GoBGP-Netlink is an open source Border Gateway Protocol (BGP) implementation des
 
 It is a fork of [gobgp](https://github.com/osrg/gobgp) updated to v4.9.0
 
-
 The primary feature added is redistribution via Netlink to the Linux routing tables.
 
 - Import: kernel connected routes → BGP RIB, per-interface, global or per-VRF, glob patterns (eth*), now event-driven on RTM_NEWADDR/RTM_DELADDR
@@ -17,7 +16,6 @@ The primary feature added is redistribution via Netlink to the Linux routing tab
 - 14 gRPC RPCs: GetNetlink, {Enable,Disable}Netlink{Import,Export}, the four …VrfNetlink… variants, GetNetlinkImportStats, ListNetlinkExport, GetNetlinkExportStats, FlushNetlinkExport, ListNetlinkExportRules
 - Config: [netlink.import], [netlink.export] with [[netlink.export.rules]], and [vrfs.netlink-import] / [vrfs.netlink-export] — 147 lines of YANG upstream doesn't have
 - CLI: gobgp netlink
-
 
 Further information on this can be found in the [Linux Netlink Integration](docs/sources/netlink.md) section.
 
@@ -31,7 +29,7 @@ Addition features & fixes are:
 
 - Metrics.  Additional 27 metrics including netlink and bfd instrumentation.
 
-*We update docs where we have added or modified the functionality however the rest of the documentation comes from upstream.  In some cases we have found the upstream documentation to be out of date* 
+*We update docs where we have added or modified the functionality however the rest of the documentation comes from upstream.  In some cases we have found the upstream documentation to be out of date*
 
 This fork is maintained by the PureLB Kubernetes Load Balancer team.
 
