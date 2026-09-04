@@ -70,7 +70,7 @@ jobs:
         # does not help either: `pull_request` defaults to opened/synchronize/
         # reopened, so a `labeled` event never re-runs this. Asking the API at run
         # time removes the race without widening the trigger, which would re-run
-        # all 40 jobs on every label change.
+        # all 41 jobs on every label change.
         run: |
           if gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' \
               | grep -qx 'proto-break'; then
@@ -165,6 +165,32 @@ jobs:
         with:
           skip-cache: true
 
+  security:
+    name: vulnerability scan
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+
+      # Covers dependencies and the standard library. It cannot see the
+      # inherited upstream code: govulncheck matches advisories against a
+      # module's dependencies, and that code is the main module here. Renaming
+      # the module would not help - OSV keys its advisories to
+      # github.com/osrg/gobgp/v4, so a fork-specific path would match nothing.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+      # So the inherited code is checked the only way that works: ask OSV what
+      # is known against the upstream release this fork is based on, read from
+      # internal/pkg/version/version.go. Anything not justified in
+      # tools/vuln-allowlist.txt fails.
+      - name: advisories against the upstream base version
+        run: tools/check-base-vulns.sh
+
   embedded:
     name: embedded
     runs-on: ubuntu-22.04
@@ -186,7 +212,7 @@ jobs:
         with:
           go-version: "stable"
 
-      # Nothing checked the files that define all 40 jobs. A workflow can be
+      # Nothing checked the files that define all 41 jobs. A workflow can be
       # valid YAML and still be rejected by GitHub: a step with two `with:`
       # blocks parses fine, because YAML keeps the last duplicate key, and the
       # run then starts with zero jobs and a bare "workflow file issue" - which

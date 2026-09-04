@@ -1,0 +1,17 @@
+# Advisories against the upstream release this fork is based on that do not
+# apply to this tree.
+#
+# check-base-vulns.sh asks OSV what is known against the base version recorded
+# in internal/pkg/version/version.go. That is the only way to see the inherited
+# upstream code: govulncheck matches advisories against dependencies, and this
+# code is the main module, so it is invisible to that tool no matter what the
+# module is named.
+#
+# An advisory with no entry here fails the build. Each entry must say why it
+# does not apply and name what proves it, so the next reader can check the claim
+# rather than trust it.
+#
+# Format: <OSV ID> <whitespace> <justification on one line>
+# Blank lines and lines starting with # are ignored.
+
+GO-2026-4736  Denial of service via the NEXT_HOP path attribute. No upstream fixed version exists. Mitigated here: isZero and isClassDorE in pkg/packet/bgp/validate.go return early on len(ip) == 0, so an invalid NEXT_HOP Value is never indexed. Pinned by pkg/packet/bgp/validate_nexthop_test.go.
