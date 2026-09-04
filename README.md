@@ -4,11 +4,34 @@
 [![Releases](https://img.shields.io/github/release/purelb/gobgp-netlink/all.svg?style=flat-square)](https://github.com/purelb/gobgp-netlink/releases)
 [![LICENSE](https://img.shields.io/github/license/purelb/gobgp-netlink.svg?style=flat-square)](https://github.com/purelb/gobgp-netlink/blob/main/LICENSE)
 
-GoBGP-Netlink is an open source Border Gateway Protocol (BGP) implementation designed from scratch for
-modern environment and implemented in a modern programming language,
+GoBGP-Netlink is an open source Border Gateway Protocol (BGP) implementation designed from scratch for modern environment and implemented in a modern programming language,
 [the Go Programming Language](http://golang.org/).
 
-It is a fork of [gobgp](https://github.com/osrg/gobgp) that adds redistribution via Netlink to the Linux routing tables.  Further information on this can be found in the [Linux Netlink Integration](docs/sources/netlink.md) section.
+It is a fork of [gobgp](https://github.com/osrg/gobgp) updated to v4.9.0
+
+
+The primary feature added is redistribution via Netlink to the Linux routing tables.
+
+- Import: kernel connected routes → BGP RIB, per-interface, global or per-VRF, glob patterns (eth*), now event-driven on RTM_NEWADDR/RTM_DELADDR
+- Export: BGP best-path → kernel FIB, with community/large-community matching rules, per-rule table ID and metric, nexthop validation, dampening, and a startup sweep for stale routes
+- 14 gRPC RPCs: GetNetlink, {Enable,Disable}Netlink{Import,Export}, the four …VrfNetlink… variants, GetNetlinkImportStats, ListNetlinkExport, GetNetlinkExportStats, FlushNetlinkExport, ListNetlinkExportRules
+- Config: [netlink.import], [netlink.export] with [[netlink.export.rules]], and [vrfs.netlink-import] / [vrfs.netlink-export] — 147 lines of YANG upstream doesn't have
+- CLI: gobgp netlink
+
+
+Further information on this can be found in the [Linux Netlink Integration](docs/sources/netlink.md) section.
+
+Addition features & fixes are:
+
+- RFC 2545 dual next-hop origination.  Originates both a global and link-local IPv6 next hop for kernel-learned routes on unnumbered sessions, which have no address of their own.  This is a fix to upstream facilitated by netlink support
+
+- BFD.  BFD itself is upstream's. What the fork adds is everything around it: gobgp bfd, the neighbor BFD block, GetBfdServerState (upstream computes those counters and discards them), the 300 ms × 3 config floor, receive-side GTSM, and robustness fixes — RX queue depth, drain-before-expiry, TX jitter.
+
+- Graceful Restart.  Two upstream defects fixed. Restarting gobgpd  no longer sends Cease/PEER_DECONFIGURED to GR peers, and mp-graceful-restart derives from the neighbour setting instead of advertising an empty AFI/SAFI list.
+
+- Metrics.  Additional 27 metrics including netlink and bfd instrumentation.
+
+*We update docs where we have added or modified the functionality however the rest of the documentation comes from upstream.  In some cases we have found the upstream documentation to be out of date* 
 
 This fork is maintained by the PureLB Kubernetes Load Balancer team.
 
