@@ -240,3 +240,33 @@ You can also use long lived graceful restart with normal graceful restart.
         enabled = true
         restart-time = 100000
 ```
+
+## Shutdown behaviour
+
+`BgpServer.Stop()`, which `gobgpd` calls on SIGTERM, allows Graceful Restart.
+Peers that negotiated GR see the session close without a NOTIFICATION and so
+retain this speaker's routes for the restart time; peers that did not negotiate
+GR are still sent Cease/PEER_DECONFIGURED, because the decision is made per
+peer.
+
+This matters on a rolling restart. RFC 4724 treats a NOTIFICATION as the
+explicit instruction to discard the routes immediately, so notifying a GR peer
+withdraws every route this node advertises for the duration of the restart —
+the outcome GR exists to prevent.
+
+`mp-graceful-restart` defaults to the neighbour's `graceful-restart` setting for
+every configured address family, so enabling GR on a neighbour is sufficient.
+Set it per family only to enable GR for some families and not others: a
+neighbour with GR enabled and no family flagged advertises the capability with
+an empty AFI/SAFI list, which negotiates successfully and retains nothing.
+
+Closing sessions takes a moment, so whatever supervises `gobgpd` has to allow
+time between SIGTERM and SIGKILL. Killed mid-shutdown, the result is
+indistinguishable from an ungraceful stop.
+
+### Interaction with BFD
+
+BFD's `resetPeer()` issues `ResetPeer(Soft: false)`, which sends
+Cease/ADMINISTRATIVE_RESET — again telling the peer to drop the routes. That is
+correct for a link that has genuinely failed, but it means enabling BFD does not
+extend GR's protection to detected failures; GR covers planned restarts.

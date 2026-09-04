@@ -335,22 +335,16 @@ message BfdState {
 counts packets that arrived for an address with no configured peer, which no
 other API reports and which the daemon logs only at DEBUG.
 
-## Deployment requirements
+## Privileges
 
 ### CAP_NET_RAW
 
-GoBGP's BFD requires `CAP_NET_RAW`. Binding a session to an interface uses
-`SO_BINDTODEVICE`, which needs that capability, and interface binding is exactly
-the unnumbered link-local case BFD is most often deployed for.
+Binding a BFD session to an interface uses `SO_BINDTODEVICE`, which requires
+`CAP_NET_RAW`. Interface binding is exactly the unnumbered link-local case, so a
+deployment that drops that capability will find those sessions cannot bind.
 
-This is a decision rather than an observation: a security review of the daemon
-would otherwise recommend dropping `NET_RAW` as unused, which is true only while
-BFD is disabled. Enabling BFD without it produces a session that cannot bind to
-its interface.
-
-**Blocker:** the pod manifest lives in the consumer repository (k8gobgp), not
-here, so this requirement has to be applied there. Nothing in this repository
-can enforce it.
+Worth stating explicitly because the capability looks unused while BFD is
+disabled, and is easy to drop on that basis.
 
 ### Hop limit validation
 

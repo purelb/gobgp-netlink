@@ -209,6 +209,18 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 			if !vv.IsSet("afi-safi.config.enabled") {
 				n.AfiSafis[i].Config.Enabled = true
 			}
+			// Derive per-family Graceful Restart from the neighbour's GR setting
+			// unless it was stated explicitly.
+			//
+			// fsm.go only emits a GR capability tuple for families whose
+			// mp-graceful-restart is enabled, so a neighbour with
+			// graceful-restart enabled but nothing set per family advertised
+			// the capability with an empty AFI/SAFI list - the peer negotiated
+			// GR and then retained nothing, which is indistinguishable from
+			// working until a restart actually happens.
+			if !vv.IsSet("afi-safi.mp-graceful-restart.config.enabled") {
+				n.AfiSafis[i].MpGracefulRestart.Config.Enabled = n.GracefulRestart.Config.Enabled
+			}
 			n.AfiSafis[i].MpGracefulRestart.State.Enabled = n.AfiSafis[i].MpGracefulRestart.Config.Enabled
 			if !vv.IsSet("afi-safi.add-paths.config.receive") {
 				if n.AddPaths.Config.Receive {
