@@ -1,6 +1,6 @@
 module github.com/osrg/gobgp/v4
 
-go 1.25.0
+go 1.25.13
 
 require (
 	github.com/BurntSushi/toml v1.5.0
