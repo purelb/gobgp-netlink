@@ -33,6 +33,11 @@ type NetlinkStatsSnapshot struct {
 	// ImportTicks stops advancing when the scan loop exits, which is how an
 	// operator can tell the loop actually stopped after StopBgp.
 	ImportTicks uint64
+	// ImportAddrEvents counts kernel address changes that triggered an import.
+	// Flat while addresses are appearing means the subscription is dead and the
+	// daemon has silently fallen back to polling, which is otherwise
+	// indistinguishable from a quiet node.
+	ImportAddrEvents uint64
 
 	// Export (BGP -> kernel). Enabled reports whether the export client exists.
 	ExportEnabled           bool
@@ -100,6 +105,7 @@ func (s *BgpServer) NetlinkStats() NetlinkStatsSnapshot {
 		out.ImportWithdrawn = st.Withdrawn
 		out.ImportErrors = st.Errors
 		out.ImportTicks = st.Ticks
+		out.ImportAddrEvents = st.AddrEvents
 	}
 
 	if e := s.netlinkExportClient; e != nil {

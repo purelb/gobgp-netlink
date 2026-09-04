@@ -123,6 +123,7 @@ Netlink import and export:
 | bgp_netlink_import_withdrawn_total | Imported routes withdrawn from the BGP RIB | |
 | bgp_netlink_import_errors_total | Errors encountered while importing kernel routes | |
 | bgp_netlink_import_loop_ticks_total | Import scan iterations. Stops advancing once the scan loop exits, so a flat value after shutdown confirms the loop stopped | |
+| bgp_netlink_import_addr_events_total | Kernel address changes that triggered an import. Flat while addresses appear means the subscription is dead and imports have fallen back to polling | |
 | bgp_netlink_export_enabled | Whether netlink route export (BGP to kernel) is active | |
 | bgp_netlink_exported_total | Routes programmed into the kernel FIB | |
 | bgp_netlink_export_withdrawn_total | Routes removed from the kernel FIB | |

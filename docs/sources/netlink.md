@@ -1463,6 +1463,27 @@ docker run --cap-add NET_ADMIN ...
 
 ## Integration Examples
 
+## Import latency
+
+Imports are driven by kernel address events (`RTM_NEWADDR` / `RTM_DELADDR`), so
+an address appearing on a configured interface is announced without waiting for
+a scan.
+
+A periodic scan still runs and is not a fallback that can be removed: netlink
+multicast is lossy, dropping messages silently under `ENOBUFS`, and a
+subscription can end outright. Events remove the latency; the periodic scan is
+what keeps the result correct.
+
+Events are filtered to the interfaces the import actually reads from, matched by
+interface index. Without that, every veth appearing and disappearing on a busy
+host would drive a full scan of unrelated interfaces. The index set is refreshed
+by each scan, so an interface created moments ago may not be recognised until
+the next one: a stale set costs the scan interval, never a route.
+
+`bgp_netlink_import_addr_events_total` counts events that triggered an import.
+Flat while addresses are appearing means the subscription is dead and imports
+have silently fallen back to polling.
+
 ## Container/Kubernetes Environments
 
 GoBGP can export routes for container networking:

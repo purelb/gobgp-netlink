@@ -31,6 +31,8 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/vishvananda/netlink"
 )
 
 func TestNetlinkClient(t *testing.T) {
@@ -467,4 +469,124 @@ func TestVrfImportWithdrawalReachesRib(t *testing.T) {
 		"the withdrawal must not fail; a non-zero error count means the cached "+
 			"path was converted to the VPN family twice")
 	assert.Equal(t, uint64(1), st.Withdrawn, "the withdrawal must reach the RIB")
+}
+
+// startLoopWithFakeAddrEvents runs the import loop with a synthetic address
+// event source and returns the channel a test writes events to.
+func startLoopWithFakeAddrEvents(t *testing.T, n *netlinkClient) chan<- netlink.AddrUpdate {
+	t.Helper()
+	var out chan<- netlink.AddrUpdate
+	ready := make(chan struct{})
+	n.subscribeAddr = func(ch chan<- netlink.AddrUpdate, _ <-chan struct{}) error {
+		out = ch
+		close(ready)
+		return nil
+	}
+	go n.loop()
+	t.Cleanup(func() {
+		close(n.dead)
+		<-n.done
+	})
+	<-ready
+	return out
+}
+
+// loopbackIndex is a real interface index, needed because the filter resolves
+// configured names through the kernel. A CI runner has no eth0 but always has
+// loopback.
+func loopbackIndex(t *testing.T) int {
+	t.Helper()
+	iface, err := net.InterfaceByName("lo")
+	require.NoError(t, err)
+	return iface.Index
+}
+
+// TestAddrEventTriggersImportBeforeTheNextPoll is the point of the change.
+//
+// Import ran on a 5s ticker and rescan() had only config-change callers, so
+// nothing fired when an address appeared: a new service IP waited up to a full
+// poll interval before being announced. That is announcement latency, which is
+// what a user creating a Service actually experiences.
+func TestAddrEventTriggersImportBeforeTheNextPoll(t *testing.T) {
+	topology := map[string][]*netutils.ConnectedRoute{"lo": {}}
+	_, n := newTestImportServer(t, []string{"lo"}, topology)
+	events := startLoopWithFakeAddrEvents(t, n)
+
+	// The loop's first pass imports nothing, and establishes the index set the
+	// filter uses.
+	assert.Eventually(t, func() bool { return n.importIfIndexes.Load() != nil },
+		5*time.Second, 20*time.Millisecond, "the first pass must run")
+	require.Equal(t, 0, advertisedCount(n, ""))
+
+	// An address appears.
+	topology["lo"] = []*netutils.ConnectedRoute{connected(t, "10.0.1.1/24")}
+	events <- netlink.AddrUpdate{LinkIndex: loopbackIndex(t), NewAddr: true}
+
+	// Well inside the 5s poll, so only the event can have caused this.
+	assert.Eventually(t, func() bool { return advertisedCount(n, "") == 1 },
+		2*time.Second, 20*time.Millisecond,
+		"the address event should import immediately, not at the next tick")
+}
+
+// TestAddrEventOnOtherInterfacesIsIgnored keeps pod churn off the import path.
+//
+// Every pod on a node brings a veth up and down with addresses attached. Each
+// import cycle takes the server-wide shared.mu twice, so waking for interfaces
+// the import never reads would contend with BGP processing in proportion to
+// churn the daemon does not control.
+func TestAddrEventOnOtherInterfacesIsIgnored(t *testing.T) {
+	topology := map[string][]*netutils.ConnectedRoute{"lo": {}}
+	_, n := newTestImportServer(t, []string{"lo"}, topology)
+	events := startLoopWithFakeAddrEvents(t, n)
+
+	assert.Eventually(t, func() bool { return n.importIfIndexes.Load() != nil },
+		5*time.Second, 20*time.Millisecond)
+
+	topology["lo"] = []*netutils.ConnectedRoute{connected(t, "10.0.1.1/24")}
+	// An index the import does not read from.
+	events <- netlink.AddrUpdate{LinkIndex: loopbackIndex(t) + 9999, NewAddr: true}
+
+	assert.Never(t, func() bool { return advertisedCount(n, "") > 0 },
+		time.Second, 50*time.Millisecond,
+		"an event on an unrelated interface must not trigger a scan")
+}
+
+// TestAddrEventFilterFallsBackToPolling: a stale index set must cost the poll
+// interval, never a route. Before the first scan nothing is known to be
+// uninteresting, so events are accepted rather than dropped.
+func TestAddrEventFilterFallsBackToPolling(t *testing.T) {
+	_, n := newTestImportServer(t, []string{"lo"}, map[string][]*netutils.ConnectedRoute{"lo": {}})
+
+	assert.True(t, n.addrEventIsInteresting(netlink.AddrUpdate{LinkIndex: 12345}),
+		"with no scan yet, an event must not be discarded")
+
+	n.refreshImportIfIndexes(map[string]struct{}{"lo": {}})
+	assert.True(t, n.addrEventIsInteresting(netlink.AddrUpdate{LinkIndex: loopbackIndex(t)}))
+	assert.False(t, n.addrEventIsInteresting(netlink.AddrUpdate{LinkIndex: loopbackIndex(t) + 9999}))
+
+	// A name that does not resolve is skipped, not fatal.
+	n.refreshImportIfIndexes(map[string]struct{}{"definitely-not-an-interface": {}})
+	assert.False(t, n.addrEventIsInteresting(netlink.AddrUpdate{LinkIndex: loopbackIndex(t)}))
+}
+
+// TestLoopSurvivesNilAddrEventSource: a client assembled without an event
+// source must poll, not crash.
+//
+// subscribeAddr was documented as always non-nil and was only set by
+// newNetlinkClient, so any client built as a struct literal - which is how the
+// tests in this file build them - panicked as soon as its loop started.
+func TestLoopSurvivesNilAddrEventSource(t *testing.T) {
+	topology := map[string][]*netutils.ConnectedRoute{"lo": {}}
+	_, n := newTestImportServer(t, []string{"lo"}, topology)
+	require.Nil(t, n.subscribeAddr, "this test is meaningless if the helper sets one")
+
+	go n.loop()
+	t.Cleanup(func() {
+		close(n.dead)
+		<-n.done
+	})
+
+	// The loop must still run its passes without an event source.
+	assert.Eventually(t, func() bool { return n.importIfIndexes.Load() != nil },
+		5*time.Second, 20*time.Millisecond, "polling must continue without a subscription")
 }
