@@ -38,6 +38,11 @@ var (
 	netlinkImportErrorsTotalDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "netlink", "import_errors_total"),
 		"Errors encountered while importing kernel routes.", nil, nil)
+	netlinkImportAddrEventsTotalDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "netlink", "import_addr_events_total"),
+		"Kernel address changes that triggered an import. Flat while addresses are "+
+			"appearing means the netlink subscription is dead and imports have "+
+			"fallen back to the poll interval, which is otherwise invisible.", nil, nil)
 	netlinkImportLoopTicksTotalDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "netlink", "import_loop_ticks_total"),
 		"Import scan iterations. Stops advancing once the scan loop exits, so a "+
@@ -89,6 +94,7 @@ func (c *netlinkCollector) Describe(out chan<- *prometheus.Desc) {
 	out <- netlinkImportWithdrawnTotalDesc
 	out <- netlinkImportErrorsTotalDesc
 	out <- netlinkImportLoopTicksTotalDesc
+	out <- netlinkImportAddrEventsTotalDesc
 
 	out <- netlinkExportEnabledDesc
 	out <- netlinkExportedTotalDesc
@@ -120,6 +126,7 @@ func (c *netlinkCollector) Collect(out chan<- prometheus.Metric) {
 	counter(netlinkImportWithdrawnTotalDesc, s.ImportWithdrawn)
 	counter(netlinkImportErrorsTotalDesc, s.ImportErrors)
 	counter(netlinkImportLoopTicksTotalDesc, s.ImportTicks)
+	counter(netlinkImportAddrEventsTotalDesc, s.ImportAddrEvents)
 
 	gauge(netlinkExportEnabledDesc, s.ExportEnabled)
 	counter(netlinkExportedTotalDesc, s.ExportExported)
