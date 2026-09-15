@@ -227,7 +227,7 @@ func NewBgpServer(opt ...ServerOption) *BgpServer {
 // This used to pass a zero-value request, so AllowGracefulRestart was false and
 // every peer received Cease/PEER_DECONFIGURED. Under RFC 4724 a NOTIFICATION is
 // the explicit instruction to discard the routes immediately, which is the
-// opposite of what Graceful Restart is for: on a rolling restart each neighbour
+// opposite of what Graceful Restart is for: on a rolling restart each neighbor
 // dropped this node's routes at once rather than holding them.
 //
 // Peers that did not negotiate GR are unaffected - StopBgp still notifies them,
@@ -3717,7 +3717,7 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 	}
 
 	// BFD first, because it is the step that fails. Everything below this point
-	// either registers the neighbour or mutates a listening socket, and this
+	// either registers the neighbor or mutates a listening socket, and this
 	// used to run after all of it: on a bind failure addNeighbor returned with
 	// the peer already in neighborMap and peerGroupMap but with no FSM, so it
 	// sat in ListPeer stuck in IDLE and every retry was rejected with "can't
@@ -3726,7 +3726,7 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 	// Hard failure rather than a warning, which was always the intent: BFD
 	// configured but not listening means BGP comes up and nothing detects a peer
 	// failure, so the operator believes they have sub-second failover and has
-	// none. Refusing the neighbour surfaces that at config time. Refusing it
+	// none. Refusing the neighbor surfaces that at config time. Refusing it
 	// cleanly is what makes the refusal survivable.
 	if s.bfdServer != nil {
 		if err := s.bfdServer.AddPeer(context.Background(), ipAddr, c.Bfd.Config, c.Transport.Config.BindInterface); err != nil {

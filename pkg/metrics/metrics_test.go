@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -455,4 +456,105 @@ func TestEstablishedTimestampAbsentUntilEstablished(t *testing.T) {
 			t.Fatalf("emitted for a peer that never established: %v", f.GetMetric())
 		}
 	}
+}
+
+// Timers.State.Uptime is written when the session reaches ESTABLISHED and is
+// never cleared - only Downtime is reset. So the establishment timestamp goes
+// *stale* after a session drops rather than disappearing, and an alert that
+// reads it alone will think the peer is still up.
+//
+// That is the documented behaviour, not a bug to fix here: the value is a
+// genuine record of when the session last came up. But it is exactly the kind
+// of thing that gets "tidied" later into absent-when-down, which would break
+// every consumer that gates on bgp_peer_state instead. Pinned so the change
+// has to be deliberate.
+func TestEstablishedTimestampSurvivesTheSessionGoingDown(t *testing.T) {
+	assert := assert.New(t)
+
+	s := server.NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10279},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	peer := server.NewBgpServer()
+	go peer.Serve()
+	assert.NoError(peer.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	established := make(chan struct{})
+	var once sync.Once
+	assert.NoError(s.WatchEvent(watchCtx, server.WatchEventMessageCallbacks{
+		OnPeerUpdate: func(p *apiutil.WatchEventMessage_PeerEvent, _ time.Time) {
+			if p.Type == apiutil.PEER_EVENT_STATE && p.Peer.State.SessionState == bgp.BGP_FSM_ESTABLISHED {
+				once.Do(func() { close(established) })
+			}
+		},
+	}, server.WatchPeer()))
+
+	assert.NoError(peer.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 1},
+		Transport: &api.Transport{RemotePort: 10279},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+
+	select {
+	case <-established:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the session never established, so there is nothing to go stale")
+	}
+	watchCancel()
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(NewBgpCollector(s))
+
+	value := func() (float64, bool) {
+		families, err := reg.Gather()
+		assert.NoError(err)
+		for _, f := range families {
+			if f.GetName() == "bgp_peer_established_timestamp_seconds" {
+				return f.GetMetric()[0].GetGauge().GetValue(), true
+			}
+		}
+		return 0, false
+	}
+
+	up, ok := value()
+	assert.True(ok, "present once established")
+	assert.Greater(up, float64(1_700_000_000), "an absolute Unix timestamp, not a duration")
+
+	// Drop the session from the far side and wait for this one to notice.
+	peer.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	var down bool
+	for range 100 {
+		names := map[string]string{}
+		families, err := reg.Gather()
+		assert.NoError(err)
+		for _, f := range families {
+			if f.GetName() == "bgp_peer_state" {
+				for _, lp := range f.GetMetric()[0].GetLabel() {
+					names[lp.GetName()] = lp.GetValue()
+				}
+			}
+		}
+		if names["session_state"] != "SESSION_STATE_ESTABLISHED" {
+			down = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	assert.True(down, "the session did not go down, so the assertion below proves nothing")
+
+	after, ok := value()
+	assert.True(ok, "still emitted after the session drops - gate on bgp_peer_state, not on absence")
+	assert.Equal(up, after, "and it still reports when the session last came up")
 }

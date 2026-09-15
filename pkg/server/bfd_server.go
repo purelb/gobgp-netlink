@@ -289,7 +289,7 @@ func (s *bfdServer) loop() {
 					err = fmt.Errorf("BFD is enabled for %s but the server cannot listen on UDP %d",
 						ev.peerAddress, s.listenPort())
 					// Hand back the peer we just inserted. addNeighbor turns
-					// this error into a refused neighbour, so leaving it here
+					// this error into a refused neighbor, so leaving it here
 					// would keep a BFD session for an address with no BGP peer
 					// and let the retry ticker bring it up later, behind the
 					// operator's back.
@@ -361,7 +361,7 @@ func (s *bfdServer) startServer() {
 		// to provide.
 		//
 		// Without it the co-bind fails with EADDRINUSE, which addNeighbor turns
-		// into a refused neighbour the operator can see and act on. UDP has no
+		// into a refused neighbor the operator can see and act on. UDP has no
 		// TIME_WAIT, so the option bought nothing here that a restart needs -
 		// the port is free as soon as the process exits.
 		//

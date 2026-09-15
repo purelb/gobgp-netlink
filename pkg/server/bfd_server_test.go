@@ -838,7 +838,7 @@ func Test_BfdServerLoopSurvivesResetPeerInFlight(t *testing.T) {
 	}
 }
 
-// A BFD bind that fails must refuse the neighbour without leaving anything
+// A BFD bind that fails must refuse the neighbor without leaving anything
 // behind. addNeighbor used to register the peer in neighborMap and
 // peerGroupMap and only then call bfdServer.AddPeer, returning on error before
 // startFsmHandler - so the peer showed up in ListPeer stuck in IDLE with no
@@ -895,32 +895,77 @@ func Test_AddPeerLeavesNoTraceWhenTheBfdBindFails(t *testing.T) {
 	err = s.AddPeer(context.Background(), &api.AddPeerRequest{
 		Peer: oc.NewPeerFromConfigStruct(nConf),
 	})
-	assert.Error(err, "a BFD bind failure must refuse the neighbour")
+	assert.Error(err, "a BFD bind failure must refuse the neighbor")
 
 	// ...and must leave nothing behind: no peer, and no BFD session either.
 	peers := 0
 	assert.NoError(s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(*api.Peer) {
 		peers++
 	}))
-	assert.Equal(0, peers, "a refused neighbour must not appear in ListPeer")
+	assert.Equal(0, peers, "a refused neighbor must not appear in ListPeer")
 
 	bfdPeers := 0
 	s.ListBfdPeer(context.Background(), func(string, *api.BfdPeerState) { bfdPeers++ })
-	assert.Equal(0, bfdPeers, "a refused neighbour must not leave a BFD session registered")
+	assert.Equal(0, bfdPeers, "a refused neighbor must not leave a BFD session registered")
 
 	// The refusal has to be survivable: once the port frees up, the same
-	// neighbour goes in. This is what "can't overwrite the existing peer" made
+	// neighbor goes in. This is what "can't overwrite the existing peer" made
 	// impossible.
 	release()
 	assert.NoError(eventually(10*time.Second, func() error {
 		return s.AddPeer(context.Background(), &api.AddPeerRequest{
 			Peer: oc.NewPeerFromConfigStruct(nConf),
 		})
-	}), "the same neighbour must be addable again once the port is free")
+	}), "the same neighbor must be addable again once the port is free")
 
 	peers = 0
 	assert.NoError(s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(*api.Peer) {
 		peers++
 	}))
 	assert.Equal(1, peers)
+}
+
+// newDynamicPeer runs the peer-group overwrite twice on one config - directly
+// in newDynamicPeer, then again through SetDefaultNeighborConfigValues, which
+// does not short-circuit there because State.LocalAs is still zero. The BFD
+// inheritance check is block-level, and after the first pass the neighbor's
+// block is no longer empty, so the second pass has to be a no-op rather than a
+// different answer. A dynamic neighbor declares no BFD of its own, so what it
+// must end up with is the group's, unchanged.
+func Test_NewDynamicPeerInheritsGroupBfdAcrossBothOverwrites(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.Stop()
+
+	groupBfd := oc.BfdConfig{
+		Enabled:             true,
+		Port:                3784,
+		DetectionMultiplier: 7,
+		// Distinctive, and at or above the 300ms floor BfdConfig.Validate wants.
+		RequiredMinimumReceive:   321000,
+		DesiredMinimumTxInterval: 456000,
+	}
+	pg := &oc.PeerGroup{
+		Config: oc.PeerGroupConfig{PeerGroupName: "dyn", PeerAs: 65002},
+		Bfd:    oc.Bfd{Config: groupBfd},
+	}
+
+	var got oc.BfdConfig
+	assert.NoError(s.mgmtOperation(func() error {
+		peer := newDynamicPeer(&s.bgpConfig.Global, "198.51.100.77", pg, s.globalRib, s.policy, s.logger)
+		if peer == nil {
+			return fmt.Errorf("newDynamicPeer rejected a grouped neighbor")
+		}
+		got = peer.fsm.pConf.ReadCopy().Bfd.Config
+		return nil
+	}, false))
+
+	assert.Equal(groupBfd, got,
+		"a dynamic neighbor has no BFD block of its own, so it inherits the group's - "+
+			"and must still do so after the overwrite has run a second time")
 }
