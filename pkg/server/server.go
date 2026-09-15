@@ -3711,6 +3711,29 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 		return fmt.Errorf("can't be both route-server-client and route-reflector-client")
 	}
 
+	ipAddr, err := netip.ParseAddr(addr)
+	if err != nil {
+		return fmt.Errorf("failed to parse IP address: %v", err)
+	}
+
+	// BFD first, because it is the step that fails. Everything below this point
+	// either registers the neighbour or mutates a listening socket, and this
+	// used to run after all of it: on a bind failure addNeighbor returned with
+	// the peer already in neighborMap and peerGroupMap but with no FSM, so it
+	// sat in ListPeer stuck in IDLE and every retry was rejected with "can't
+	// overwrite the existing peer". Unrecoverable without a restart.
+	//
+	// Hard failure rather than a warning, which was always the intent: BFD
+	// configured but not listening means BGP comes up and nothing detects a peer
+	// failure, so the operator believes they have sub-second failover and has
+	// none. Refusing the neighbour surfaces that at config time. Refusing it
+	// cleanly is what makes the refusal survivable.
+	if s.bfdServer != nil {
+		if err := s.bfdServer.AddPeer(context.Background(), ipAddr, c.Bfd.Config, c.Transport.Config.BindInterface); err != nil {
+			return fmt.Errorf("neighbor %s: %w", addr, err)
+		}
+	}
+
 	if s.bgpConfig.Global.Config.Port > 0 {
 		for _, l := range s.listListeners(addr) {
 			if c.Config.AuthPassword != "" {
@@ -3733,24 +3756,22 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 	}
 	peer := newPeer(&s.bgpConfig.Global, c, bgp.BGP_FSM_IDLE, rib, s.policy, s.logger)
 	if err := s.setPeerPolicy(peer, c.ApplyPolicy); err != nil {
+		// The only fallible step left after the BFD session was registered, so
+		// it is the only one that has to hand it back. DeletePeer is a no-op
+		// for an address with no BFD peer.
+		if s.bfdServer != nil {
+			if derr := s.bfdServer.DeletePeer(context.Background(), ipAddr); derr != nil {
+				s.logger.Warn("failed to delete BFD peer after a failed policy assignment",
+					slog.String("Topic", "Peer"),
+					slog.String("Key", addr),
+					slog.String("Err", derr.Error()))
+			}
+		}
 		return fmt.Errorf("failed to set peer policy for %s: %v", addr, err)
 	}
-	s.neighborMap[netip.MustParseAddr(addr)] = peer
+	s.neighborMap[ipAddr] = peer
 	if name := c.Config.PeerGroup; name != "" {
 		s.peerGroupMap[name].AddMember(*c)
-	}
-	if s.bfdServer != nil {
-		ipAddr, err := netip.ParseAddr(addr)
-		if err != nil {
-			return fmt.Errorf("failed to parse IP address: %v", err)
-		}
-		// Hard failure, not a warning. BFD configured but not listening means
-		// BGP comes up and nothing detects a peer failure, so the operator
-		// believes they have sub-second failover and has none. Refusing the
-		// neighbour surfaces that at config time instead.
-		if err := s.bfdServer.AddPeer(context.Background(), ipAddr, c.Bfd.Config, c.Transport.Config.BindInterface); err != nil {
-			return fmt.Errorf("neighbor %s: %w", addr, err)
-		}
 	}
 	s.startFsmHandler(peer)
 	return nil

@@ -288,6 +288,12 @@ func (s *bfdServer) loop() {
 				if !s.start() {
 					err = fmt.Errorf("BFD is enabled for %s but the server cannot listen on UDP %d",
 						ev.peerAddress, s.listenPort())
+					// Hand back the peer we just inserted. addNeighbor turns
+					// this error into a refused neighbour, so leaving it here
+					// would keep a BFD session for an address with no BGP peer
+					// and let the retry ticker bring it up later, behind the
+					// operator's back.
+					s.deleteBfdPeer(ev.peerAddress)
 				}
 			} else {
 				s.deleteBfdPeer(ev.peerAddress)
@@ -344,7 +350,25 @@ func (s *bfdServer) startServer() {
 			s.gtsmRxAvailable.Store(true)
 		}
 
-		return netutils.SetReuseAddrSockopt(sc)
+		// Deliberately no SO_REUSEADDR.
+		//
+		// Linux lets two UDP sockets share a wildcard port only when both set
+		// it, and FRR's bfdd does. With it set here, starting alongside bfdd
+		// succeeded and the kernel then delivered each datagram to exactly one
+		// of the two: BFD packets went to whichever socket won, our sessions
+		// never came up, and bgp_bfd_server_up still reported 1. Nothing above
+		// DEBUG said anything. Silent loss of the failure detection BFD exists
+		// to provide.
+		//
+		// Without it the co-bind fails with EADDRINUSE, which addNeighbor turns
+		// into a refused neighbour the operator can see and act on. UDP has no
+		// TIME_WAIT, so the option bought nothing here that a restart needs -
+		// the port is free as soon as the process exits.
+		//
+		// SO_REUSEPORT would be worse than either: it would put us in bfdd's
+		// reuseport group and hash sessions between the two daemons by
+		// four-tuple, so each peer's BFD would land in one daemon at random.
+		return nil
 	}
 
 	l, err := lc.ListenPacket(context.Background(), "udp", addressString)

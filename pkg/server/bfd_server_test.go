@@ -699,8 +699,6 @@ func Test_BfdAddPeerFailsWhenThePortIsTaken(t *testing.T) {
 
 	s := NewBfdServer(&mockPeerState{}, slog.Default())
 	defer s.Stop()
-	// SO_REUSEADDR lets a wildcard bind coexist with a loopback one, so aim at
-	// the same address the blocker holds.
 	s.listenInterface = ""
 	assert.NoError(s.Start(context.Background(), oc.BfdConfig{Port: port}))
 
@@ -711,17 +709,16 @@ func Test_BfdAddPeerFailsWhenThePortIsTaken(t *testing.T) {
 		DesiredMinimumTxInterval: 300000,
 	}, "")
 
-	if err == nil {
-		// A wildcard bind can legitimately succeed alongside a loopback one.
-		// Only assert the invariant that matters: state must not claim the
-		// server is listening when it is not, and vice versa.
-		assert.True(s.IsListening(),
-			"AddPeer reported success, so the socket must actually be bound")
-		return
-	}
+	// This used to accept either outcome, because SO_REUSEADDR let our wildcard
+	// bind succeed alongside the blocker's loopback one - so the branch that
+	// actually ran asserted almost nothing. Without that option the co-bind is
+	// refused, which is the whole point of dropping it: a contended port is now
+	// a visible error rather than a server that reports itself up while another
+	// process takes its packets.
+	assert.Error(err, "a held port must refuse the bind, not silently share it")
+	assert.Contains(err.Error(), "cannot listen")
 	assert.False(s.IsListening(),
 		"AddPeer failed, so the server must not report itself as listening")
-	assert.Contains(err.Error(), "cannot listen")
 }
 
 // Test_BfdServerListeningTracksTheSocket pins the state the gauge and the CLI
@@ -839,4 +836,91 @@ func Test_BfdServerLoopSurvivesResetPeerInFlight(t *testing.T) {
 		t.Fatal("bfdServer.loop wedged: AddPeer blocked while a peer sat in ResetPeer. " +
 			"In the daemon the caller holds s.shared.mu, so this stalls all BGP sessions")
 	}
+}
+
+// A BFD bind that fails must refuse the neighbour without leaving anything
+// behind. addNeighbor used to register the peer in neighborMap and
+// peerGroupMap and only then call bfdServer.AddPeer, returning on error before
+// startFsmHandler - so the peer showed up in ListPeer stuck in IDLE with no
+// FSM goroutine, and every retry was rejected with "can't overwrite the
+// existing peer". Unrecoverable without restarting the daemon.
+//
+// Reachable in normal operation, not a corner case: anything else on the node
+// holding UDP/3784 - FRR's bfdd, most obviously - makes the bind fail, and
+// enabling BFD then cost the whole BGP session rather than just BFD.
+func Test_AddPeerLeavesNoTraceWhenTheBfdBindFails(t *testing.T) {
+	assert := assert.New(t)
+
+	blocker, err := net.ListenPacket("udp", fmt.Sprintf(":%d", BfdServerPort))
+	if err != nil {
+		t.Skipf("cannot hold UDP/%d on this host: %v", BfdServerPort, err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			_ = blocker.Close()
+			released = true
+		}
+	}
+	defer release()
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10179},
+	}))
+	defer s.Stop()
+
+	nConf := &oc.Neighbor{
+		Config: oc.NeighborConfig{
+			NeighborAddress: netip.MustParseAddr("127.0.0.1"),
+			PeerGroup:       "bfd_group",
+		},
+	}
+	pgConf := &oc.PeerGroup{
+		Config: oc.PeerGroupConfig{PeerGroupName: "bfd_group"},
+		Bfd: oc.Bfd{Config: oc.BfdConfig{
+			Enabled:                  true,
+			DetectionMultiplier:      3,
+			RequiredMinimumReceive:   300000,
+			DesiredMinimumTxInterval: 300000,
+		}},
+	}
+	assert.NoError(oc.SetDefaultNeighborConfigValues(nConf, pgConf, &oc.Global{}))
+	assert.NoError(s.AddPeerGroup(context.Background(), &api.AddPeerGroupRequest{
+		PeerGroup: oc.NewPeerGroupFromConfigStruct(pgConf),
+	}))
+
+	// The port is held, so this must be refused.
+	err = s.AddPeer(context.Background(), &api.AddPeerRequest{
+		Peer: oc.NewPeerFromConfigStruct(nConf),
+	})
+	assert.Error(err, "a BFD bind failure must refuse the neighbour")
+
+	// ...and must leave nothing behind: no peer, and no BFD session either.
+	peers := 0
+	assert.NoError(s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(*api.Peer) {
+		peers++
+	}))
+	assert.Equal(0, peers, "a refused neighbour must not appear in ListPeer")
+
+	bfdPeers := 0
+	s.ListBfdPeer(context.Background(), func(string, *api.BfdPeerState) { bfdPeers++ })
+	assert.Equal(0, bfdPeers, "a refused neighbour must not leave a BFD session registered")
+
+	// The refusal has to be survivable: once the port frees up, the same
+	// neighbour goes in. This is what "can't overwrite the existing peer" made
+	// impossible.
+	release()
+	assert.NoError(eventually(10*time.Second, func() error {
+		return s.AddPeer(context.Background(), &api.AddPeerRequest{
+			Peer: oc.NewPeerFromConfigStruct(nConf),
+		})
+	}), "the same neighbour must be addable again once the port is free")
+
+	peers = 0
+	assert.NoError(s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(*api.Peer) {
+		peers++
+	}))
+	assert.Equal(1, peers)
 }
