@@ -15,9 +15,44 @@ Assume you finished [Getting Started](getting-started.md).
 
 ## Scraping the metrics
 
-GoBGP exposes the metric endpoint and the pprof endpoint using the same startup flag: `--pprof-host`. By default, it listens locally on port `6060`.  
-The path on which the Prometheus metrics are exposed by default is `/metrics` and can be overriden using `--metrics-path`. Ensure `--pprof-disable` is not specified, or it will disable both `pprof` and
-the metric endpoint, unless an override for the path is specified through `--metrics-path` (in that case, metrics will be exposed anyways).  
+GoBGP serves metrics and pprof from one address by default, `--pprof-host`,
+which listens on `localhost:6060`. The path is `/metrics` and can be changed
+with `--metrics-path`; setting it to the empty string disables metrics.
+
+`--metrics-host` gives metrics their own address and their own mux, so pprof
+does not follow them. Set it to the *same* string as `--pprof-host` and the two
+share one listener again - one address can only carry one - and gobgpd says so
+at startup.
+
+`--metrics-min-interval` (default `15s`) is the minimum gap between BGP metric
+collections; scrapes in between replay the previous result. Collecting the BGP
+metrics takes the BGP write lock, so this bounds the share of time that lock is
+held rather than how often you may scrape. Keep it at or below your scrape
+interval and no sample is ever stale. `0` disables it.
+
+`--metrics-advertised-routes-disable` stops collecting `bgp_routes_advertised`,
+which walks the RIB once per peer per family with the export policy applied.
+It is collected by default; disable it only if that cost is a problem even once
+per interval, and note the series then disappears rather than reading zero.
+
+### Security
+
+**The metrics endpoint is unauthenticated.** It publishes the node's full peer
+table, its BGP authentication posture (`bgp_peer_password_set`) and its exact
+build. The default is loopback for that reason.
+
+Binding it elsewhere is a deliberate act and gobgpd logs it at `Error` when you
+do. Under `hostNetwork` in Kubernetes the node address is the same one the BGP
+fabric reaches, and **NetworkPolicy does not apply to host-namespace ports**, so
+there is no compensating control at that layer - use a sidecar proxy that
+authenticates, or scrape it from inside the same network namespace.
+
+pprof deserves more care than metrics, not less: `/debug/pprof/cmdline` returns
+the process command line, which carries `--sentry-dsn` and any TLS key paths,
+and `/debug/pprof/profile?seconds=` lets a caller choose how long to burn CPU.
+Pass `--pprof-disable` unless you need it. Note that under `hostNetwork`,
+`localhost:6060` is the *host's* loopback and is reachable by every other
+host-network pod on that node.
 
 Manually scrape the metrics to verify your setup is working:
 
@@ -63,13 +98,13 @@ histograms are the exception: they use `fsm_loop`.
 | bgp_peer_local_asn                 | What is the AS number presented to the peer by this router and its ID        | `peer`, `router_id`                    |
 | bgp_peer_flop_count                | Number of flops with the peer                                                | `peer`                                 |
 | bgp_peer_out_queue_count           | Length of the outgoing message queue                                         | `peer`                                 |
-| bgp_peer_password_set              | Whether the GoBGP peer has been configured (1) for authentication or not (0) | `peer`                                 |
+| bgp_peer_password_set              | Whether the peer is configured with a TCP-MD5 password (1) or not (0). Reported correctly since v1.3.0; before that it read 0 for every peer including authenticated ones | `peer`                                 |
 | bgp_peer_remove_private_as         | Do we remove private ASNs from the paths sent to the peer                    | `peer`                                 |
 | bgp_peer_send_community            | BGP community with the peer                                                  | `peer`                                 |
 | bgp_peer_type                      | Type of the BGP peer, internal (0) or external (1)                           | `peer`                                 |
-| bgp_peer_uptime                    | For how long the peer has been in its current state                          | `peer`                                 |
+| bgp_peer_established_timestamp_seconds | Unix timestamp at which the session was most recently established. Absent for a peer that has never established. **Not** removed when a session goes down, so gate on `bgp_peer_state` rather than reading it alone. Replaces `bgp_peer_uptime`, which despite its name and help text was always this same absolute timestamp | `peer` |
 | bgp_routes_accepted                | Number of routes accepted from peer                                          | `peer`, `route_family`                 |
-| bgp_routes_advertised              | Number of routes advertised to peer                                          | `peer`, `route_family`                 |
+| bgp_routes_advertised              | Number of routes advertised to peer. Absent entirely if `--metrics-advertised-routes-disable` is set | `peer`, `route_family`                 |
 | bgp_routes_received                | Number of routes received from peer                                          | `peer`, `route_family`                 |
 | bgp_sent_discarded_total           | Number of discarded BGP messages to peer                                     | `peer`                                 |
 | bgp_sent_keepalive_total           | Number of sent BGP KEEPALIVE messages from peer                              | `peer`                                 |
@@ -99,7 +134,7 @@ BFD liveness, per peer:
 | **Metric** | **Description** | **Labels** |
 | --- | --- | --- |
 | bgp_peer_bfd_enabled | Whether BFD is configured for the peer (1) or not (0). Emitted for every peer, so "configured but not up" is a comparison rather than a missing series | `peer` |
-| bgp_peer_bfd_state | Current BFD session state, carried as a label. Always 1 | `peer`, `session_state` |
+| bgp_peer_bfd_state | Current BFD session state, carried as labels. Always 1. `session_state` is our view, `remote_session_state` is the peer's | `peer`, `session_state`, `remote_session_state` |
 | bgp_peer_bfd_transmitted_packets_total | BFD control packets sent to the peer | `peer` |
 | bgp_peer_bfd_received_packets_total | BFD control packets received from the peer | `peer` |
 | bgp_peer_bfd_failure_transitions_total | Times the session has gone from up to down | `peer` |
@@ -113,6 +148,8 @@ BFD server, receive path:
 | bgp_bfd_received_error_total | Errors reading from the BFD server socket | |
 | bgp_bfd_invalid_packet_total | Datagrams that could not be decoded as BFD control packets | |
 | bgp_bfd_unknown_peer_total | Control packets from an address with no configured peer. Advancing while a peer is configured but stuck down indicates an address mismatch, typically a link-local neighbor configured without its zone | |
+| bgp_bfd_wrong_hop_limit_total | Control packets discarded because their TTL or hop limit was not 255, which RFC 5881 section 5 requires for single-hop sessions | |
+| bgp_bfd_server_up | Whether the BFD server socket is bound (1) or not (0). Zero while any peer has BFD enabled means no failure detection is happening at all, which is otherwise invisible: BGP stays up and the peers stay configured | |
 
 Netlink import and export:
 
@@ -164,8 +201,15 @@ slow work.
 Some labels can have specific values depending on the state of GoBGP or of the peers:
 
 - `peer`: the IP of the remote BGP peer
-- `session_state`: the BGP FSM status of the peer, can be either `UNKNOWN`, `IDLE`, `CONNECT`, `IDLE`, `ACTIVE`, `OPENSENT`, `OPENCONFIRM` or `ESTABLISHED`
-- `admin_state`: administrative state of the peer, can be either `DOWN`, `UP` or `PFX_CNT` if prefix limit is reached
+- `session_state`: the BGP FSM status of the peer. These are the protobuf enum
+  names, so the values carry a `SESSION_STATE_` prefix:
+  `SESSION_STATE_UNSPECIFIED`, `SESSION_STATE_IDLE`, `SESSION_STATE_CONNECT`,
+  `SESSION_STATE_ACTIVE`, `SESSION_STATE_OPENSENT`,
+  `SESSION_STATE_OPENCONFIRM` or `SESSION_STATE_ESTABLISHED`. A query written
+  against the bare names - `session_state="ESTABLISHED"` - matches nothing
+- `admin_state`: administrative state of the peer, likewise prefixed:
+  `ADMIN_STATE_UNSPECIFIED`, `ADMIN_STATE_UP`, `ADMIN_STATE_DOWN` or
+  `ADMIN_STATE_PFX_CT` (prefix count over limit)
 - `route_family`: any address family supported by GoBGP (e.g `ipv4`, `ipv6`, `evpn`)
 - `session_state` on `bgp_peer_bfd_state`: the BFD session state, one of
   `BFD_SESSION_STATE_UNSPECIFIED`, `BFD_SESSION_STATE_UP`,
