@@ -1347,8 +1347,9 @@ func (h *fsmHandler) recvMessageWithError(conn net.Conn, stateReasonCh chan<- fs
 			slog.String("Error", err.Error()),
 		)
 		fmsg := &fsmMsg{
-			MsgType: fsmMsgBGPMessage,
-			MsgData: err,
+			MsgType:   fsmMsgBGPMessage,
+			MsgData:   err,
+			timestamp: time.Now(),
 		}
 		return fmsg, err
 	}
@@ -2193,10 +2194,15 @@ func (h *fsmHandler) loop(ctx context.Context, wg *sync.WaitGroup) {
 
 		h.fsm.stateChange(nextState, reason)
 
+		// Stamped like every other fsmMsg. It is not read on this path today,
+		// but a zero timestamp on one that is read makes beforeUptime true for
+		// any established peer in handleFSMMessage and the message is dropped
+		// without a word - so the field is never left at its zero value.
 		msg := &fsmMsg{
 			MsgType:     fsmMsgStateChange,
 			MsgData:     nextState,
 			StateReason: reason,
+			timestamp:   time.Now(),
 		}
 
 		h.callback(msg)

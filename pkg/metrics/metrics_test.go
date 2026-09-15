@@ -173,43 +173,118 @@ func TestMetrics(test *testing.T) {
 	<-goroutineCh
 }
 
+// These metrics reported nonsense for a year while a test asserted only that
+// the sample count was 1. The assertions here are on values, and each one is
+// chosen to fail against the old code by a wide margin rather than a whisker.
+//
+// The ordering matters and is the reason the old shape could not have caught
+// it: the loop has to be parked and idle *before* the operation is submitted.
+// StartBgp blocks on its errCh until the operation has been handled, so a sleep
+// after it is outside the measured window entirely.
 func TestFSMLoopMetrics(t *testing.T) {
 	assert, require := assert.New(t), require.New(t)
 
 	fsmCollector := NewFSMTimingsCollector()
 	registry := prometheus.NewRegistry()
-	err := registry.Register(fsmCollector)
-	assert.NoError(err)
+	// Register, not MustRegister: Describe runs inside this call, in a
+	// goroutine with no recover, so a nil histogram would take the process
+	// down here rather than fail a scrape.
+	require.NoError(registry.Register(fsmCollector))
 
 	s := server.NewBgpServer(server.TimingHookOption(fsmCollector))
 	go s.Serve()
 
-	const metricName = "fsm_loop_mgmt_op_timing_sec"
-	metrics, err := registry.Gather()
-	require.NoError(err)
-	hist := getMetric(metrics, metricName)
-	require.NotNil(hist)
-	assert.Equal(uint64(0), *hist.Metric[0].Histogram.SampleCount)
+	sum := func(name string) (float64, uint64) {
+		families, err := registry.Gather()
+		require.NoError(err)
+		f := getMetric(families, name)
+		require.NotNil(f, "%s must be registered", name)
+		return f.Metric[0].Histogram.GetSampleSum(), f.Metric[0].Histogram.GetSampleCount()
+	}
 
-	err = s.StartBgp(context.Background(), &api.StartBgpRequest{
-		Global: &api.Global{
-			Asn:        2,
-			RouterId:   "2.2.2.2",
-			ListenPort: -1,
-		},
+	_, count := sum("fsm_loop_mgmt_op_work_seconds")
+	assert.Equal(uint64(0), count, "nothing observed before any operation")
+
+	// Park the loop in its select for a known interval. Against the old code
+	// this whole second landed in work_seconds and came back out of
+	// queue_wait_seconds as a negative.
+	const idle = time.Second
+	time.Sleep(idle)
+
+	require.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	workSum, workCount := sum("fsm_loop_mgmt_op_work_seconds")
+	assert.Equal(uint64(1), workCount, "StartBgp is one management operation")
+	assert.Less(workSum, 0.1,
+		"work must exclude the idle wait; the old code reported the full %s", idle)
+
+	queueSum, queueCount := sum("fsm_loop_mgmt_op_queue_wait_seconds")
+	assert.Equal(uint64(1), queueCount)
+	assert.Greater(queueSum, 0.0, "a real queue wait, not the negative the old code produced")
+	assert.Less(queueSum, 0.01,
+		"an unbuffered handoff is microseconds; anything near %s means idle time leaked back in", idle)
+
+	// Observed, and on an uncontended lock it is small. The value that matters
+	// operationally is the one under contention, which the lab test covers.
+	_, lockCount := sum("fsm_loop_mgmt_op_lock_wait_seconds")
+	assert.Equal(uint64(1), lockCount, "lock wait is always observed, even when zero")
+}
+
+// The queue wait series exists only for operations that actually have a queue.
+// A synchronous path reporting a zero queue wait would read as "never queued",
+// which is a claim, not an absence.
+func TestFSMTimingsCollectorOmitsQueueWaitForSynchronousPaths(t *testing.T) {
+	assert, require := assert.New(t), require.New(t)
+
+	registry := prometheus.NewRegistry()
+	require.NoError(registry.Register(NewFSMTimingsCollector()))
+
+	families, err := registry.Gather()
+	require.NoError(err, "a nil histogram in Describe or Collect shows up here")
+
+	names := map[string]bool{}
+	for _, f := range families {
+		names[f.GetName()] = true
+	}
+
+	for _, want := range []string{
+		"fsm_loop_mgmt_op_work_seconds",
+		"fsm_loop_mgmt_op_lock_wait_seconds",
+		"fsm_loop_mgmt_op_queue_wait_seconds",
+		"fsm_loop_accept_queue_wait_seconds",
+		"fsm_loop_roa_event_queue_wait_seconds",
+		"bgp_message_handling_work_seconds",
+		"bgp_message_handling_lock_wait_seconds",
+		"bgp_state_change_handling_work_seconds",
+	} {
+		assert.True(names[want], "%s must be registered", want)
+	}
+
+	for _, gone := range []string{
+		// handleFSMMessage is called synchronously; there is no queue.
+		"bgp_message_handling_queue_wait_seconds",
+		"bgp_state_change_handling_queue_wait_seconds",
+		// Renamed: these were the released v1.2.0 names.
+		"fsm_loop_mgmt_op_timing_sec",
+		"fsm_loop_mgmt_op_wait_sec",
+		"fsm_loop_event_timing_sec",
+		"fsm_loop_message_timing_sec",
+	} {
+		assert.False(names[gone], "%s must not be registered", gone)
+	}
+}
+
+// Observe is reachable through an exported interface, so an out-of-range
+// operation must not index past the end of the slice and kill the daemon.
+func TestFSMTimingsCollectorIgnoresUnknownOperation(t *testing.T) {
+	c := NewFSMTimingsCollector()
+	assert.NotPanics(t, func() {
+		c.Observe(server.FSMOperationTypeCount, server.FSMTiming{Work: time.Second})
+		c.Observe(server.FSMOperation(1<<20), server.FSMTiming{Work: time.Second})
 	})
-	require.NoError(err)
-	defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
-
-	// wait to ensure we started BGP
-	time.Sleep(1 * time.Second)
-
-	// StartBgp counts as single management operation
-	metrics, err = registry.Gather()
-	require.NoError(err)
-	hist = getMetric(metrics, metricName)
-	require.NotNil(hist)
-	assert.Equal(uint64(1), *hist.Metric[0].Histogram.SampleCount)
 }
 
 func getMetric(metrics []*dto.MetricFamily, metricName string) *dto.MetricFamily {
