@@ -3,7 +3,6 @@ package metrics
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -13,7 +12,9 @@ import (
 )
 
 type fsmTimingsCollector struct {
-	timingHistograms, waitHistograms []prometheus.Histogram
+	// Indexed by server.FSMOperation. queueWaitHistograms holds a nil for any
+	// operation with no queue; every read of these slices must tolerate that.
+	workHistograms, lockWaitHistograms, queueWaitHistograms []prometheus.Histogram
 }
 
 type FSMTimingsCollector interface {
@@ -21,66 +22,109 @@ type FSMTimingsCollector interface {
 	prometheus.Collector
 }
 
-var (
-	fsmOperationInfixes = [server.FSMOperationTypeCount]string{
-		"mgmt_op",
-		"accept",
-		"event",
-		"message",
-	}
+// 10us to 10s. Per-UPDATE message handling is tens of microseconds and a
+// stalled loop is seconds, so this spans six decades. prometheus.DefBuckets
+// floors at 5ms, which put every observation of every series into the first
+// bucket and made histogram_quantile(q, ...) return 0.005*q - a function of q
+// alone, independent of the data. Any floor above ~10us does the same to the
+// message path.
+var fsmLoopBuckets = []float64{
+	1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 0.1, 0.3, 1, 3, 10,
+}
 
-	fsmOperationDescriptions = [server.FSMOperationTypeCount]string{
-		"management operation",
-		"TCP accept",
-		"event",
-		"BGP message",
-	}
-)
+// fsmOperation names one timed operation.
+//
+// namespace is separate because only some of these happen in the Serve loop.
+// handleFSMMessage runs on per-peer goroutines, so putting it under fsm_loop
+// would claim a location that is not true - and would invite adding its _sum to
+// the loop utilisation query, where it can exceed wall-clock time because it
+// aggregates N concurrent goroutines.
+//
+// hasQueue is false where the path is synchronous. Reporting a fabricated zero
+// queue wait is worse than reporting nothing: it reads as "never queued".
+type fsmOperation struct {
+	namespace   string
+	infix       string
+	description string
+	hasQueue    bool
+}
+
+var fsmOperations = []fsmOperation{
+	server.FSMMgmtOp:      {"fsm_loop", "mgmt_op", "management operation", true},
+	server.FSMAccept:      {"fsm_loop", "accept", "TCP accept", true},
+	server.FSMROAEvent:    {"fsm_loop", "roa_event", "ROA event", true},
+	server.FSMMessage:     {"bgp", "message_handling", "BGP message handling", false},
+	server.FSMStateChange: {"bgp", "state_change_handling", "peer state change handling", false},
+}
+
+// A short table silently zero-fills, which would register a metric with an
+// empty subsystem and the help text "Histogram of  work". Fail the build
+// instead.
+var _ = [1]struct{}{}[len(fsmOperations)-int(server.FSMOperationTypeCount)]
 
 func NewFSMTimingsCollector() FSMTimingsCollector {
-	const namespace = "fsm_loop"
 	c := &fsmTimingsCollector{
-		timingHistograms: make([]prometheus.Histogram, server.FSMOperationTypeCount),
-		waitHistograms:   make([]prometheus.Histogram, server.FSMOperationTypeCount),
+		workHistograms:      make([]prometheus.Histogram, server.FSMOperationTypeCount),
+		lockWaitHistograms:  make([]prometheus.Histogram, server.FSMOperationTypeCount),
+		queueWaitHistograms: make([]prometheus.Histogram, server.FSMOperationTypeCount),
 	}
 
-	fsmHistograms := make([]prometheus.Histogram, server.FSMOperationTypeCount)
-	for i := range fsmHistograms {
-		c.timingHistograms[i] = prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    prometheus.BuildFQName(namespace, fsmOperationInfixes[i], "timing_sec"),
-			Help:    fmt.Sprintf("Histogram of %s timings", fsmOperationDescriptions[i]),
-			Buckets: prometheus.DefBuckets,
+	histogram := func(op fsmOperation, suffix, what string) prometheus.Histogram {
+		return prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    prometheus.BuildFQName(op.namespace, op.infix, suffix),
+			Help:    fmt.Sprintf("Histogram of %s %s", op.description, what),
+			Buckets: fsmLoopBuckets,
 		})
-		c.waitHistograms[i] = prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name:    prometheus.BuildFQName(namespace, fsmOperationInfixes[i], "wait_sec"),
-			Help:    fmt.Sprintf("Histogram of %s channel delays", fsmOperationDescriptions[i]),
-			Buckets: prometheus.DefBuckets,
-		})
+	}
+
+	for i, op := range fsmOperations {
+		c.workHistograms[i] = histogram(op, "work_seconds", "time spent holding the lock and doing the work")
+		c.lockWaitHistograms[i] = histogram(op, "lock_wait_seconds", "time blocked acquiring the BGP lock")
+		if op.hasQueue {
+			c.queueWaitHistograms[i] = histogram(op, "queue_wait_seconds", "time spent queued before being received")
+		}
 	}
 	return c
 }
 
-func (f *fsmTimingsCollector) Observe(op server.FSMOperation, tOp, tWait time.Duration) {
-	f.timingHistograms[op].Observe(tOp.Seconds())
-	if tWait != 0 {
-		f.waitHistograms[op].Observe(tWait.Seconds())
+func (f *fsmTimingsCollector) Observe(op server.FSMOperation, t server.FSMTiming) {
+	// FSMTimingHook is exported, so an out-of-tree caller can reach this with
+	// anything. Indexing on it would take the daemon down.
+	if int(op) >= len(f.workHistograms) {
+		return
+	}
+	f.workHistograms[op].Observe(t.Work.Seconds())
+	f.lockWaitHistograms[op].Observe(t.LockWait.Seconds())
+	if t.HasQueue {
+		if h := f.queueWaitHistograms[op]; h != nil {
+			h.Observe(t.QueueWait.Seconds())
+		}
+	}
+}
+
+// eachHistogram calls fn for every histogram that exists, skipping the nil
+// slots left for operations with no queue.
+//
+// The nil check is load-bearing in Describe: Registry.Register runs Describe in
+// a goroutine with no recover, so a nil here kills the daemon at startup rather
+// than failing a scrape. Collect is wrapped in safeCollect and would only
+// degrade to a 500, but both are written the same way so neither can rot.
+func (f *fsmTimingsCollector) eachHistogram(fn func(prometheus.Histogram)) {
+	for _, list := range [][]prometheus.Histogram{f.workHistograms, f.lockWaitHistograms, f.queueWaitHistograms} {
+		for _, h := range list {
+			if h != nil {
+				fn(h)
+			}
+		}
 	}
 }
 
 func (f *fsmTimingsCollector) Describe(descs chan<- *prometheus.Desc) {
-	for _, histogramList := range [][]prometheus.Histogram{f.timingHistograms, f.waitHistograms} {
-		for _, h := range histogramList {
-			h.Describe(descs)
-		}
-	}
+	f.eachHistogram(func(h prometheus.Histogram) { h.Describe(descs) })
 }
 
 func (f *fsmTimingsCollector) Collect(metrics chan<- prometheus.Metric) {
-	for _, histogramList := range [][]prometheus.Histogram{f.timingHistograms, f.waitHistograms} {
-		for _, h := range histogramList {
-			h.Collect(metrics)
-		}
-	}
+	f.eachHistogram(func(h prometheus.Histogram) { h.Collect(metrics) })
 }
 
 type bgpCollector struct {

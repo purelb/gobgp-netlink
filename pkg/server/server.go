@@ -54,7 +54,15 @@ const (
 	FSMMgmtOp FSMOperation = iota
 	FSMAccept
 	FSMROAEvent
+	// FSMMessage and FSMStateChange are both handled by handleFSMMessage, on
+	// per-peer goroutines rather than in the Serve loop. They are separate
+	// operations because their cost distributions are three to four orders of
+	// magnitude apart: a BGP message is per-UPDATE work with a large near-zero
+	// early-return population, while a state change can walk the RIB and take
+	// the write lock through stopNeighbor. One histogram over both describes
+	// neither.
 	FSMMessage
+	FSMStateChange
 
 	FSMOperationTypeCount
 )
@@ -66,13 +74,56 @@ const (
 	BfdServerPort = 3784
 )
 
+// queueWaitSince returns how long an item sat between being created and being
+// received.
+//
+// A zero enqueue time is reported as zero rather than subtracted. time.Sub on a
+// zero time.Time falls back to the wall clock and returns roughly +63.8 billion
+// seconds, which clears any non-negative sanity check and destroys the
+// histogram's sum permanently - the same shape of bug as the negative wait this
+// change exists to remove, just in the other direction. No live path produces a
+// zero today; this is here so that none ever can.
+func queueWaitSince(received, enqueued time.Time) time.Duration {
+	if enqueued.IsZero() {
+		return 0
+	}
+	return received.Sub(enqueued)
+}
+
+// FSMTiming splits one operation into intervals that do not overlap and sum to
+// its end-to-end latency.
+//
+// Keeping them apart is the whole point. The contended resource in this daemon
+// is s.shared.mu, not the goroutine: Serve takes the write lock for every
+// management operation, and Go's RWMutex parks new readers behind a waiting
+// writer, so peers can be starved while the loop itself looks idle. Folding
+// lock acquisition into the work measurement hides exactly that.
+type FSMTiming struct {
+	// Work is time spent holding the lock and doing the operation.
+	Work time.Duration
+	// LockWait is time spent blocked acquiring the lock.
+	LockWait time.Duration
+	// QueueWait is time the operation sat between being created and being
+	// received. Only meaningful when HasQueue is set.
+	QueueWait time.Duration
+	// HasQueue distinguishes "no queue on this path" from "queued for zero
+	// time". Synchronous paths leave it false so the series is not polluted
+	// with fabricated zeroes.
+	HasQueue bool
+}
+
+// FSMTimingHook receives per-operation timings.
+//
+// Observe may be called concurrently from multiple goroutines: the Serve loop
+// for the loop operations, and every peer's FSM and receive goroutines for
+// FSMMessage and FSMStateChange. Implementations must be safe for that.
 type FSMTimingHook interface {
-	Observe(op FSMOperation, tOp, tWait time.Duration)
+	Observe(op FSMOperation, t FSMTiming)
 }
 
 type nopTimingHook struct{}
 
-func (n nopTimingHook) Observe(op FSMOperation, tOp, tWait time.Duration) {}
+func (n nopTimingHook) Observe(op FSMOperation, t FSMTiming) {}
 
 type options struct {
 	grpcAddress       string
@@ -137,7 +188,7 @@ type BgpServer struct {
 	shared        *sharedData
 	apiServer     *server
 	bgpConfig     oc.Bgp
-	acceptCh      chan net.Conn
+	acceptCh      chan netutils.AcceptedConn
 	mgmtCh        chan *mgmtOp
 	closeCh       chan struct{}
 	policy        *table.RoutingPolicy
@@ -404,7 +455,14 @@ func (s *BgpServer) passConnToPeer(conn net.Conn) {
 		s.startFsmHandler(peer)
 		peer.PassConn(conn)
 	} else {
-		s.logger.Info("Can't find configuration for a new passive connection",
+		// Debug, not Info. This is the one branch an unconfigured source
+		// reaches, and under hostNetwork port 179 is open to anything that can
+		// route to the node. There is no accept rate limit, and this runs on
+		// the Serve goroutine under the write lock, so at Info a connection
+		// flood costs a log line each on top of the lock contention it already
+		// causes. The connection count is available as
+		// fsm_loop_accept_work_seconds_count without the amplification.
+		s.logger.Debug("Can't find configuration for a new passive connection",
 			slog.String("Topic", "Server"),
 			slog.String("Key", addr.String()),
 		)
@@ -431,33 +489,56 @@ func (s *BgpServer) Serve() {
 		s.isServing.Store(false)
 	}()
 
+	// Each case times three separate intervals. Reading the clock once, before
+	// the select, is what made these metrics useless: that instant is when the
+	// loop went *idle*, so it reported the idle gap as work and produced a
+	// negative queue wait. Take it after the receive, and again once the lock
+	// is held.
+	//
+	// SO_TIMESTAMPING would be needed to measure the accept case back to the
+	// SYN; AcceptedConn.Enqueued covers only the userspace half.
 	for {
-		tStart := time.Now()
 		select {
 		case <-s.runningCtx.Done():
 			s.logger.Info("shutting down",
 				slog.String("Topic", "BgpServer"))
 			return
 		case op := <-s.mgmtCh:
-			tWait := tStart.Sub(op.timestamp)
+			tRecv := time.Now()
 			s.shared.mu.Lock()
+			tWork := time.Now()
 			s.handleMGMTOp(op)
 			s.shared.mu.Unlock()
-			s.timingHook.Observe(FSMMgmtOp, time.Since(tStart), tWait)
+			s.timingHook.Observe(FSMMgmtOp, FSMTiming{
+				Work:      time.Since(tWork),
+				LockWait:  tWork.Sub(tRecv),
+				QueueWait: queueWaitSince(tRecv, op.timestamp),
+				HasQueue:  true,
+			})
 		case conn := <-s.acceptCh:
-			// NOTE: it would be useful to use kernel metrics such as SO_TIMESTAMPING to record time we got
-			// first SYN packet in TCP connection. For now we skip tWait for accept events, message/mgmt op
-			// delays should be enough to analyze FSM loop.
+			tRecv := time.Now()
 			s.shared.mu.Lock()
-			s.passConnToPeer(conn)
+			tWork := time.Now()
+			s.passConnToPeer(conn.Conn)
 			s.shared.mu.Unlock()
-			s.timingHook.Observe(FSMAccept, time.Since(tStart), 0)
+			s.timingHook.Observe(FSMAccept, FSMTiming{
+				Work:      time.Since(tWork),
+				LockWait:  tWork.Sub(tRecv),
+				QueueWait: queueWaitSince(tRecv, conn.Enqueued),
+				HasQueue:  true,
+			})
 		case ev := <-s.roaManager.ReceiveROA():
-			tWait := tStart.Sub(ev.timestamp)
+			tRecv := time.Now()
 			s.shared.mu.Lock()
+			tWork := time.Now()
 			s.roaManager.HandleROAEvent(ev)
 			s.shared.mu.Unlock()
-			s.timingHook.Observe(FSMROAEvent, time.Since(tStart), tWait)
+			s.timingHook.Observe(FSMROAEvent, FSMTiming{
+				Work:      time.Since(tWork),
+				LockWait:  tWork.Sub(tRecv),
+				QueueWait: queueWaitSince(tRecv, ev.timestamp),
+				HasQueue:  true,
+			})
 		}
 	}
 }
@@ -1681,9 +1762,30 @@ func (s *BgpServer) stopNeighbor(peer *peer, oldState bgp.FSMState, e *fsmMsg) {
 }
 
 func (s *BgpServer) handleFSMMessage(peer *peer, e *fsmMsg) {
+	// This runs on per-peer goroutines, not the Serve loop, and the RLock below
+	// is where a peer waits out whatever holds the write lock - a management
+	// operation, or a metrics scrape. That wait is the starvation the caching
+	// collector exists to bound, and nothing measured it. Split it from the
+	// handling rather than reporting their sum as work.
+	tRecv := time.Now()
+	tWork := tRecv // not zero even if RLock never returns
+	op := FSMMessage
+	if e.MsgType == fsmMsgStateChange {
+		op = FSMStateChange
+	}
+	// Declared before the unlock defer below, so it runs after it: the window
+	// has to include the RUnlock and any stopNeighbor write-lock acquisition.
+	defer func() {
+		s.timingHook.Observe(op, FSMTiming{
+			Work:     time.Since(tWork),
+			LockWait: tWork.Sub(tRecv),
+		})
+	}()
+
 	needStopNeighbor := false
 	var oldState bgp.FSMState
 	s.shared.mu.RLock()
+	tWork = time.Now()
 	defer func() {
 		s.shared.mu.RUnlock()
 		if needStopNeighbor {
@@ -2759,14 +2861,26 @@ func (s *BgpServer) StartBgp(ctx context.Context, r *api.StartBgpRequest) error 
 		}
 
 		if c.Config.Port > 0 {
-			acceptCh := make(chan net.Conn, 32)
+			acceptCh := make(chan netutils.AcceptedConn, 32)
+			listeners := make([]*netutils.TCPListener, 0, len(c.Config.LocalAddressList))
 			for _, addr := range c.Config.LocalAddressList {
 				l, err := netutils.NewTCPListener(s.logger, addr.String(), uint32(c.Config.Port), g.BindToDevice, acceptCh)
 				if err != nil {
+					// Close the ones that did bind. Returning without this left
+					// them listening and accepting into a channel that
+					// s.acceptCh was never assigned, so nothing drained it: the
+					// port stayed bound, the buffer filled, and acceptLoop
+					// blocked for good - while the caller was told BGP had not
+					// started. A node whose IPv6 address is not up yet at start
+					// is enough to reach it.
+					for _, opened := range listeners {
+						opened.Close()
+					}
 					return err
 				}
-				s.listeners = append(s.listeners, l)
+				listeners = append(listeners, l)
 			}
+			s.listeners = append(s.listeners, listeners...)
 			s.acceptCh = acceptCh
 		}
 
