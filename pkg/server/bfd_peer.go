@@ -526,18 +526,29 @@ func (p *bfdPeer) remoteDown() {
 	p.setStateDown()
 }
 
+// resetPeer tears down the BGP session behind this BFD session.
+//
+// It must not run on the peer's event loop. BgpServer.ResetPeer posts to the
+// unbuffered mgmtCh whose only reader is Serve, and Serve reaches this peer's
+// Stop() - via bfdServer.DeletePeer - while holding the BGP write lock. Called
+// synchronously from the loop, the three wait on each other: Serve waits for
+// the BFD event loop, the event loop waits for this goroutine, and this
+// goroutine waits for Serve. Nothing on that cycle has a timeout, so it takes
+// out every BGP session on the node.
 func (p *bfdPeer) resetPeer() {
-	if err := p.peerState.ResetPeer(context.Background(), &api.ResetPeerRequest{
-		Address:       p.peerAddress.String(),
-		Communication: "BFD is down",
-		Soft:          false,
-	}); err != nil {
-		p.logger.Warn("ResetPeer failed",
-			slog.String("Topic", "bfd"),
-			slog.String("Peer", p.peerAddress.String()),
-			slog.String("Err", err.Error()),
-		)
-	}
+	go func() {
+		if err := p.peerState.ResetPeer(context.Background(), &api.ResetPeerRequest{
+			Address:       p.peerAddress.String(),
+			Communication: "BFD is down",
+			Soft:          false,
+		}); err != nil {
+			p.logger.Warn("ResetPeer failed",
+				slog.String("Topic", "bfd"),
+				slog.String("Peer", p.peerAddress.String()),
+				slog.String("Err", err.Error()),
+			)
+		}
+	}()
 }
 
 func (p *bfdPeer) sendPacket(state bfd.StateType, poll bool, final bool, yourDiscriminator uint32) {

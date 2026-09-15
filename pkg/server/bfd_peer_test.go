@@ -14,6 +14,29 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// resetPeer dispatches off the peer's event loop (see bfd_peer.go), so the
+// call lands shortly after the state transition rather than synchronously with
+// it. These two helpers keep that asynchrony from turning into either a flaky
+// assertion or a vacuously true one.
+func waitResetPeerCount(t *testing.T, ps *mockPeerState, want int64) {
+	t.Helper()
+	for range 200 {
+		if atomic.LoadInt64(&ps.resetPeerCount) == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("resetPeerCount = %d, want %d", atomic.LoadInt64(&ps.resetPeerCount), want)
+}
+
+// assertNoResetPeer gives a dispatch that should never happen time to happen
+// before declaring it did not.
+func assertNoResetPeer(t *testing.T, ps *mockPeerState, msgAndArgs ...any) {
+	t.Helper()
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int64(0), atomic.LoadInt64(&ps.resetPeerCount), msgAndArgs...)
+}
+
 func Test_NewBfdPeer(t *testing.T) {
 	assert := assert.New(t)
 
@@ -131,7 +154,7 @@ func Test_RxPacketRemoteDownResetsPeer(t *testing.T) {
 	})
 
 	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, api.BfdSessionState(p.state.Load()))
-	assert.Equal(int64(1), atomic.LoadInt64(&ps.resetPeerCount))
+	waitResetPeerCount(t, ps, 1)
 }
 
 func Test_RxPacketRFCStateTransitions(t *testing.T) {
@@ -324,7 +347,7 @@ func Test_RxPacketZeroYourDiscriminatorForeignRemoteDiscarded(t *testing.T) {
 	})
 	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_UP, p.sessionState())
 	assert.Equal(uint32(12345), p.yourDiscriminator.Load())
-	assert.Equal(int64(0), atomic.LoadInt64(&ps.resetPeerCount))
+	assertNoResetPeer(t, ps)
 	assert.Equal(uint64(1), p.stats.invalidDiscriminator.Load())
 
 	// The bound remote system may still omit Your Discriminator when it
@@ -336,7 +359,7 @@ func Test_RxPacketZeroYourDiscriminatorForeignRemoteDiscarded(t *testing.T) {
 		DetectTimeMultiplier: 3,
 	})
 	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
-	assert.Equal(int64(1), atomic.LoadInt64(&ps.resetPeerCount))
+	waitResetPeerCount(t, ps, 1)
 }
 
 func Test_ExpiryDoesNotResetAlreadyDownPeer(t *testing.T) {
@@ -459,7 +482,7 @@ func Test_BfdExpiryHonoursTheDetectDeadline(t *testing.T) {
 			"the detect timer fired but a packet was accepted well inside the "+
 				"window; tearing down here is the false session-down")
 		assert.Equal(uint64(0), p.stats.expired.Load())
-		assert.Equal(int64(0), p.peerState.(*mockPeerState).resetPeerCount,
+		assertNoResetPeer(t, p.peerState.(*mockPeerState),
 			"a live session must not reset its BGP peer")
 	})
 
@@ -471,7 +494,7 @@ func Test_BfdExpiryHonoursTheDetectDeadline(t *testing.T) {
 
 		assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
 		assert.Equal(uint64(1), p.stats.expired.Load())
-		assert.Equal(int64(1), p.peerState.(*mockPeerState).resetPeerCount)
+		waitResetPeerCount(t, p.peerState.(*mockPeerState), 1)
 	})
 
 	t.Run("a session that never received anything still expires", func(t *testing.T) {

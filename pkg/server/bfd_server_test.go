@@ -14,6 +14,7 @@ import (
 
 	api "github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/config/oc"
+	"github.com/osrg/gobgp/v4/pkg/packet/bfd"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/goleak"
 )
@@ -746,4 +747,96 @@ func Test_BfdServerListeningTracksTheSocket(t *testing.T) {
 	assert.True(s.IsListening(), "the first BFD peer binds the socket")
 	assert.True(s.GetServerStats().GetListening(),
 		"the API must report the same thing the gauge does")
+}
+
+// blockingPeerState parks inside ResetPeer until released. That is what
+// BgpServer.ResetPeer does for real: it posts to the unbuffered mgmtCh, and
+// the only reader is Serve, which is itself blocked in bfdServer.AddPeer or
+// DeletePeer while holding the BGP write lock.
+type blockingPeerState struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingPeerState) ResetPeer(_ context.Context, _ *api.ResetPeerRequest) error {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return nil
+}
+
+// A BFD peer declaring its session down calls ResetPeer from its own event
+// loop. Deleting that peer makes bfdServer.loop wait on that same goroutine,
+// so if ResetPeer cannot return the whole BFD event loop is wedged - and in
+// the daemon its caller is holding s.shared.mu, which stalls every BGP
+// session on the node until the hold timers expire.
+//
+// AddPeer is the observable because, unlike DeletePeer, it waits for the
+// loop's result. addNeighbor and updateBfdPeer both call it under the write
+// lock.
+func Test_BfdServerLoopSurvivesResetPeerInFlight(t *testing.T) {
+	assert := assert.New(t)
+
+	ps := &blockingPeerState{entered: make(chan struct{}), release: make(chan struct{})}
+
+	s := NewBfdServer(ps, slog.Default())
+	assert.NoError(s.Start(context.Background(), oc.BfdConfig{Port: 13801}))
+	// Defers run LIFO, so this pair must stay in this order: the block has to
+	// be released before Stop(), or Stop() waits on the very goroutine the
+	// test parked and the failure arrives as a suite-wide timeout instead of
+	// a named failing test.
+	defer s.Stop()
+	defer close(ps.release)
+
+	addr := netip.MustParseAddr("127.0.0.1")
+	assert.NoError(s.AddPeer(context.Background(), addr, oc.BfdConfig{
+		Port:                     23801,
+		Enabled:                  true,
+		DetectionMultiplier:      5,
+		RequiredMinimumReceive:   200000,
+		DesiredMinimumTxInterval: 200000,
+	}, ""))
+
+	s.peersMutex.RLock()
+	p := s.peers[addr]
+	s.peersMutex.RUnlock()
+	assert.NotNil(p)
+
+	// Drive the peer's own loop into resetPeer: UP, then a remote DOWN. Rx
+	// queues the packet so rxPacket runs on the loop goroutine, which is what
+	// makes Stop() wait on it.
+	p.state.Store(int32(api.BfdSessionState_BFD_SESSION_STATE_UP))
+	p.yourDiscriminator.Store(12345)
+	p.Rx(&bfd.BFDHeader{
+		State:                bfd.StateDown,
+		MyDiscriminator:      67890,
+		YourDiscriminator:    p.myDiscriminator,
+		DetectTimeMultiplier: 5,
+	})
+
+	select {
+	case <-ps.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("peer loop never reached ResetPeer; the test drove the wrong path")
+	}
+
+	assert.NoError(s.DeletePeer(context.Background(), addr))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.AddPeer(context.Background(), netip.MustParseAddr("127.0.0.2"), oc.BfdConfig{
+			Port:                     23802,
+			Enabled:                  true,
+			DetectionMultiplier:      5,
+			RequiredMinimumReceive:   200000,
+			DesiredMinimumTxInterval: 200000,
+		}, "")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("bfdServer.loop wedged: AddPeer blocked while a peer sat in ResetPeer. " +
+			"In the daemon the caller holds s.shared.mu, so this stalls all BGP sessions")
+	}
 }
