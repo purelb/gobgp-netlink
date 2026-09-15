@@ -10,6 +10,7 @@ bgpd
 bsid
 buflen
 cidr
+cmdline
 distinguisher
 dscp
 ebgp
@@ -37,6 +38,7 @@ keychain
 linux
 llgr
 localhost
+loopback
 messageloop
 mgmt
 mpls
@@ -50,6 +52,7 @@ nlri
 onlink
 ospf
 pmsi
+pprof
 prepend
 reachability
 readmsg

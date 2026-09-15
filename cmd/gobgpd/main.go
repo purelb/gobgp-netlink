@@ -25,8 +25,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/netip"
 	"os"
 	"os/signal"
 	"runtime"
@@ -51,6 +53,35 @@ import (
 )
 
 var logger = slog.Default()
+
+// isLoopbackHostPort reports whether a "host:port" binds only to loopback.
+//
+// An empty host means the wildcard, which is the case worth catching: ":6060"
+// and "0.0.0.0:6060" reach every interface. A name is resolved, and is treated
+// as loopback only if every address it resolves to is - "localhost" normally
+// gives 127.0.0.1 and ::1, and both are. Anything that cannot be parsed or
+// resolved is reported as not loopback, so the warning errs towards being
+// shown.
+func isLoopbackHostPort(hostPort string) bool {
+	host, _, err := net.SplitHostPort(hostPort)
+	if err != nil || host == "" {
+		return false
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return ip.IsLoopback()
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		ip, err := netip.ParseAddr(a)
+		if err != nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
+}
 
 func main() {
 	sigCh := make(chan os.Signal, 1)
@@ -166,11 +197,38 @@ func main() {
 		}()
 	}
 
-	if metricsEnabled && opts.MetricsHost != "" && opts.MetricsHost != opts.PProfHost {
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle(opts.MetricsPath, promhttp.Handler())
-		serve(opts.MetricsHost, metricsMux, "metrics")
-		metricsEnabled = false // already served on its own address
+	if metricsEnabled && opts.MetricsHost != "" {
+		if opts.MetricsHost == opts.PProfHost {
+			// One address can only carry one listener, so the muxes have to
+			// merge here. Say so: it used to happen silently, and it means
+			// pprof follows metrics to wherever this is bound. /debug/pprof/
+			// cmdline returns os.Args, which carries --sentry-dsn and any TLS
+			// key paths, and /debug/pprof/profile?seconds= is an
+			// attacker-controlled CPU burn.
+			logger.Warn("--metrics-host equals --pprof-host, so pprof is served on the metrics address too; pass --pprof-disable to keep it off",
+				slog.String("Address", opts.MetricsHost))
+		} else {
+			metricsMux := http.NewServeMux()
+			metricsMux.Handle(opts.MetricsPath, promhttp.Handler())
+			serve(opts.MetricsHost, metricsMux, "metrics")
+			metricsEnabled = false // already served on its own address
+		}
+	}
+
+	// The metrics endpoint is unauthenticated and the default is loopback.
+	// Binding it anywhere else publishes the node's full peer table, its BGP
+	// authentication posture and its build identity to anything that can route
+	// to that address - which under hostNetwork includes the BGP fabric itself.
+	// Kubernetes NetworkPolicy does not cover host-namespace ports, so it is
+	// not a mitigation. Exposing it can be the right call; doing it by accident
+	// is not, so this is loud rather than fatal.
+	if metricsAddr := opts.MetricsHost; metricsAddr != "" && opts.MetricsPath != "" && !isLoopbackHostPort(metricsAddr) {
+		logger.Error("metrics are bound off-loopback and the endpoint is unauthenticated; it exposes the peer table and BGP auth posture to anything that can reach this address",
+			slog.String("Address", metricsAddr))
+	}
+	if pprofEnabled && !isLoopbackHostPort(opts.PProfHost) {
+		logger.Error("pprof is bound off-loopback; /debug/pprof/cmdline exposes the command line, including --sentry-dsn and TLS key paths",
+			slog.String("Address", opts.PProfHost))
 	}
 
 	httpMux := http.NewServeMux()
