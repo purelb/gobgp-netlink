@@ -25,8 +25,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/netip"
 	"os"
 	"os/signal"
 	"runtime"
@@ -52,35 +54,119 @@ import (
 
 var logger = slog.Default()
 
+// metricsHandler serves prometheus.DefaultGatherer with bounds on it.
+//
+// The bare promhttp.Handler() this replaces has MaxRequestsInFlight 0
+// (unlimited) and Timeout 0 (none), and a scrape reaches ListPeer, which runs
+// under the BGP write lock. Unbounded, concurrent scrapes queue without limit
+// and compound, because Go's RWMutex parks new readers behind a waiting writer.
+//
+// MaxRequestsInFlight 1 rejects the surplus outright with 503 rather than
+// letting it pile up. It bounds concurrency only - what bounds the share of
+// time the lock is held is the caching collector in pkg/metrics, and the two
+// are meant to be read together.
+//
+// ContinueOnError matters on its own. bgpCollector emits a
+// prometheus.NewInvalidMetric when GetBgp or ListPeer fails, and the default
+// HTTPErrorOnError turns that into a 500 with no body - so one transient error
+// on one peer blanks the netlink and BFD metrics too, which are collected from
+// lock-free counters and were perfectly fine.
+func metricsHandler() http.Handler {
+	return metricsHandlerFor(prometheus.DefaultGatherer, prometheus.DefaultRegisterer)
+}
+
+func metricsHandlerFor(g prometheus.Gatherer, r prometheus.Registerer) http.Handler {
+	return promhttp.HandlerFor(g, promhttp.HandlerOpts{
+		MaxRequestsInFlight: 1,
+		Timeout:             10 * time.Second,
+		ErrorHandling:       promhttp.ContinueOnError,
+		// Without this promhttp_metric_handler_errors_total is never exported
+		// and gathering failures are invisible.
+		Registry: r,
+	})
+}
+
+// isLoopbackHostPort reports whether a "host:port" binds only to loopback.
+//
+// An empty host means the wildcard, which is the case worth catching: ":6060"
+// and "0.0.0.0:6060" reach every interface. A name is resolved, and is treated
+// as loopback only if every address it resolves to is - "localhost" normally
+// gives 127.0.0.1 and ::1, and both are. Anything that cannot be parsed or
+// resolved is reported as not loopback, so the warning errs towards being
+// shown.
+func isLoopbackHostPort(hostPort string) bool {
+	host, _, err := net.SplitHostPort(hostPort)
+	if err != nil || host == "" {
+		return false
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return ip.IsLoopback()
+	}
+	addrs, err := net.LookupHost(host)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		ip, err := netip.ParseAddr(a)
+		if err != nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	return true
+}
+
 func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
 	var opts struct {
-		ConfigFile        string  `short:"f" long:"config-file" description:"specifying a config file"`
-		ConfigType        string  `short:"t" long:"config-type" description:"specifying config type (toml, yaml, json)" default:"toml"`
-		ConfigAutoReload  bool    `short:"a" long:"config-auto-reload" description:"activate config auto reload on changes"`
-		LogLevel          string  `short:"l" long:"log-level" description:"specifying log level"`
-		LogPlain          bool    `short:"p" long:"log-plain" description:"use plain format for logging (json by default)"`
-		DisableStdlog     bool    `long:"disable-stdlog" description:"disable standard logging"`
-		CPUs              int     `long:"cpus" description:"specify the number of CPUs to be used"`
-		GrpcHosts         string  `long:"api-hosts" description:"specify the hosts that gobgpd listens on" default:":50051"`
-		GracefulRestart   bool    `short:"r" long:"graceful-restart" description:"flag restart-state in graceful-restart capability"`
-		Dry               bool    `short:"d" long:"dry-run" description:"check configuration"`
-		PProfHost         string  `long:"pprof-host" description:"specify the host that gobgpd listens on for pprof and metrics" default:"localhost:6060"`
-		PProfDisable      bool    `long:"pprof-disable" description:"disable pprof profiling"`
-		MetricsPath       string  `long:"metrics-path" description:"specify path for prometheus metrics, empty value disables them" default:"/metrics"`
-		MetricsHost       string  `long:"metrics-host" description:"specify a separate host:port for prometheus metrics; defaults to --pprof-host, which also serves pprof"`
-		UseSdNotify       bool    `long:"sdnotify" description:"use sd_notify protocol"`
-		TLS               bool    `long:"tls" description:"enable TLS authentication for gRPC API"`
-		TLSCertFile       string  `long:"tls-cert-file" description:"The TLS cert file"`
-		TLSKeyFile        string  `long:"tls-key-file" description:"The TLS key file"`
-		TLSClientCAFile   string  `long:"tls-client-ca-file" description:"Optional TLS client CA file to authenticate clients against"`
-		Version           bool    `long:"version" description:"show version number"`
-		SentryDSN         string  `long:"sentry-dsn" description:"Sentry DSN" default:""`
-		SentryEnvironment string  `long:"sentry-environment" description:"Sentry environment" default:"development"`
-		SentrySampleRate  float64 `long:"sentry-sample-rate" description:"Sentry traces sample rate" default:"1.0"`
-		SentryDebug       bool    `long:"sentry-debug" description:"Sentry debug mode"`
+		ConfigFile       string `short:"f" long:"config-file" description:"specifying a config file"`
+		ConfigType       string `short:"t" long:"config-type" description:"specifying config type (toml, yaml, json)" default:"toml"`
+		ConfigAutoReload bool   `short:"a" long:"config-auto-reload" description:"activate config auto reload on changes"`
+		LogLevel         string `short:"l" long:"log-level" description:"specifying log level"`
+		LogPlain         bool   `short:"p" long:"log-plain" description:"use plain format for logging (json by default)"`
+		DisableStdlog    bool   `long:"disable-stdlog" description:"disable standard logging"`
+		CPUs             int    `long:"cpus" description:"specify the number of CPUs to be used"`
+		// Loopback by default, not the wildcard this used to be. The gRPC API
+		// has no authentication of its own - TLS is opt-in and client-certificate
+		// auth needs --tls-client-ca-file on top - and it is a write API: AddPeer,
+		// DeletePeer, AddPath, StopBgp, SetPolicies. Under hostNetwork a wildcard
+		// bind hands all of that to anything that can route to the node,
+		// including the BGP fabric. Both loopbacks are listed explicitly rather
+		// than as "localhost" so the bind does not depend on how that name
+		// resolves. Set the flag to expose it deliberately.
+		GrpcHosts       string `long:"api-hosts" description:"specify the hosts that gobgpd listens on; loopback by default, set explicitly to expose the API off-host" default:"127.0.0.1:50051,[::1]:50051"`
+		GracefulRestart bool   `short:"r" long:"graceful-restart" description:"flag restart-state in graceful-restart capability"`
+		Dry             bool   `short:"d" long:"dry-run" description:"check configuration"`
+		PProfHost       string `long:"pprof-host" description:"specify the host that gobgpd listens on for pprof and metrics" default:"localhost:6060"`
+		PProfDisable    bool   `long:"pprof-disable" description:"disable pprof profiling"`
+		MetricsPath     string `long:"metrics-path" description:"specify path for prometheus metrics, empty value disables them" default:"/metrics"`
+		MetricsHost     string `long:"metrics-host" description:"specify a separate host:port for prometheus metrics; defaults to --pprof-host, which also serves pprof"`
+		// Collecting the BGP metrics takes the BGP write lock, so this bounds
+		// the share of time that lock is held rather than how often the
+		// endpoint may be scraped. Keep it at or below the scrape interval and
+		// no sample is ever stale. 0 disables caching.
+		MetricsMinInterval time.Duration `long:"metrics-min-interval" description:"minimum interval between BGP metric collections; scrapes in between replay the last result (0 disables)" default:"15s"`
+		// Collected by default so the metric surface is unchanged, hence a
+		// disable switch rather than an enable one - the same shape as
+		// --pprof-disable, and the only shape go-flags offers, since a bool
+		// option there is a switch and cannot be given =false.
+		//
+		// Computing the advertised count walks the RIB per peer per family with
+		// the export policy applied. --metrics-min-interval is what bounds that
+		// cost; this drops the series outright, which is what a very large RIB
+		// may actually want.
+		MetricsAdvertisedRoutesDisable bool    `long:"metrics-advertised-routes-disable" description:"stop collecting bgp_routes_advertised, which walks the RIB per peer per family"`
+		UseSdNotify                    bool    `long:"sdnotify" description:"use sd_notify protocol"`
+		TLS                            bool    `long:"tls" description:"enable TLS authentication for gRPC API"`
+		TLSCertFile                    string  `long:"tls-cert-file" description:"The TLS cert file"`
+		TLSKeyFile                     string  `long:"tls-key-file" description:"The TLS key file"`
+		TLSClientCAFile                string  `long:"tls-client-ca-file" description:"Optional TLS client CA file to authenticate clients against"`
+		Version                        bool    `long:"version" description:"show version number"`
+		SentryDSN                      string  `long:"sentry-dsn" description:"Sentry DSN" default:""`
+		SentryEnvironment              string  `long:"sentry-environment" description:"Sentry environment" default:"development"`
+		SentrySampleRate               float64 `long:"sentry-sample-rate" description:"Sentry traces sample rate" default:"1.0"`
+		SentryDebug                    bool    `long:"sentry-debug" description:"Sentry debug mode"`
 	}
 	_, err := flags.Parse(&opts)
 	if err != nil {
@@ -148,9 +234,30 @@ func main() {
 	pprofEnabled := !opts.PProfDisable
 	metricsEnabled := opts.MetricsPath != ""
 	serve := func(addr string, mux *http.ServeMux, what string) {
+		// A bare http.ListenAndServe has no timeouts at all, so a client that
+		// opens a connection and dribbles a request holds a goroutine and a
+		// file descriptor indefinitely. Harmless on loopback, not once this is
+		// bound to a node address.
+		//
+		// WriteTimeout has to exceed the metrics handler's own Timeout below,
+		// or the connection is torn down before that handler can write its 503
+		// and the client sees a reset instead of an error. pprof is unaffected
+		// despite being slower than this: net/http/pprof extends the write
+		// deadline by WriteTimeout plus the requested duration, so
+		// /debug/pprof/profile?seconds=30 still completes.
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+		}
 		go func() {
-			if err := http.ListenAndServe(addr, mux); err != nil {
-				logger.Warn("HTTP listener failed",
+			// Error, not Warn. Metrics are a dependency for whatever is
+			// scraping this, and a listener that never came up is otherwise
+			// indistinguishable from a node that simply has nothing to report.
+			if err := srv.ListenAndServe(); err != nil {
+				logger.Error("HTTP listener failed",
 					slog.String("Listener", what),
 					slog.String("Address", addr),
 					slog.String("Error", err.Error()))
@@ -158,11 +265,38 @@ func main() {
 		}()
 	}
 
-	if metricsEnabled && opts.MetricsHost != "" && opts.MetricsHost != opts.PProfHost {
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle(opts.MetricsPath, promhttp.Handler())
-		serve(opts.MetricsHost, metricsMux, "metrics")
-		metricsEnabled = false // already served on its own address
+	if metricsEnabled && opts.MetricsHost != "" {
+		if opts.MetricsHost == opts.PProfHost {
+			// One address can only carry one listener, so the muxes have to
+			// merge here. Say so: it used to happen silently, and it means
+			// pprof follows metrics to wherever this is bound. /debug/pprof/
+			// cmdline returns os.Args, which carries --sentry-dsn and any TLS
+			// key paths, and /debug/pprof/profile?seconds= is an
+			// attacker-controlled CPU burn.
+			logger.Warn("--metrics-host equals --pprof-host, so pprof is served on the metrics address too; pass --pprof-disable to keep it off",
+				slog.String("Address", opts.MetricsHost))
+		} else {
+			metricsMux := http.NewServeMux()
+			metricsMux.Handle(opts.MetricsPath, metricsHandler())
+			serve(opts.MetricsHost, metricsMux, "metrics")
+			metricsEnabled = false // already served on its own address
+		}
+	}
+
+	// The metrics endpoint is unauthenticated and the default is loopback.
+	// Binding it anywhere else publishes the node's full peer table, its BGP
+	// authentication posture and its build identity to anything that can route
+	// to that address - which under hostNetwork includes the BGP fabric itself.
+	// Kubernetes NetworkPolicy does not cover host-namespace ports, so it is
+	// not a mitigation. Exposing it can be the right call; doing it by accident
+	// is not, so this is loud rather than fatal.
+	if metricsAddr := opts.MetricsHost; metricsAddr != "" && opts.MetricsPath != "" && !isLoopbackHostPort(metricsAddr) {
+		logger.Error("metrics are bound off-loopback and the endpoint is unauthenticated; it exposes the peer table and BGP auth posture to anything that can reach this address",
+			slog.String("Address", metricsAddr))
+	}
+	if pprofEnabled && !isLoopbackHostPort(opts.PProfHost) {
+		logger.Error("pprof is bound off-loopback; /debug/pprof/cmdline exposes the command line, including --sentry-dsn and TLS key paths",
+			slog.String("Address", opts.PProfHost))
 	}
 
 	httpMux := http.NewServeMux()
@@ -174,7 +308,7 @@ func main() {
 		httpMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
 	if metricsEnabled {
-		httpMux.Handle(opts.MetricsPath, promhttp.Handler())
+		httpMux.Handle(opts.MetricsPath, metricsHandler())
 	}
 	if pprofEnabled || metricsEnabled {
 		serve(opts.PProfHost, httpMux, "pprof")
@@ -262,7 +396,13 @@ func main() {
 		server.TimingHookOption(fsmTimingCollector),
 		// Only the real daemon reconciles routes left behind by a previous run.
 		server.StaleRouteCleanupOption(true))
-	prometheus.MustRegister(metrics.NewBgpCollector(bgpServer))
+	// Only the BGP collector is cached. It is the one that reaches ListPeer and
+	// so takes the BGP write lock; the netlink and BFD collectors read
+	// lock-free counters and cost nothing worth bounding.
+	prometheus.MustRegister(metrics.NewCachingCollector(
+		metrics.NewBgpCollector(bgpServer,
+			metrics.WithAdvertisedRoutes(!opts.MetricsAdvertisedRoutesDisable)),
+		opts.MetricsMinInterval))
 	prometheus.MustRegister(metrics.NewNetlinkCollector(bgpServer))
 	prometheus.MustRegister(metrics.NewBfdCollector(bgpServer))
 	prometheus.MustRegister(fsmTimingCollector)

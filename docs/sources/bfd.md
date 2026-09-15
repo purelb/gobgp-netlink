@@ -115,8 +115,54 @@ that group.
     peer-group = "edge"
 ```
 
-A neighbor can override BFD values inherited from its peer group by setting its
-own fields under `[neighbors.bfd.config]`.
+A neighbor overrides the group's BFD by declaring its own `bfd` block. The
+override is **whole-block, not per-field**: a neighbor with no `bfd` block
+inherits the group's settings, and a neighbor with one keeps exactly what it
+declared. Fields it leaves out take the global defaults from the table above,
+not the group's values.
+
+```toml
+# Inherits the group's BFD.
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "192.0.2.2"
+    peer-group = "edge"
+
+# Overrides it. detection-multiplier is the default 3, not the group's.
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "192.0.2.3"
+    peer-group = "edge"
+  [neighbors.bfd.config]
+    enabled = true
+    desired-minimum-tx-interval = 100000
+    required-minimum-receive = 100000
+
+# Opts out of BFD entirely.
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "192.0.2.4"
+    peer-group = "edge"
+  [neighbors.bfd.config]
+    enabled = false
+    port = 3784
+    desired-minimum-tx-interval = 1000000
+    required-minimum-receive = 1000000
+    detection-multiplier = 3
+```
+
+This is block-level rather than per-field because `enabled = false` has to work
+as an opt-out, and `false` is the zero value - indistinguishable from a field
+that was never set. Whole-block override is also what makes the behaviour the
+same over the gRPC API, where per-field presence was never available at all: a
+peer group previously overwrote a neighbor's BFD unconditionally there, its
+zero values included.
+
+One consequence to be aware of: a `bfd` block in which *every* field is zero or
+absent cannot be told apart from no block at all, so it inherits rather than
+opts out. The opt-out example above sets the other fields explicitly for that
+reason. Configuration generated from a schema with defaults - a Kubernetes CRD,
+for instance - always populates them and is unaffected.
 
 ## Port Behavior
 
@@ -139,6 +185,41 @@ For firewalls and ACLs, allow:
 - outbound UDP from an ephemeral source port in `49152..65535` to the peer's
   BFD destination port, normally `3784`;
 - the reverse direction on the peer.
+
+### Sharing the host with another BFD implementation
+
+gobgpd needs UDP `3784` to itself. It does **not** set `SO_REUSEADDR` on that
+socket, so if anything else on the host already holds the port - FRR's `bfdd`
+most often - the bind fails with `EADDRINUSE`, and any neighbor with BFD
+enabled is refused with an error naming the port.
+
+That is deliberate, and the refusal is the useful part. Linux lets two UDP
+sockets share a wildcard port only when *both* set `SO_REUSEADDR`, and `bfdd`
+does. gobgpd used to as well, so the two coexisted: the bind succeeded, the
+kernel delivered each datagram to exactly one of the two sockets, our sessions
+never came up, and `bgp_bfd_server_up` still reported `1`. Nothing above
+`DEBUG` said anything. A loud refusal at startup is better than sub-second
+failover that silently is not running.
+
+`SO_REUSEPORT` would not help. It would put gobgpd into `bfdd`'s reuseport
+group, where the kernel hashes each four-tuple to one socket - so each peer's
+BFD session would land in one daemon or the other at random.
+
+There is no way to move gobgpd's listener: `port` sets the *destination* port
+of outgoing packets, as described above, while the local server always binds
+`3784`. So if both daemons must run on one host, one of them has to be in its
+own network namespace - or, for a Kubernetes sidecar, use BFD from exactly one
+of them.
+
+Two consequences worth planning around:
+
+- gobgpd must be the only BFD speaker on the host for the default
+  configuration to work.
+- A restart needs the old process to have exited before the new one binds. In
+  Kubernetes that means the DaemonSet must not run two gobgpd pods on a node at
+  once, which is the default (`maxSurge: 0` - the controller deletes the old
+  pod before creating its replacement). Raising `maxSurge` above zero would
+  make every upgrade fail to bind BFD until the old pod finished terminating.
 
 The remote BGP speaker must also run BFD and must be configured with compatible
 timers. Enabling BFD only on one side is not enough to bring the BFD session up.

@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -325,4 +326,235 @@ func TestBfdServerMetricsAlwaysPresent(t *testing.T) {
 	}
 	assert.Contains(t, names, "bgp_bfd_unknown_peer_total")
 	assert.Contains(t, names, "bgp_bfd_received_drop_total")
+}
+
+// bgp_routes_advertised is the expensive series: producing it runs
+// getPossibleBest and filterpath over every destination with the export policy
+// applied, per peer per family, and it happens under the BGP write lock.
+// WithAdvertisedRoutes(false) has to drop it entirely rather than report zero,
+// which would read as "advertising nothing" - a different and alarming claim.
+// The other two route families must be unaffected.
+func TestAdvertisedRoutesCanBeDisabled(t *testing.T) {
+	assert := assert.New(t)
+
+	s := server.NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	names := func(c prometheus.Collector) map[string]bool {
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(c)
+		families, err := reg.Gather()
+		assert.NoError(err)
+		got := map[string]bool{}
+		for _, f := range families {
+			got[f.GetName()] = true
+		}
+		return got
+	}
+
+	on := names(NewBgpCollector(s))
+	assert.True(on["bgp_routes_advertised"], "collected by default")
+
+	off := names(NewBgpCollector(s, WithAdvertisedRoutes(false)))
+	assert.False(off["bgp_routes_advertised"], "absent, not zero, when disabled")
+	assert.True(off["bgp_routes_received"], "the cheap families are unaffected")
+	assert.True(off["bgp_routes_accepted"])
+}
+
+// Seven per-peer metrics were declared as counters and are not: a queue depth
+// falls as well as rises, a flop count resets with the daemon, three are enums,
+// one is a flag and one is a timestamp. Typed as counters they invited rate()
+// over values where it means nothing. The 18 message totals really are
+// counters and must stay that way.
+func TestPeerMetricTypes(t *testing.T) {
+	assert := assert.New(t)
+
+	s := server.NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(NewBgpCollector(s))
+	families, err := reg.Gather()
+	assert.NoError(err)
+
+	kind := map[string]dto.MetricType{}
+	for _, f := range families {
+		kind[f.GetName()] = f.GetType()
+	}
+
+	for _, name := range []string{
+		"bgp_peer_out_queue_count",
+		"bgp_peer_flop_count",
+		"bgp_peer_send_community",
+		"bgp_peer_remove_private_as",
+		"bgp_peer_type",
+		"bgp_peer_password_set",
+	} {
+		got, ok := kind[name]
+		assert.True(ok, "%s must be emitted", name)
+		assert.Equal(dto.MetricType_GAUGE, got, "%s is not a counter", name)
+	}
+
+	for _, name := range []string{
+		"bgp_received_update_total",
+		"bgp_sent_update_total",
+		"bgp_received_message_total",
+		"bgp_sent_message_total",
+	} {
+		assert.Equal(dto.MetricType_COUNTER, kind[name], "%s is a real counter", name)
+	}
+
+	// The old name must be gone, not merely joined by the new one.
+	_, stale := kind["bgp_peer_uptime"]
+	assert.False(stale, "bgp_peer_uptime was renamed and must not still be emitted")
+}
+
+// A peer that has never established has no establishment time. Emitting 0 made
+// time() - established read as roughly 56 years, which is why k8gobgp's
+// equivalent metric is deliberately absent in the same situation.
+func TestEstablishedTimestampAbsentUntilEstablished(t *testing.T) {
+	assert := assert.New(t)
+
+	s := server.NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	// Passive and never connected, so it cannot have established.
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(NewBgpCollector(s))
+	families, err := reg.Gather()
+	assert.NoError(err)
+
+	for _, f := range families {
+		if f.GetName() == "bgp_peer_established_timestamp_seconds" {
+			t.Fatalf("emitted for a peer that never established: %v", f.GetMetric())
+		}
+	}
+}
+
+// Timers.State.Uptime is written when the session reaches ESTABLISHED and is
+// never cleared - only Downtime is reset. So the establishment timestamp goes
+// *stale* after a session drops rather than disappearing, and an alert that
+// reads it alone will think the peer is still up.
+//
+// That is the documented behaviour, not a bug to fix here: the value is a
+// genuine record of when the session last came up. But it is exactly the kind
+// of thing that gets "tidied" later into absent-when-down, which would break
+// every consumer that gates on bgp_peer_state instead. Pinned so the change
+// has to be deliberate.
+func TestEstablishedTimestampSurvivesTheSessionGoingDown(t *testing.T) {
+	assert := assert.New(t)
+
+	s := server.NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10279},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	peer := server.NewBgpServer()
+	go peer.Serve()
+	assert.NoError(peer.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+	established := make(chan struct{})
+	var once sync.Once
+	assert.NoError(s.WatchEvent(watchCtx, server.WatchEventMessageCallbacks{
+		OnPeerUpdate: func(p *apiutil.WatchEventMessage_PeerEvent, _ time.Time) {
+			if p.Type == apiutil.PEER_EVENT_STATE && p.Peer.State.SessionState == bgp.BGP_FSM_ESTABLISHED {
+				once.Do(func() { close(established) })
+			}
+		},
+	}, server.WatchPeer()))
+
+	assert.NoError(peer.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 1},
+		Transport: &api.Transport{RemotePort: 10279},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+
+	select {
+	case <-established:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the session never established, so there is nothing to go stale")
+	}
+	watchCancel()
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(NewBgpCollector(s))
+
+	value := func() (float64, bool) {
+		families, err := reg.Gather()
+		assert.NoError(err)
+		for _, f := range families {
+			if f.GetName() == "bgp_peer_established_timestamp_seconds" {
+				return f.GetMetric()[0].GetGauge().GetValue(), true
+			}
+		}
+		return 0, false
+	}
+
+	up, ok := value()
+	assert.True(ok, "present once established")
+	assert.Greater(up, float64(1_700_000_000), "an absolute Unix timestamp, not a duration")
+
+	// Drop the session from the far side and wait for this one to notice.
+	peer.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	var down bool
+	for range 100 {
+		names := map[string]string{}
+		families, err := reg.Gather()
+		assert.NoError(err)
+		for _, f := range families {
+			if f.GetName() == "bgp_peer_state" {
+				for _, lp := range f.GetMetric()[0].GetLabel() {
+					names[lp.GetName()] = lp.GetValue()
+				}
+			}
+		}
+		if names["session_state"] != "SESSION_STATE_ESTABLISHED" {
+			down = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	assert.True(down, "the session did not go down, so the assertion below proves nothing")
+
+	after, ok := value()
+	assert.True(ok, "still emitted after the session drops - gate on bgp_peer_state, not on absence")
+	assert.Equal(up, after, "and it still reports when the session last came up")
 }

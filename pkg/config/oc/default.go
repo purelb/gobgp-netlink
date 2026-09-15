@@ -209,11 +209,11 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 			if !vv.IsSet("afi-safi.config.enabled") {
 				n.AfiSafis[i].Config.Enabled = true
 			}
-			// Derive per-family Graceful Restart from the neighbour's GR setting
+			// Derive per-family Graceful Restart from the neighbor's GR setting
 			// unless it was stated explicitly.
 			//
 			// fsm.go only emits a GR capability tuple for families whose
-			// mp-graceful-restart is enabled, so a neighbour with
+			// mp-graceful-restart is enabled, so a neighbor with
 			// graceful-restart enabled but nothing set per family advertised
 			// the capability with an empty AFI/SAFI list - the peer negotiated
 			// GR and then retained nothing, which is indistinguishable from
@@ -584,7 +584,28 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	overwriteConfig(&c.UseMultiplePaths.Config, &pg.UseMultiplePaths.Config, "neighbor.use-multiple-paths.config", v)
 	overwriteConfig(&c.RouteServer.Config, &pg.RouteServer.Config, "neighbor.route-server.config", v)
 	overwriteConfig(&c.TtlSecurity.Config, &pg.TtlSecurity.Config, "neighbor.ttl-security.config", v)
-	overwriteConfig(&c.Bfd.Config, &pg.Bfd.Config, "neighbor.bfd.config", v)
+	// BFD inherits as a whole block, not field by field like everything above.
+	//
+	// overwriteConfig decides per field on v.IsSet, and v is built from
+	// configuredFields, which only the TOML loader populates. On the gRPC path
+	// IsSet is false for every BFD field, so the peer group always won - a group
+	// with no bfd block erased a neighbor's settings with its zero values, and
+	// a grouped neighbor could neither configure BFD of its own nor opt out of
+	// the group's. docs/sources/bfd.md promised the opposite.
+	//
+	// Testing the neighbor's block instead makes both paths agree, and it is
+	// what lets `enabled = false` work as an opt-out: per-field presence cannot
+	// express that, because false is the zero value and indistinguishable from
+	// unset. The cost is that a TOML neighbor which sets only some BFD fields
+	// no longer inherits the others from its group - see bfd.md.
+	//
+	// This has to run before the BFD defaults further down, which fill port and
+	// the intervals on every neighbor and would make the block non-empty for
+	// all of them.
+	var noBfd BfdConfig
+	if c.Bfd.Config == noBfd {
+		overwriteConfig(&c.Bfd.Config, &pg.Bfd.Config, "neighbor.bfd.config", v)
+	}
 
 	if !v.IsSet("neighbor.afi-safis") {
 		c.AfiSafis = append([]AfiSafi{}, pg.AfiSafis...)

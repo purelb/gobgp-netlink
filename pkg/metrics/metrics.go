@@ -85,6 +85,11 @@ func (f *fsmTimingsCollector) Collect(metrics chan<- prometheus.Metric) {
 
 type bgpCollector struct {
 	server *server.BgpServer
+	// advertisedRoutes controls whether ListPeer is asked for the advertised
+	// count. Computing it runs getPossibleBest and filterpath over every
+	// destination with the export policy applied, per peer per family, which is
+	// O(peers x families x |RIB|) - and it happens under the BGP write lock.
+	advertisedRoutes bool
 }
 
 const (
@@ -201,9 +206,17 @@ var (
 		"Number of flops with the peer",
 		peerLabels, nil,
 	)
-	bgpPeerUptimeDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(namespace, "peer", "uptime"),
-		"For how long the peer has been in its current state",
+	// Renamed from bgp_peer_uptime. TimersState.uptime is a
+	// google.protobuf.Timestamp and this always emitted the absolute epoch
+	// second, while the help text said "for how long the peer has been in its
+	// current state" - so every consumer reasonably wrote time() - uptime, and
+	// a peer that had never established emitted 0 and read as 56 years up. The
+	// name now says what the value is.
+	bgpPeerEstablishedTimestampDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "peer", "established_timestamp_seconds"),
+		"Unix timestamp at which the session was most recently established. "+
+			"Not removed when the session goes down, so gate on bgp_peer_state "+
+			"rather than reading this alone.",
 		peerLabels, nil,
 	)
 	bgpPeerSendCommunityFlagDesc = prometheus.NewDesc(
@@ -259,8 +272,24 @@ var (
 	)
 )
 
-func NewBgpCollector(server *server.BgpServer) prometheus.Collector {
-	return &bgpCollector{server: server}
+// BgpCollectorOption configures the collector. Options rather than parameters
+// so that out-of-tree callers of NewBgpCollector keep compiling.
+type BgpCollectorOption func(*bgpCollector)
+
+// WithAdvertisedRoutes enables or disables collection of bgp_routes_advertised.
+// It is on by default: the metric surface stays as it was, and the cost is
+// bounded by the caching collector rather than by dropping the metric. Turning
+// it off drops the series entirely, which is the point on a very large RIB.
+func WithAdvertisedRoutes(enabled bool) BgpCollectorOption {
+	return func(c *bgpCollector) { c.advertisedRoutes = enabled }
+}
+
+func NewBgpCollector(server *server.BgpServer, opts ...BgpCollectorOption) prometheus.Collector {
+	c := &bgpCollector{server: server, advertisedRoutes: true}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 func (c *bgpCollector) Describe(out chan<- *prometheus.Desc) {
@@ -286,7 +315,7 @@ func (c *bgpCollector) Describe(out chan<- *prometheus.Desc) {
 
 	out <- bgpPeerOutQueueDesc
 	out <- bgpPeerFlopsDesc
-	out <- bgpPeerUptimeDesc
+	out <- bgpPeerEstablishedTimestampDesc
 	out <- bgpPeerSendCommunityFlagDesc
 	out <- bgpPeerRemovePrivateAsFlagDesc
 	out <- bgpPeerPasswordSetFlagDesc
@@ -308,15 +337,24 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 		return
 	}
 
-	req := &api.ListPeerRequest{EnableAdvertised: true}
+	req := &api.ListPeerRequest{EnableAdvertised: c.advertisedRoutes}
 	err = c.server.ListPeer(context.Background(), req, func(p *api.Peer) {
 		peerState := p.GetState()
 		peerAddr := peerState.GetNeighborAddress()
 		peerTimers := p.GetTimers()
 		msg := peerState.GetMessages()
 
+		// Counters only: monotonic totals that reset when gobgpd restarts.
 		send := func(desc *prometheus.Desc, cnt uint64) {
 			out <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, float64(cnt), peerAddr)
+		}
+		// Everything that is not a running total. Queue depths go down, enums
+		// and flags are neither cumulative nor ordered, and a timestamp is a
+		// point in time. Typed as counters they invited rate() over values
+		// where it means nothing: rate(bgp_peer_out_queue_count[5m]) was
+		// simply wrong.
+		sendGauge := func(desc *prometheus.Desc, v float64) {
+			out <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, v, peerAddr)
 		}
 
 		// Statistics about BGP announcements we've received from our peers
@@ -341,25 +379,38 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 		send(bgpSentDiscardedTotalDesc, msg.Sent.Discarded)
 		send(bgpSentMessageTotalDesc, msg.Sent.Total)
 
-		// The outbound queue message size
-		send(bgpPeerOutQueueDesc, uint64(peerState.GetOutQ()))
-		// The number of neighbor flops
-		send(bgpPeerFlopsDesc, uint64(peerState.GetFlops()))
-		// Uptime in seconds of the session
-		send(bgpPeerUptimeDesc, uint64(peerTimers.GetState().GetUptime().GetSeconds()))
-		// Whether BGP community is being sent
-		send(bgpPeerSendCommunityFlagDesc, uint64(peerState.GetSendCommunity()))
-		// Whether BGP Private AS is being removed (1) or not (0)
-		send(bgpPeerRemovePrivateAsFlagDesc, uint64(peerState.GetRemovePrivate()))
-		// Peer Type (0) for internal, (1) for external
-		send(bgpPeerTypeDesc, uint64(peerState.GetType()))
+		// The outbound queue message size. A depth, so it falls as well as rises.
+		sendGauge(bgpPeerOutQueueDesc, float64(peerState.GetOutQ()))
+		// The number of neighbor flops. An absolute count that resets with
+		// gobgpd, which is also why it has no _total suffix.
+		sendGauge(bgpPeerFlopsDesc, float64(peerState.GetFlops()))
+		// Whether BGP community is being sent. An enum.
+		sendGauge(bgpPeerSendCommunityFlagDesc, float64(peerState.GetSendCommunity()))
+		// Whether BGP Private AS is being removed (1) or not (0). An enum.
+		sendGauge(bgpPeerRemovePrivateAsFlagDesc, float64(peerState.GetRemovePrivate()))
+		// Peer Type (0) for internal, (1) for external. An enum.
+		sendGauge(bgpPeerTypeDesc, float64(peerState.GetType()))
 
-		// Whether authentication password is being set (1) or not (0)
-		passwordSetFlag := 0
-		if peerState.GetAuthPassword() != "" {
+		// Whether authentication password is being set (1) or not (0). A flag.
+		//
+		// Reads the flag, not the password. PeerState.AuthPassword is declared
+		// but never written, and ListPeer redacts Conf.AuthPassword before the
+		// peer gets here, so the old GetAuthPassword() != "" test reported 0
+		// for every peer, always - including MD5-authenticated ones. Any panel
+		// built on it read as 100% unauthenticated forever.
+		passwordSetFlag := 0.0
+		if peerState.GetAuthPasswordSet() {
 			passwordSetFlag = 1
 		}
-		send(bgpPeerPasswordSetFlagDesc, uint64(passwordSetFlag))
+		sendGauge(bgpPeerPasswordSetFlagDesc, passwordSetFlag)
+
+		// Uptime is a Unix timestamp, not a duration - see the help text. A
+		// peer that has never established has no uptime at all: ProtoTimestamp
+		// returns nil for zero, and emitting that as 0 made time() - uptime
+		// read as 56 years rather than as unknown. Absent is the honest answer.
+		if uptime := peerTimers.GetState().GetUptime(); uptime != nil {
+			sendGauge(bgpPeerEstablishedTimestampDesc, float64(uptime.GetSeconds()))
+		}
 
 		// Remote peer router ID and ASN
 		out <- prometheus.MustNewConstMetric(
@@ -414,12 +465,17 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 				float64(afiState.GetAccepted()),
 				labelValues...,
 			)
-			out <- prometheus.MustNewConstMetric(
-				bgpRoutesAdvertisedDesc,
-				prometheus.GaugeValue,
-				float64(afiState.GetAdvertised()),
-				labelValues...,
-			)
+			// Absent rather than zero when it was not collected: a flat zero
+			// would read as "advertising nothing", which is a different and
+			// alarming thing to say.
+			if c.advertisedRoutes {
+				out <- prometheus.MustNewConstMetric(
+					bgpRoutesAdvertisedDesc,
+					prometheus.GaugeValue,
+					float64(afiState.GetAdvertised()),
+					labelValues...,
+				)
+			}
 		}
 	})
 	if err != nil {

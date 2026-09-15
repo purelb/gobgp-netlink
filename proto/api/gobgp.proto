@@ -1081,6 +1081,15 @@ message PeerState {
   string ipv4_nexthop = 200;
   string ipv6_nexthop = 201;
   string ipv6_link_local_nexthop = 202;
+  // Whether this session is configured with a TCP-MD5 password.
+  //
+  // The flag, never the value. auth_password above it is declared but never
+  // written by anything, and PeerConf.auth_password is redacted by ListPeer
+  // before it leaves the server - so bgp_peer_password_set read 0 for every
+  // peer including authenticated ones. Computing the flag at conversion time,
+  // where the config is still intact, is what makes that metric true without
+  // putting the key anywhere a caller can read it.
+  bool auth_password_set = 203;
 }
 
 message Messages {

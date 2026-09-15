@@ -591,6 +591,15 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 		State: &api.PeerState{
 			SessionState: sessionState,
 			AdminState:   admin_state,
+			// Computed here because this is the last point the password is
+			// still present: ListPeer redacts Conf.AuthPassword before the peer
+			// leaves the server, and PeerState.AuthPassword is never written by
+			// anything, so bgp_peer_password_set read 0 for every peer whether
+			// or not MD5 was configured. The flag only - PeerState.AuthPassword
+			// stays unwritten, because unlike Conf it is not redacted anywhere
+			// and would carry the key straight out through ListPeer and
+			// `gobgp neighbor -j`.
+			AuthPasswordSet: pconf.Config.AuthPassword != "",
 			Messages: &api.Messages{
 				Received: &api.Message{
 					Notification:   pconf.State.Messages.Received.Notification,
