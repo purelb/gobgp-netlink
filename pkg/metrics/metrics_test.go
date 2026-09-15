@@ -368,3 +368,91 @@ func TestAdvertisedRoutesCanBeDisabled(t *testing.T) {
 	assert.True(off["bgp_routes_received"], "the cheap families are unaffected")
 	assert.True(off["bgp_routes_accepted"])
 }
+
+// Seven per-peer metrics were declared as counters and are not: a queue depth
+// falls as well as rises, a flop count resets with the daemon, three are enums,
+// one is a flag and one is a timestamp. Typed as counters they invited rate()
+// over values where it means nothing. The 18 message totals really are
+// counters and must stay that way.
+func TestPeerMetricTypes(t *testing.T) {
+	assert := assert.New(t)
+
+	s := server.NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(NewBgpCollector(s))
+	families, err := reg.Gather()
+	assert.NoError(err)
+
+	kind := map[string]dto.MetricType{}
+	for _, f := range families {
+		kind[f.GetName()] = f.GetType()
+	}
+
+	for _, name := range []string{
+		"bgp_peer_out_queue_count",
+		"bgp_peer_flop_count",
+		"bgp_peer_send_community",
+		"bgp_peer_remove_private_as",
+		"bgp_peer_type",
+		"bgp_peer_password_set",
+	} {
+		got, ok := kind[name]
+		assert.True(ok, "%s must be emitted", name)
+		assert.Equal(dto.MetricType_GAUGE, got, "%s is not a counter", name)
+	}
+
+	for _, name := range []string{
+		"bgp_received_update_total",
+		"bgp_sent_update_total",
+		"bgp_received_message_total",
+		"bgp_sent_message_total",
+	} {
+		assert.Equal(dto.MetricType_COUNTER, kind[name], "%s is a real counter", name)
+	}
+
+	// The old name must be gone, not merely joined by the new one.
+	_, stale := kind["bgp_peer_uptime"]
+	assert.False(stale, "bgp_peer_uptime was renamed and must not still be emitted")
+}
+
+// A peer that has never established has no establishment time. Emitting 0 made
+// time() - established read as roughly 56 years, which is why k8gobgp's
+// equivalent metric is deliberately absent in the same situation.
+func TestEstablishedTimestampAbsentUntilEstablished(t *testing.T) {
+	assert := assert.New(t)
+
+	s := server.NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	// Passive and never connected, so it cannot have established.
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(NewBgpCollector(s))
+	families, err := reg.Gather()
+	assert.NoError(err)
+
+	for _, f := range families {
+		if f.GetName() == "bgp_peer_established_timestamp_seconds" {
+			t.Fatalf("emitted for a peer that never established: %v", f.GetMetric())
+		}
+	}
+}
