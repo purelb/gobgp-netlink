@@ -22,10 +22,11 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// OverwriteNeighborConfigWithPeerGroup had no test of any kind, and the BFD
-// inheritance fix changes what it does for every grouped neighbor on both
-// config paths. These pin the behaviour as it stands first, so that the
-// assertions which flip are exactly the intended ones and no others.
+// OverwriteNeighborConfigWithPeerGroup had no test of any kind before the BFD
+// inheritance change, which alters what it does for every grouped neighbor on
+// both config paths. These were written against the old behaviour first so
+// that the assertions which flipped could be seen to be the intended ones and
+// no others; two did, and they now state the new contract.
 //
 // Every case uses its own neighbor address. configuredFields is a package
 // global that RegisterConfiguredFields only ever adds to - nothing prunes it,
@@ -59,29 +60,56 @@ func tomlNeighbor(addr string, bfd map[string]any) map[string]any {
 	return n
 }
 
-// A neighbor configured over gRPC cannot keep its own BFD settings: nothing
-// populates configuredFields on that path, so IsSet is false for every field
-// and the peer group wins them all - including a group that has no BFD block
-// at all, whose zero values silently erase the neighbor's.
-//
-// This is the bug the peer-group BFD fix addresses. When that lands, this
-// expectation changes to the neighbor keeping its own block.
-func Test_OverwriteNeighborConfigWithPeerGroup_GrpcPathLosesNeighborBfd(t *testing.T) {
+// A neighbor configured over gRPC keeps its own BFD settings. Nothing
+// populates configuredFields on that path, so the per-field IsSet check used
+// to be false for every BFD field and the group won them all - a group with
+// no BFD block erased the neighbor's settings with its zero values.
+func Test_OverwriteNeighborConfigWithPeerGroup_GrpcPathKeepsNeighborBfd(t *testing.T) {
 	assert := assert.New(t)
 
-	n := neighborWithBfd("198.51.100.1", "edge", BfdConfig{
+	own := BfdConfig{
 		Enabled:                  true,
 		Port:                     9999,
 		DetectionMultiplier:      7,
 		DesiredMinimumTxInterval: 50000,
 		RequiredMinimumReceive:   50000,
-	})
+	}
+	n := neighborWithBfd("198.51.100.1", "edge", own)
 	pg := peerGroupWithBfd("edge", BfdConfig{})
 
 	assert.NoError(OverwriteNeighborConfigWithPeerGroup(n, pg))
 
-	assert.Equal(BfdConfig{}, n.Bfd.Config,
-		"current behaviour: the group's empty BFD block overwrites the neighbor's")
+	assert.Equal(own, n.Bfd.Config, "a group with no BFD block must not erase the neighbor's")
+}
+
+// The opt-out that per-field presence could never express: `enabled = false`
+// on a neighbor in a group that has BFD on. false is the zero value, so a
+// field-presence check cannot tell it from unset - only a block-level one can.
+// The other fields are populated because that is how the block arrives from a
+// CRD with defaults, and it is what makes the block non-empty.
+func Test_OverwriteNeighborConfigWithPeerGroup_NeighborCanOptOutOfGroupBfd(t *testing.T) {
+	assert := assert.New(t)
+
+	optOut := BfdConfig{
+		Enabled:                  false,
+		Port:                     3784,
+		DetectionMultiplier:      3,
+		DesiredMinimumTxInterval: 1000000,
+		RequiredMinimumReceive:   1000000,
+	}
+	n := neighborWithBfd("198.51.100.6", "edge", optOut)
+	pg := peerGroupWithBfd("edge", BfdConfig{
+		Enabled:                  true,
+		Port:                     3784,
+		DetectionMultiplier:      3,
+		DesiredMinimumTxInterval: 300000,
+		RequiredMinimumReceive:   300000,
+	})
+
+	assert.NoError(OverwriteNeighborConfigWithPeerGroup(n, pg))
+
+	assert.False(n.Bfd.Config.Enabled, "the neighbor opted out and the group must not turn BFD back on")
+	assert.Equal(optOut, n.Bfd.Config)
 }
 
 // The inverse, and the behaviour that must survive the fix: a neighbor that
@@ -104,15 +132,13 @@ func Test_OverwriteNeighborConfigWithPeerGroup_GrpcPathInheritsGroupBfd(t *testi
 	assert.Equal(groupBfd, n.Bfd.Config, "a neighbor with no BFD block inherits the group's")
 }
 
-// The TOML path is the one that has per-field inheritance today, because
-// configuredFields carries the raw parsed entry and overwriteConfig consults
-// it field by field. A neighbor that sets only `enabled` keeps that and
-// inherits the rest.
-//
-// The peer-group BFD fix narrows this to whole-block override, because
-// per-field presence cannot express `enabled = false` as an opt-out - false
-// is the zero value. This test records what is being given up.
-func Test_OverwriteNeighborConfigWithPeerGroup_TomlPathOverridesPerField(t *testing.T) {
+// BFD inherits as a whole block on the TOML path too. This used to be
+// per-field - a neighbor setting only `enabled` inherited the group's port
+// and intervals - and narrowing it is the deliberate cost of making
+// `enabled = false` a working opt-out. The fields the neighbor left out stay
+// zero here and pick up the global defaults later in
+// setDefaultNeighborConfigValuesWithViper, not the group's values.
+func Test_OverwriteNeighborConfigWithPeerGroup_TomlPathOverridesWholeBlock(t *testing.T) {
 	assert := assert.New(t)
 
 	const addr = "198.51.100.3"
@@ -129,11 +155,8 @@ func Test_OverwriteNeighborConfigWithPeerGroup_TomlPathOverridesPerField(t *test
 
 	assert.NoError(OverwriteNeighborConfigWithPeerGroup(n, pg))
 
-	assert.True(n.Bfd.Config.Enabled, "the field the neighbor set is kept")
-	assert.Equal(uint16(4784), n.Bfd.Config.Port, "fields it did not set inherit from the group")
-	assert.Equal(uint8(9), n.Bfd.Config.DetectionMultiplier)
-	assert.Equal(uint32(700000), n.Bfd.Config.DesiredMinimumTxInterval)
-	assert.Equal(uint32(700000), n.Bfd.Config.RequiredMinimumReceive)
+	assert.Equal(BfdConfig{Enabled: true}, n.Bfd.Config,
+		"the neighbor's block is kept whole; nothing is taken from the group")
 }
 
 // A TOML neighbor that set no BFD fields inherits the whole block, the same

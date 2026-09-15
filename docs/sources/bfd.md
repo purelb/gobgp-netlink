@@ -115,8 +115,54 @@ that group.
     peer-group = "edge"
 ```
 
-A neighbor can override BFD values inherited from its peer group by setting its
-own fields under `[neighbors.bfd.config]`.
+A neighbor overrides the group's BFD by declaring its own `bfd` block. The
+override is **whole-block, not per-field**: a neighbor with no `bfd` block
+inherits the group's settings, and a neighbor with one keeps exactly what it
+declared. Fields it leaves out take the global defaults from the table above,
+not the group's values.
+
+```toml
+# Inherits the group's BFD.
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "192.0.2.2"
+    peer-group = "edge"
+
+# Overrides it. detection-multiplier is the default 3, not the group's.
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "192.0.2.3"
+    peer-group = "edge"
+  [neighbors.bfd.config]
+    enabled = true
+    desired-minimum-tx-interval = 100000
+    required-minimum-receive = 100000
+
+# Opts out of BFD entirely.
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "192.0.2.4"
+    peer-group = "edge"
+  [neighbors.bfd.config]
+    enabled = false
+    port = 3784
+    desired-minimum-tx-interval = 1000000
+    required-minimum-receive = 1000000
+    detection-multiplier = 3
+```
+
+This is block-level rather than per-field because `enabled = false` has to work
+as an opt-out, and `false` is the zero value - indistinguishable from a field
+that was never set. Whole-block override is also what makes the behaviour the
+same over the gRPC API, where per-field presence was never available at all: a
+peer group previously overwrote a neighbor's BFD unconditionally there, its
+zero values included.
+
+One consequence to be aware of: a `bfd` block in which *every* field is zero or
+absent cannot be told apart from no block at all, so it inherits rather than
+opts out. The opt-out example above sets the other fields explicitly for that
+reason. Configuration generated from a schema with defaults - a Kubernetes CRD,
+for instance - always populates them and is unaffected.
 
 ## Port Behavior
 
