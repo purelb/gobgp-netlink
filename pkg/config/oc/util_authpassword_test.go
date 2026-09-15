@@ -48,3 +48,34 @@ func TestConfigStructConvertersKeepAuthPassword(t *testing.T) {
 	assert.Equal(t, secret, NewPeerGroupFromConfigStruct(pg).Conf.AuthPassword,
 		"InitialConfig feeds this into AddPeerGroup; redacting here disables MD5")
 }
+
+// The flag has to be derived where the password still exists, and the password
+// itself must not travel with it.
+//
+// PeerState.AuthPassword is declared in the proto and written by nothing, and
+// ListPeer redacts Conf.AuthPassword on the way out - so the metric that read
+// GetAuthPassword() != "" reported "no authentication" for every peer forever,
+// including MD5 ones. The negative half of this test is the important half:
+// State is not redacted anywhere, so a password placed there would leave the
+// server through ListPeer and `gobgp neighbor -j`.
+func TestNewPeerFromConfigStructSetsAuthPasswordSetFlagOnly(t *testing.T) {
+	assert := assert.New(t)
+
+	withPassword := &Neighbor{}
+	withPassword.Config.NeighborAddress = netip.MustParseAddr("10.0.0.1")
+	withPassword.Config.AuthPassword = "correct-horse-battery-staple"
+
+	p := NewPeerFromConfigStruct(withPassword)
+	assert.NotNil(p)
+	assert.True(p.GetState().GetAuthPasswordSet(), "an MD5-configured peer must report the flag")
+	assert.Empty(p.GetState().GetAuthPassword(),
+		"State carries the flag, never the password: nothing redacts State")
+
+	without := &Neighbor{}
+	without.Config.NeighborAddress = netip.MustParseAddr("10.0.0.2")
+
+	q := NewPeerFromConfigStruct(without)
+	assert.NotNil(q)
+	assert.False(q.GetState().GetAuthPasswordSet(), "a peer with no password must report false")
+	assert.Empty(q.GetState().GetAuthPassword())
+}

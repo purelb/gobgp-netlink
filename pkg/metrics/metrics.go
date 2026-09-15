@@ -392,8 +392,14 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 		sendGauge(bgpPeerTypeDesc, float64(peerState.GetType()))
 
 		// Whether authentication password is being set (1) or not (0). A flag.
+		//
+		// Reads the flag, not the password. PeerState.AuthPassword is declared
+		// but never written, and ListPeer redacts Conf.AuthPassword before the
+		// peer gets here, so the old GetAuthPassword() != "" test reported 0
+		// for every peer, always - including MD5-authenticated ones. Any panel
+		// built on it read as 100% unauthenticated forever.
 		passwordSetFlag := 0.0
-		if peerState.GetAuthPassword() != "" {
+		if peerState.GetAuthPasswordSet() {
 			passwordSetFlag = 1
 		}
 		sendGauge(bgpPeerPasswordSetFlagDesc, passwordSetFlag)

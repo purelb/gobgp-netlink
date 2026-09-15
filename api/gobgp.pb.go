@@ -9702,8 +9702,17 @@ type PeerState struct {
 	Ipv4Nexthop          string `protobuf:"bytes,200,opt,name=ipv4_nexthop,json=ipv4Nexthop,proto3" json:"ipv4_nexthop,omitempty"`
 	Ipv6Nexthop          string `protobuf:"bytes,201,opt,name=ipv6_nexthop,json=ipv6Nexthop,proto3" json:"ipv6_nexthop,omitempty"`
 	Ipv6LinkLocalNexthop string `protobuf:"bytes,202,opt,name=ipv6_link_local_nexthop,json=ipv6LinkLocalNexthop,proto3" json:"ipv6_link_local_nexthop,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// Whether this session is configured with a TCP-MD5 password.
+	//
+	// The flag, never the value. auth_password above it is declared but never
+	// written by anything, and PeerConf.auth_password is redacted by ListPeer
+	// before it leaves the server - so bgp_peer_password_set read 0 for every
+	// peer including authenticated ones. Computing the flag at conversion time,
+	// where the config is still intact, is what makes that metric true without
+	// putting the key anywhere a caller can read it.
+	AuthPasswordSet bool `protobuf:"varint,203,opt,name=auth_password_set,json=authPasswordSet,proto3" json:"auth_password_set,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *PeerState) Reset() {
@@ -9909,6 +9918,13 @@ func (x *PeerState) GetIpv6LinkLocalNexthop() string {
 		return x.Ipv6LinkLocalNexthop
 	}
 	return ""
+}
+
+func (x *PeerState) GetAuthPasswordSet() bool {
+	if x != nil {
+		return x.AuthPasswordSet
+	}
+	return false
 }
 
 type Messages struct {
@@ -16452,7 +16468,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\fmultihop_ttl\x18\x02 \x01(\rR\vmultihopTtl\"\x83\x01\n" +
 	"\x0eRouteReflector\x124\n" +
 	"\x16route_reflector_client\x18\x01 \x01(\bR\x14routeReflectorClient\x12;\n" +
-	"\x1aroute_reflector_cluster_id\x18\x02 \x01(\tR\x17routeReflectorClusterId\"\x98\x0f\n" +
+	"\x1aroute_reflector_cluster_id\x18\x02 \x01(\tR\x17routeReflectorClusterId\"\xc5\x0f\n" +
 	"\tPeerState\x12#\n" +
 	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1b\n" +
@@ -16482,7 +16498,8 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\tbfd_state\x18\x17 \x01(\v2\x11.api.BfdPeerStateR\bbfdState\x12\"\n" +
 	"\fipv4_nexthop\x18\xc8\x01 \x01(\tR\vipv4Nexthop\x12\"\n" +
 	"\fipv6_nexthop\x18\xc9\x01 \x01(\tR\vipv6Nexthop\x126\n" +
-	"\x17ipv6_link_local_nexthop\x18\xca\x01 \x01(\tR\x14ipv6LinkLocalNexthop\"\xd4\x01\n" +
+	"\x17ipv6_link_local_nexthop\x18\xca\x01 \x01(\tR\x14ipv6LinkLocalNexthop\x12+\n" +
+	"\x11auth_password_set\x18\xcb\x01 \x01(\bR\x0fauthPasswordSet\"\xd4\x01\n" +
 	"\fSessionState\x12\x1d\n" +
 	"\x19SESSION_STATE_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12SESSION_STATE_IDLE\x10\x01\x12\x19\n" +
