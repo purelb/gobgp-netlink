@@ -88,8 +88,10 @@ bgp_sent_message_total{peer="100.75.128.54"} 546
 
 ## Exported metrics
 
-Most metrics are prefixed with the `bgp` Prometheus namespace. The FSM loop
-histograms are the exception: they use `fsm_loop`.  
+Most metrics are prefixed with the `bgp` Prometheus namespace. The Serve-loop
+histograms are the exception: they use `fsm_loop`. BGP message handling is
+`bgp_`, not `fsm_loop_`, because it runs on per-peer goroutines rather than in
+the loop.  
 
 | **Metric**                         | **Description**                                                              | **Labels**                             |
 | ---------------------------------- | ---------------------------------------------------------------------------- |----------------------------------------|
@@ -177,24 +179,94 @@ Build identity:
 | --- | --- | --- |
 | bgp_build_info | Build identity of the running daemon. Always 1; read the labels. An empty `commit` label means the binary was not built by `build.sh` | `version`, `commit`, `base` |
 
-### FSM loop histograms
+### FSM loop and message-handling histograms
 
-These use the `fsm_loop` namespace rather than `bgp`, and are histograms with
-default buckets. `timing_sec` measures how long the operation took;
-`wait_sec` measures how long it waited on its channel first, so a rising
-`wait_sec` with flat `timing_sec` points at a saturated FSM loop rather than
-slow work.
+Every timed operation is split into three intervals that do not overlap and sum
+to its end-to-end latency:
+
+| interval | meaning |
+|---|---|
+| `queue_wait_seconds` | queued, between being created and being received |
+| `lock_wait_seconds` | blocked acquiring the BGP lock |
+| `work_seconds` | holding the lock, doing the work |
+
+Keeping them apart is the point. The contended resource is the BGP lock, not
+any one goroutine: `Serve` takes it in write mode for every management
+operation, and Go's `RWMutex` parks new readers behind a waiting writer, so
+peers can be starved while the loop itself looks idle. `lock_wait_seconds` is
+the series that shows that; a rising `bgp_message_handling_lock_wait_seconds`
+with flat `work_seconds` means peers are waiting on the loop, not doing slow
+work.
+
+Buckets span 10µs to 10s.
+
+Serve loop — one goroutine, so these are its occupancy:
 
 | **Metric** | **Description** | **Labels** |
 | --- | --- | --- |
-| fsm_loop_mgmt_op_timing_sec | Histogram of management operation timings | |
-| fsm_loop_mgmt_op_wait_sec | Histogram of management operation channel delays | |
-| fsm_loop_accept_timing_sec | Histogram of TCP accept timings | |
-| fsm_loop_accept_wait_sec | Histogram of TCP accept channel delays | |
-| fsm_loop_event_timing_sec | Histogram of event timings | |
-| fsm_loop_event_wait_sec | Histogram of event channel delays | |
-| fsm_loop_message_timing_sec | Histogram of BGP message timings | |
-| fsm_loop_message_wait_sec | Histogram of BGP message channel delays | |
+| fsm_loop_mgmt_op_work_seconds | Management operation, holding the lock | |
+| fsm_loop_mgmt_op_lock_wait_seconds | Management operation, blocked on the lock | |
+| fsm_loop_mgmt_op_queue_wait_seconds | Management operation, queued. The channel is unbuffered, so this is how long the caller was blocked | |
+| fsm_loop_accept_work_seconds | TCP accept, holding the lock | |
+| fsm_loop_accept_lock_wait_seconds | TCP accept, blocked on the lock | |
+| fsm_loop_accept_queue_wait_seconds | TCP accept, queued. Covers the userspace half only — see below | |
+| fsm_loop_roa_event_work_seconds | ROA event, holding the lock | |
+| fsm_loop_roa_event_lock_wait_seconds | ROA event, blocked on the lock | |
+| fsm_loop_roa_event_queue_wait_seconds | ROA event, queued | |
+
+BGP message handling — these run on **per-peer goroutines**, not the loop, which
+is why they are not in the `fsm_loop` namespace. Their sums aggregate N
+concurrent goroutines and can exceed wall-clock time, so do not add them to the
+utilisation query below. There is no queue on this path; the callback is
+synchronous, so there is no `queue_wait` series:
+
+| **Metric** | **Description** | **Labels** |
+| --- | --- | --- |
+| bgp_message_handling_work_seconds | Handling one BGP message, holding the lock | |
+| bgp_message_handling_lock_wait_seconds | Handling one BGP message, blocked on the lock | |
+| bgp_state_change_handling_work_seconds | Handling one peer state change, holding the lock | |
+| bgp_state_change_handling_lock_wait_seconds | Handling one peer state change, blocked on the lock | |
+
+Message and state change are separate because their costs differ by three to
+four orders of magnitude — per-UPDATE work against a path that can walk the RIB
+and take the write lock — and one histogram over both describes neither.
+
+#### Loop utilisation
+
+The fraction of wall-clock time the single-threaded Serve loop spent working,
+per instance:
+
+```promql
+rate(fsm_loop_mgmt_op_work_seconds_sum[5m])
+  + rate(fsm_loop_accept_work_seconds_sum[5m])
+  + rate(fsm_loop_roa_event_work_seconds_sum[5m])
+```
+
+All three terms are needed. A full RTR cache load is one ROA event per PDU and
+is the loop's heaviest real workload, so omitting it reads near zero through
+exactly the event worth seeing. Do not wrap this in a bare `sum()`: that
+aggregates across instances and yields `[0, N]` rather than `[0, 1]`, so an idle
+fleet of 50 nodes reads 0.5.
+
+Two things to know before acting on the number:
+
+- **Most management operations are the scrape itself.** `GetBgp` and `ListPeer`
+  both run as management operations, so on a steady-state daemon this traffic is
+  very largely self-inflicted, bounded by `--metrics-min-interval`.
+- **A wedged loop is not invisible.** The collector blocks on the loop, so a
+  wedge shows up as a failed scrape and `up == 0`, not as silence. The caching
+  collector replays the previous result, so a wedge is masked for at most one
+  `--metrics-min-interval`.
+
+#### What the accept queue does not cover
+
+`fsm_loop_accept_queue_wait_seconds` measures from `accept(2)` returning to the
+Serve loop receiving the connection. The channel behind it is 32 deep and the
+producer blocks once it is full, at which point the backlog moves to the kernel
+accept queue where this metric cannot see it — so under a connection flood it
+*understates* the delay. The kernel-side signal is `TcpExtListenOverflows` and
+`TcpExtListenDrops` from `nstat -az`. Measuring back to the SYN would need
+`SO_TIMESTAMPING` and is not implemented.
 
 ## Label values
 
@@ -221,4 +293,7 @@ Some labels can have specific values depending on the state of GoBGP or of the p
 
 ## Grafana dashboard
 
-There is an example [Grafana panel to display some metrics](https://grafana.com/grafana/dashboards/22061-gobgp/) about GoBGP available
+There is an example [Grafana panel to display some metrics](https://grafana.com/grafana/dashboards/22061-gobgp/) about GoBGP available.
+It is built against upstream GoBGP, so some panels do not match this fork: it
+queries `bgp_peer_uptime`, which is now `bgp_peer_established_timestamp_seconds`
+and is an absolute timestamp rather than a duration.
