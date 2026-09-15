@@ -188,7 +188,7 @@ type BgpServer struct {
 	shared        *sharedData
 	apiServer     *server
 	bgpConfig     oc.Bgp
-	acceptCh      chan net.Conn
+	acceptCh      chan netutils.AcceptedConn
 	mgmtCh        chan *mgmtOp
 	closeCh       chan struct{}
 	policy        *table.RoutingPolicy
@@ -455,7 +455,14 @@ func (s *BgpServer) passConnToPeer(conn net.Conn) {
 		s.startFsmHandler(peer)
 		peer.PassConn(conn)
 	} else {
-		s.logger.Info("Can't find configuration for a new passive connection",
+		// Debug, not Info. This is the one branch an unconfigured source
+		// reaches, and under hostNetwork port 179 is open to anything that can
+		// route to the node. There is no accept rate limit, and this runs on
+		// the Serve goroutine under the write lock, so at Info a connection
+		// flood costs a log line each on top of the lock contention it already
+		// causes. The connection count is available as
+		// fsm_loop_accept_work_seconds_count without the amplification.
+		s.logger.Debug("Can't find configuration for a new passive connection",
 			slog.String("Topic", "Server"),
 			slog.String("Key", addr.String()),
 		)
@@ -512,15 +519,13 @@ func (s *BgpServer) Serve() {
 			tRecv := time.Now()
 			s.shared.mu.Lock()
 			tWork := time.Now()
-			s.passConnToPeer(conn)
+			s.passConnToPeer(conn.Conn)
 			s.shared.mu.Unlock()
-			// HasQueue is false until the listener stamps the connection: the
-			// accept channel is buffered, so there is a queue, but nothing
-			// records when the connection entered it. Reporting a zero would
-			// claim it was never queued.
 			s.timingHook.Observe(FSMAccept, FSMTiming{
-				Work:     time.Since(tWork),
-				LockWait: tWork.Sub(tRecv),
+				Work:      time.Since(tWork),
+				LockWait:  tWork.Sub(tRecv),
+				QueueWait: queueWaitSince(tRecv, conn.Enqueued),
+				HasQueue:  true,
 			})
 		case ev := <-s.roaManager.ReceiveROA():
 			tRecv := time.Now()
@@ -2856,14 +2861,26 @@ func (s *BgpServer) StartBgp(ctx context.Context, r *api.StartBgpRequest) error 
 		}
 
 		if c.Config.Port > 0 {
-			acceptCh := make(chan net.Conn, 32)
+			acceptCh := make(chan netutils.AcceptedConn, 32)
+			listeners := make([]*netutils.TCPListener, 0, len(c.Config.LocalAddressList))
 			for _, addr := range c.Config.LocalAddressList {
 				l, err := netutils.NewTCPListener(s.logger, addr.String(), uint32(c.Config.Port), g.BindToDevice, acceptCh)
 				if err != nil {
+					// Close the ones that did bind. Returning without this left
+					// them listening and accepting into a channel that
+					// s.acceptCh was never assigned, so nothing drained it: the
+					// port stayed bound, the buffer filled, and acceptLoop
+					// blocked for good - while the caller was told BGP had not
+					// started. A node whose IPv6 address is not up yet at start
+					// is enough to reach it.
+					for _, opened := range listeners {
+						opened.Close()
+					}
 					return err
 				}
-				s.listeners = append(s.listeners, l)
+				listeners = append(listeners, l)
 			}
+			s.listeners = append(s.listeners, listeners...)
 			s.acceptCh = acceptCh
 		}
 

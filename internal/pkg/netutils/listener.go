@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
@@ -56,11 +57,23 @@ var (
 	_ syscall.Conn = (*TCPConn)(nil)
 )
 
+// AcceptedConn is a connection handed to the BGP server, carrying when it was
+// taken off the listener. acceptLoop can outrun the single Serve goroutine -
+// connChan is buffered - so the gap between the two is real latency that was
+// previously invisible.
+type AcceptedConn struct {
+	Conn net.Conn
+	// Enqueued is when the connection was accepted, before the enqueue. It
+	// therefore includes the SetKeepAlive syscall and the bookkeeping below,
+	// which are part of what delays a session coming up.
+	Enqueued time.Time
+}
+
 type TCPListener struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	l            *net.TCPListener
-	connChan     chan net.Conn
+	connChan     chan AcceptedConn
 	acceptedConn cmap.ConcurrentMap[string, *TCPConn] // key is RemoteAddr().String()
 	stopWg       *sync.WaitGroup                      // used to wait for acceptLoop to finish
 	logger       *slog.Logger
@@ -104,6 +117,7 @@ func (l *TCPListener) acceptLoop() {
 	defer l.stopWg.Done()
 	for {
 		conn, err := l.l.AcceptTCP()
+		accepted := time.Now()
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
 				l.logger.Warn("Failed to AcceptTCP",
@@ -121,15 +135,26 @@ func (l *TCPListener) acceptLoop() {
 
 		err = conn.SetKeepAlive(false)
 		if err != nil {
-			l.logger.Warn("Failed to SetKeepAlive",
+			l.logger.Warn("Failed to SetKeepAlive; dropping this connection",
 				slog.String("Topic", "Peer"),
 				slog.String("Key", key),
 				slog.String("Error", err.Error()))
-			return
+			// Drop this connection and carry on. This used to return, which
+			// exited acceptLoop for the life of the process: the listener
+			// stayed bound but accepted nothing ever again, silently, so
+			// passive sessions simply never came up. It also leaked the
+			// connection, which is already registered in acceptedConn above.
+			_ = tcpConn.Close()
+			continue
 		}
 
+		// No default case: when the buffer fills, this blocks and stops
+		// calling AcceptTCP, so the backlog moves to the kernel accept queue
+		// where AcceptedConn.Enqueued cannot see it. Under a flood the queue
+		// wait therefore understates the delay - watch TcpExtListenOverflows
+		// for that.
 		select {
-		case l.connChan <- tcpConn:
+		case l.connChan <- AcceptedConn{Conn: tcpConn, Enqueued: accepted}:
 		case <-l.ctx.Done():
 			return
 		}
@@ -137,7 +162,7 @@ func (l *TCPListener) acceptLoop() {
 }
 
 // avoid mapped IPv6 address
-func NewTCPListener(logger *slog.Logger, address string, port uint32, bindToDev string, connChan chan net.Conn) (*TCPListener, error) {
+func NewTCPListener(logger *slog.Logger, address string, port uint32, bindToDev string, connChan chan AcceptedConn) (*TCPListener, error) {
 	proto := extractProtoFromAddress(address)
 	config := net.ListenConfig{
 		Control: listenControl(logger, bindToDev),
