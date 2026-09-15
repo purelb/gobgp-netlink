@@ -57,14 +57,22 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
 	var opts struct {
-		ConfigFile        string  `short:"f" long:"config-file" description:"specifying a config file"`
-		ConfigType        string  `short:"t" long:"config-type" description:"specifying config type (toml, yaml, json)" default:"toml"`
-		ConfigAutoReload  bool    `short:"a" long:"config-auto-reload" description:"activate config auto reload on changes"`
-		LogLevel          string  `short:"l" long:"log-level" description:"specifying log level"`
-		LogPlain          bool    `short:"p" long:"log-plain" description:"use plain format for logging (json by default)"`
-		DisableStdlog     bool    `long:"disable-stdlog" description:"disable standard logging"`
-		CPUs              int     `long:"cpus" description:"specify the number of CPUs to be used"`
-		GrpcHosts         string  `long:"api-hosts" description:"specify the hosts that gobgpd listens on" default:":50051"`
+		ConfigFile       string `short:"f" long:"config-file" description:"specifying a config file"`
+		ConfigType       string `short:"t" long:"config-type" description:"specifying config type (toml, yaml, json)" default:"toml"`
+		ConfigAutoReload bool   `short:"a" long:"config-auto-reload" description:"activate config auto reload on changes"`
+		LogLevel         string `short:"l" long:"log-level" description:"specifying log level"`
+		LogPlain         bool   `short:"p" long:"log-plain" description:"use plain format for logging (json by default)"`
+		DisableStdlog    bool   `long:"disable-stdlog" description:"disable standard logging"`
+		CPUs             int    `long:"cpus" description:"specify the number of CPUs to be used"`
+		// Loopback by default, not the wildcard this used to be. The gRPC API
+		// has no authentication of its own - TLS is opt-in and client-certificate
+		// auth needs --tls-client-ca-file on top - and it is a write API: AddPeer,
+		// DeletePeer, AddPath, StopBgp, SetPolicies. Under hostNetwork a wildcard
+		// bind hands all of that to anything that can route to the node,
+		// including the BGP fabric. Both loopbacks are listed explicitly rather
+		// than as "localhost" so the bind does not depend on how that name
+		// resolves. Set the flag to expose it deliberately.
+		GrpcHosts         string  `long:"api-hosts" description:"specify the hosts that gobgpd listens on; loopback by default, set explicitly to expose the API off-host" default:"127.0.0.1:50051,[::1]:50051"`
 		GracefulRestart   bool    `short:"r" long:"graceful-restart" description:"flag restart-state in graceful-restart capability"`
 		Dry               bool    `short:"d" long:"dry-run" description:"check configuration"`
 		PProfHost         string  `long:"pprof-host" description:"specify the host that gobgpd listens on for pprof and metrics" default:"localhost:6060"`
