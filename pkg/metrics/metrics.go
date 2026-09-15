@@ -85,6 +85,11 @@ func (f *fsmTimingsCollector) Collect(metrics chan<- prometheus.Metric) {
 
 type bgpCollector struct {
 	server *server.BgpServer
+	// advertisedRoutes controls whether ListPeer is asked for the advertised
+	// count. Computing it runs getPossibleBest and filterpath over every
+	// destination with the export policy applied, per peer per family, which is
+	// O(peers x families x |RIB|) - and it happens under the BGP write lock.
+	advertisedRoutes bool
 }
 
 const (
@@ -259,8 +264,24 @@ var (
 	)
 )
 
-func NewBgpCollector(server *server.BgpServer) prometheus.Collector {
-	return &bgpCollector{server: server}
+// BgpCollectorOption configures the collector. Options rather than parameters
+// so that out-of-tree callers of NewBgpCollector keep compiling.
+type BgpCollectorOption func(*bgpCollector)
+
+// WithAdvertisedRoutes enables or disables collection of bgp_routes_advertised.
+// It is on by default: the metric surface stays as it was, and the cost is
+// bounded by the caching collector rather than by dropping the metric. Turning
+// it off drops the series entirely, which is the point on a very large RIB.
+func WithAdvertisedRoutes(enabled bool) BgpCollectorOption {
+	return func(c *bgpCollector) { c.advertisedRoutes = enabled }
+}
+
+func NewBgpCollector(server *server.BgpServer, opts ...BgpCollectorOption) prometheus.Collector {
+	c := &bgpCollector{server: server, advertisedRoutes: true}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 func (c *bgpCollector) Describe(out chan<- *prometheus.Desc) {
@@ -308,7 +329,7 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 		return
 	}
 
-	req := &api.ListPeerRequest{EnableAdvertised: true}
+	req := &api.ListPeerRequest{EnableAdvertised: c.advertisedRoutes}
 	err = c.server.ListPeer(context.Background(), req, func(p *api.Peer) {
 		peerState := p.GetState()
 		peerAddr := peerState.GetNeighborAddress()
@@ -414,12 +435,17 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 				float64(afiState.GetAccepted()),
 				labelValues...,
 			)
-			out <- prometheus.MustNewConstMetric(
-				bgpRoutesAdvertisedDesc,
-				prometheus.GaugeValue,
-				float64(afiState.GetAdvertised()),
-				labelValues...,
-			)
+			// Absent rather than zero when it was not collected: a flat zero
+			// would read as "advertising nothing", which is a different and
+			// alarming thing to say.
+			if c.advertisedRoutes {
+				out <- prometheus.MustNewConstMetric(
+					bgpRoutesAdvertisedDesc,
+					prometheus.GaugeValue,
+					float64(afiState.GetAdvertised()),
+					labelValues...,
+				)
+			}
 		}
 	})
 	if err != nil {

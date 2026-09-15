@@ -147,16 +147,26 @@ func main() {
 		// endpoint may be scraped. Keep it at or below the scrape interval and
 		// no sample is ever stale. 0 disables caching.
 		MetricsMinInterval time.Duration `long:"metrics-min-interval" description:"minimum interval between BGP metric collections; scrapes in between replay the last result (0 disables)" default:"15s"`
-		UseSdNotify        bool          `long:"sdnotify" description:"use sd_notify protocol"`
-		TLS                bool          `long:"tls" description:"enable TLS authentication for gRPC API"`
-		TLSCertFile        string        `long:"tls-cert-file" description:"The TLS cert file"`
-		TLSKeyFile         string        `long:"tls-key-file" description:"The TLS key file"`
-		TLSClientCAFile    string        `long:"tls-client-ca-file" description:"Optional TLS client CA file to authenticate clients against"`
-		Version            bool          `long:"version" description:"show version number"`
-		SentryDSN          string        `long:"sentry-dsn" description:"Sentry DSN" default:""`
-		SentryEnvironment  string        `long:"sentry-environment" description:"Sentry environment" default:"development"`
-		SentrySampleRate   float64       `long:"sentry-sample-rate" description:"Sentry traces sample rate" default:"1.0"`
-		SentryDebug        bool          `long:"sentry-debug" description:"Sentry debug mode"`
+		// Collected by default so the metric surface is unchanged, hence a
+		// disable switch rather than an enable one - the same shape as
+		// --pprof-disable, and the only shape go-flags offers, since a bool
+		// option there is a switch and cannot be given =false.
+		//
+		// Computing the advertised count walks the RIB per peer per family with
+		// the export policy applied. --metrics-min-interval is what bounds that
+		// cost; this drops the series outright, which is what a very large RIB
+		// may actually want.
+		MetricsAdvertisedRoutesDisable bool    `long:"metrics-advertised-routes-disable" description:"stop collecting bgp_routes_advertised, which walks the RIB per peer per family"`
+		UseSdNotify                    bool    `long:"sdnotify" description:"use sd_notify protocol"`
+		TLS                            bool    `long:"tls" description:"enable TLS authentication for gRPC API"`
+		TLSCertFile                    string  `long:"tls-cert-file" description:"The TLS cert file"`
+		TLSKeyFile                     string  `long:"tls-key-file" description:"The TLS key file"`
+		TLSClientCAFile                string  `long:"tls-client-ca-file" description:"Optional TLS client CA file to authenticate clients against"`
+		Version                        bool    `long:"version" description:"show version number"`
+		SentryDSN                      string  `long:"sentry-dsn" description:"Sentry DSN" default:""`
+		SentryEnvironment              string  `long:"sentry-environment" description:"Sentry environment" default:"development"`
+		SentrySampleRate               float64 `long:"sentry-sample-rate" description:"Sentry traces sample rate" default:"1.0"`
+		SentryDebug                    bool    `long:"sentry-debug" description:"Sentry debug mode"`
 	}
 	_, err := flags.Parse(&opts)
 	if err != nil {
@@ -390,7 +400,9 @@ func main() {
 	// so takes the BGP write lock; the netlink and BFD collectors read
 	// lock-free counters and cost nothing worth bounding.
 	prometheus.MustRegister(metrics.NewCachingCollector(
-		metrics.NewBgpCollector(bgpServer), opts.MetricsMinInterval))
+		metrics.NewBgpCollector(bgpServer,
+			metrics.WithAdvertisedRoutes(!opts.MetricsAdvertisedRoutesDisable)),
+		opts.MetricsMinInterval))
 	prometheus.MustRegister(metrics.NewNetlinkCollector(bgpServer))
 	prometheus.MustRegister(metrics.NewBfdCollector(bgpServer))
 	prometheus.MustRegister(fsmTimingCollector)

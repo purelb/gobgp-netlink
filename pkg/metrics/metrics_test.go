@@ -326,3 +326,45 @@ func TestBfdServerMetricsAlwaysPresent(t *testing.T) {
 	assert.Contains(t, names, "bgp_bfd_unknown_peer_total")
 	assert.Contains(t, names, "bgp_bfd_received_drop_total")
 }
+
+// bgp_routes_advertised is the expensive series: producing it runs
+// getPossibleBest and filterpath over every destination with the export policy
+// applied, per peer per family, and it happens under the BGP write lock.
+// WithAdvertisedRoutes(false) has to drop it entirely rather than report zero,
+// which would read as "advertising nothing" - a different and alarming claim.
+// The other two route families must be unaffected.
+func TestAdvertisedRoutesCanBeDisabled(t *testing.T) {
+	assert := assert.New(t)
+
+	s := server.NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	names := func(c prometheus.Collector) map[string]bool {
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(c)
+		families, err := reg.Gather()
+		assert.NoError(err)
+		got := map[string]bool{}
+		for _, f := range families {
+			got[f.GetName()] = true
+		}
+		return got
+	}
+
+	on := names(NewBgpCollector(s))
+	assert.True(on["bgp_routes_advertised"], "collected by default")
+
+	off := names(NewBgpCollector(s, WithAdvertisedRoutes(false)))
+	assert.False(off["bgp_routes_advertised"], "absent, not zero, when disabled")
+	assert.True(off["bgp_routes_received"], "the cheap families are unaffected")
+	assert.True(off["bgp_routes_accepted"])
+}
