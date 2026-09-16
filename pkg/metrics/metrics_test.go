@@ -202,6 +202,29 @@ func TestFSMLoopMetrics(t *testing.T) {
 		return f.Metric[0].Histogram.GetSampleSum(), f.Metric[0].Histogram.GetSampleCount()
 	}
 
+	// Wait for the Serve goroutine to record the observation.
+	//
+	// StartBgp cannot be used as a barrier for this. handleMGMTOp sends the
+	// result on op.errCh as its last statement, which releases the caller,
+	// and only then does the Serve loop unlock and call Observe - so a Gather
+	// immediately after StartBgp returns can legitimately see nothing. That is
+	// correct behaviour on the daemon's side and a race in the test, which is
+	// how it reached CI passing locally and failing there.
+	awaitCount := func(name string, want uint64) (float64, uint64) {
+		t.Helper()
+		var gotSum float64
+		var gotCount uint64
+		for range 400 {
+			gotSum, gotCount = sum(name)
+			if gotCount >= want {
+				return gotSum, gotCount
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("%s reached count %d, want %d after 2s", name, gotCount, want)
+		return gotSum, gotCount
+	}
+
 	_, count := sum("fsm_loop_mgmt_op_work_seconds")
 	assert.Equal(uint64(0), count, "nothing observed before any operation")
 
@@ -216,12 +239,12 @@ func TestFSMLoopMetrics(t *testing.T) {
 	}))
 	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
 
-	workSum, workCount := sum("fsm_loop_mgmt_op_work_seconds")
+	workSum, workCount := awaitCount("fsm_loop_mgmt_op_work_seconds", 1)
 	assert.Equal(uint64(1), workCount, "StartBgp is one management operation")
 	assert.Less(workSum, 0.1,
 		"work must exclude the idle wait; the old code reported the full %s", idle)
 
-	queueSum, queueCount := sum("fsm_loop_mgmt_op_queue_wait_seconds")
+	queueSum, queueCount := awaitCount("fsm_loop_mgmt_op_queue_wait_seconds", 1)
 	assert.Equal(uint64(1), queueCount)
 	assert.Greater(queueSum, 0.0, "a real queue wait, not the negative the old code produced")
 	assert.Less(queueSum, 0.01,
@@ -229,7 +252,7 @@ func TestFSMLoopMetrics(t *testing.T) {
 
 	// Observed, and on an uncontended lock it is small. The value that matters
 	// operationally is the one under contention, which the lab test covers.
-	_, lockCount := sum("fsm_loop_mgmt_op_lock_wait_seconds")
+	_, lockCount := awaitCount("fsm_loop_mgmt_op_lock_wait_seconds", 1)
 	assert.Equal(uint64(1), lockCount, "lock wait is always observed, even when zero")
 }
 
