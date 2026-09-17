@@ -321,6 +321,13 @@ func showNeighbor(args []string) error {
 	case api.RemovePrivate_REMOVE_PRIVATE_REPLACE:
 		elems = append(elems, "Remove private AS: replace")
 	}
+	if sc := p.Conf.SendCommunity; sc != nil {
+		name, ok := sendCommunityNames[*sc]
+		if !ok {
+			name = fmt.Sprintf("unknown(%d)", *sc)
+		}
+		elems = append(elems, fmt.Sprintf("Send community: %s", name))
+	}
 	if p.Conf.ReplacePeerAsn {
 		elems = append(elems, "Replace peer AS: enabled")
 	}
@@ -1296,6 +1303,28 @@ func modNeighborPolicy(remoteIP, policyType, cmdType string, args []string) erro
 	return err
 }
 
+// sendCommunityNames maps the API's send_community values to the strings the
+// OpenConfig model uses. The numbers are oc.CommunityTypeToIntMap and must stay
+// in step with it - TestParseSendCommunityMatchesOpenConfig pins that.
+var sendCommunityNames = map[uint32]string{
+	0: "standard",
+	1: "extended",
+	2: "both",
+	3: "none",
+}
+
+// parseSendCommunity is the inverse. An unrecognised string is rejected the same
+// way the TOML loader rejects it: a typo that silently meant "no filtering"
+// would be the worst available reading of it.
+func parseSendCommunity(s string) (uint32, error) {
+	for v, name := range sendCommunityNames {
+		if name == s {
+			return v, nil
+		}
+	}
+	return 0, fmt.Errorf("invalid send-community value: standard, extended, both or none")
+}
+
 func modNeighbor(cmdType string, args []string) error {
 	params := map[string]int{
 		"interface": paramSingle,
@@ -1316,10 +1345,11 @@ func modNeighbor(cmdType string, args []string) error {
 		params["route-server-client"] = paramFlag
 		params["allow-own-as"] = paramSingle
 		params["remove-private-as"] = paramSingle
+		params["send-community"] = paramSingle
 		params["replace-peer-as"] = paramFlag
 		params["ebgp-multihop-ttl"] = paramSingle
 		params["peer-group"] = paramSingle
-		usage += " [ local-as <VALUE> | family <address-families-list> | vrf <vrf-name> | route-reflector-client [<cluster-id>] | route-server-client | allow-own-as <num> | remove-private-as (all|replace) | replace-peer-as | ebgp-multihop-ttl <ttl> | peer-group <peer-group-name>]"
+		usage += " [ local-as <VALUE> | family <address-families-list> | vrf <vrf-name> | route-reflector-client [<cluster-id>] | route-server-client | allow-own-as <num> | remove-private-as (all|replace) | send-community (standard|extended|both|none) | replace-peer-as | ebgp-multihop-ttl <ttl> | peer-group <peer-group-name>]"
 	}
 
 	m, err := extractReserved(args, params)
@@ -1426,6 +1456,13 @@ func modNeighbor(cmdType string, args []string) error {
 			default:
 				return fmt.Errorf("invalid remove-private-as value: all or replace")
 			}
+		}
+		if option, ok := m["send-community"]; ok {
+			v, err := parseSendCommunity(option[0])
+			if err != nil {
+				return err
+			}
+			peer.Conf.SendCommunity = &v
 		}
 		if _, ok := m["replace-peer-as"]; ok {
 			peer.Conf.ReplacePeerAsn = true
