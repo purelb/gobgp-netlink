@@ -265,7 +265,7 @@ var (
 	)
 	bgpPeerSendCommunityFlagDesc = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "peer", "send_community"),
-		"BGP community with the peer",
+		"Configured send-community for the peer: standard=0, extended=1, both=2, none=3. Absent when not configured. Reports configuration, not effect: it is ignored for route-server clients and for families where communities are protocol payload (VPN, EVPN, FlowSpec, MUP, VPLS).",
 		peerLabels, nil,
 	)
 	bgpPeerRemovePrivateAsFlagDesc = prometheus.NewDesc(
@@ -428,8 +428,19 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 		// The number of neighbor flops. An absolute count that resets with
 		// gobgpd, which is also why it has no _total suffix.
 		sendGauge(bgpPeerFlopsDesc, float64(peerState.GetFlops()))
-		// Whether BGP community is being sent. An enum.
-		sendGauge(bgpPeerSendCommunityFlagDesc, float64(peerState.GetSendCommunity()))
+		// Which community types are sent to this peer: standard=0, extended=1,
+		// both=2, none=3. An enum, not a bitmask.
+		//
+		// The series is absent when send-community is not configured. It has to
+		// be: 0 means *standard*, so emitting the getter's nil-to-zero would
+		// report every unconfigured peer as filtering down to standard
+		// communities only. Before send-community was wired up this gauge read 0
+		// for every peer always, because nothing wrote PeerState.SendCommunity -
+		// so a dashboard moving from a constant 0 to no-data is the metric
+		// starting to tell the truth, not a regression.
+		if sc := peerState.SendCommunity; sc != nil {
+			sendGauge(bgpPeerSendCommunityFlagDesc, float64(*sc))
+		}
 		// Whether BGP Private AS is being removed (1) or not (0). An enum.
 		sendGauge(bgpPeerRemovePrivateAsFlagDesc, float64(peerState.GetRemovePrivate()))
 		// Peer Type (0) for internal, (1) for external. An enum.
