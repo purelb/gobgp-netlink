@@ -5418,3 +5418,82 @@ func TestStopBgpIsTerminalForTheServer(t *testing.T) {
 	require.Error(t, err, "StartBgp after StopBgp must fail rather than silently doing nothing")
 	assert.Contains(t, err.Error(), "server stopped")
 }
+
+// Five Global fields were accepted by StartBgp, applied, and never reported by
+// GetBgp: families, route_selection_options, default_route_distance,
+// confederation and graceful_restart. A controller could not confirm what it
+// sent took effect, nor detect drift afterwards.
+//
+// The assertion is a round trip: what goes in through StartBgp must come back
+// out of GetBgp.
+func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	sent := &api.Global{
+		Asn:              65000,
+		RouterId:         "1.1.1.1",
+		ListenPort:       -1,
+		UseMultiplePaths: true,
+		Families:         []uint32{0, 1}, // ipv4-unicast, ipv6-unicast
+		RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
+			AlwaysCompareMed:        true,
+			IgnoreAsPathLength:      true,
+			ExternalCompareRouterId: true,
+			EnableAigp:              true,
+		},
+		DefaultRouteDistance: &api.DefaultRouteDistance{
+			ExternalRouteDistance: 20,
+			InternalRouteDistance: 200,
+		},
+		Confederation: &api.Confederation{
+			Enabled:      true,
+			Identifier:   65100,
+			MemberAsList: []uint32{65001, 65002},
+		},
+		GracefulRestart: &api.GracefulRestart{
+			Enabled:             true,
+			RestartTime:         120,
+			DeferralTime:        360,
+			NotificationEnabled: true,
+			LonglivedEnabled:    true,
+		},
+	}
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{Global: sent}))
+
+	rsp, err := s.GetBgp(context.Background(), &api.GetBgpRequest{})
+	require.NoError(t, err)
+	got := rsp.Global
+	require.NotNil(t, got)
+
+	assert.Equal(sent.Asn, got.Asn)
+	assert.Equal(sent.RouterId, got.RouterId)
+	assert.Equal(sent.UseMultiplePaths, got.UseMultiplePaths)
+	assert.ElementsMatch(sent.Families, got.Families, "families")
+
+	if assert.NotNil(got.RouteSelectionOptions, "route_selection_options") {
+		assert.True(got.RouteSelectionOptions.AlwaysCompareMed)
+		assert.True(got.RouteSelectionOptions.IgnoreAsPathLength)
+		assert.True(got.RouteSelectionOptions.ExternalCompareRouterId)
+		assert.True(got.RouteSelectionOptions.EnableAigp)
+	}
+	if assert.NotNil(got.DefaultRouteDistance, "default_route_distance") {
+		assert.Equal(uint32(20), got.DefaultRouteDistance.ExternalRouteDistance)
+		assert.Equal(uint32(200), got.DefaultRouteDistance.InternalRouteDistance)
+	}
+	if assert.NotNil(got.Confederation, "confederation") {
+		assert.True(got.Confederation.Enabled)
+		assert.Equal(uint32(65100), got.Confederation.Identifier)
+		assert.ElementsMatch([]uint32{65001, 65002}, got.Confederation.MemberAsList)
+	}
+	if assert.NotNil(got.GracefulRestart, "graceful_restart") {
+		assert.True(got.GracefulRestart.Enabled)
+		assert.Equal(uint32(120), got.GracefulRestart.RestartTime)
+		assert.Equal(uint32(360), got.GracefulRestart.DeferralTime)
+		assert.True(got.GracefulRestart.NotificationEnabled)
+		assert.True(got.GracefulRestart.LonglivedEnabled)
+	}
+}

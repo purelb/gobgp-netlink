@@ -3622,6 +3622,17 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 		for _, addr := range g.Config.LocalAddressList {
 			l = append(l, addr.String())
 		}
+		// Everything StartBgp accepts is echoed back. Five of these were applied
+		// and never reported - families, route_selection_options,
+		// default_route_distance, confederation and graceful_restart - so a
+		// controller had no way to detect drift in any of them, or even to
+		// confirm what it had sent took effect.
+		families := make([]uint32, 0, len(g.AfiSafis))
+		for _, af := range g.AfiSafis {
+			if i, ok := oc.AfiSafiTypeToIntMap[af.Config.AfiSafiName]; ok {
+				families = append(families, uint32(i))
+			}
+		}
 		rsp = &api.GetBgpResponse{
 			Global: &api.Global{
 				Asn:              g.Config.As,
@@ -3630,6 +3641,34 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 				ListenAddresses:  l,
 				UseMultiplePaths: g.UseMultiplePaths.Config.Enabled,
 				BindToDevice:     g.Config.BindToDevice,
+				Families:         families,
+				RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
+					AlwaysCompareMed:         g.RouteSelectionOptions.Config.AlwaysCompareMed,
+					IgnoreAsPathLength:       g.RouteSelectionOptions.Config.IgnoreAsPathLength,
+					ExternalCompareRouterId:  g.RouteSelectionOptions.Config.ExternalCompareRouterId,
+					AdvertiseInactiveRoutes:  g.RouteSelectionOptions.Config.AdvertiseInactiveRoutes,
+					EnableAigp:               g.RouteSelectionOptions.Config.EnableAigp,
+					IgnoreNextHopIgpMetric:   g.RouteSelectionOptions.Config.IgnoreNextHopIgpMetric,
+					DisableBestPathSelection: g.RouteSelectionOptions.Config.DisableBestPathSelection,
+				},
+				DefaultRouteDistance: &api.DefaultRouteDistance{
+					ExternalRouteDistance: uint32(g.DefaultRouteDistance.Config.ExternalRouteDistance),
+					InternalRouteDistance: uint32(g.DefaultRouteDistance.Config.InternalRouteDistance),
+				},
+				Confederation: &api.Confederation{
+					Enabled:      g.Confederation.Config.Enabled,
+					Identifier:   g.Confederation.Config.Identifier,
+					MemberAsList: g.Confederation.Config.MemberAsList,
+				},
+				GracefulRestart: &api.GracefulRestart{
+					Enabled:             g.GracefulRestart.Config.Enabled,
+					RestartTime:         uint32(g.GracefulRestart.Config.RestartTime),
+					StaleRoutesTime:     uint32(g.GracefulRestart.Config.StaleRoutesTime),
+					HelperOnly:          g.GracefulRestart.Config.HelperOnly,
+					DeferralTime:        uint32(g.GracefulRestart.Config.DeferralTime),
+					NotificationEnabled: g.GracefulRestart.Config.NotificationEnabled,
+					LonglivedEnabled:    g.GracefulRestart.Config.LongLivedEnabled,
+				},
 			},
 		}
 		return nil
