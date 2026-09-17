@@ -483,8 +483,13 @@ func TestPeerMetricTypes(t *testing.T) {
 	}))
 	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
 
+	// send-community is set because bgp_peer_send_community is deliberately
+	// absent when it is not - see TestSendCommunityAbsentUntilConfigured. This
+	// test is about metric *types*, so the peer has to be configured for the
+	// series to exist at all.
+	both := uint32(2)
 	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
-		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2, SendCommunity: &both},
 		Transport: &api.Transport{PassiveMode: true},
 	}}))
 
@@ -655,4 +660,54 @@ func TestEstablishedTimestampSurvivesTheSessionGoingDown(t *testing.T) {
 	after, ok := value()
 	assert.True(ok, "still emitted after the session drops - gate on bgp_peer_state, not on absence")
 	assert.Equal(up, after, "and it still reports when the session last came up")
+}
+
+// bgp_peer_send_community read a constant 0 for every peer before
+// send-community was wired up, because nothing ever wrote
+// PeerState.SendCommunity. 0 is COMMUNITY_TYPE_STANDARD, so the only honest
+// thing the gauge can do for an unconfigured peer is not exist - emitting the
+// getter's nil-to-zero would report every peer in the fleet as filtering down
+// to standard communities.
+func TestSendCommunityAbsentUntilConfigured(t *testing.T) {
+	assert := assert.New(t)
+
+	s := server.NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+	// COMMUNITY_TYPE_STANDARD, the zero value: this peer is the one that proves
+	// the gauge distinguishes "configured as standard" from "not configured".
+	standard := uint32(0)
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.2", PeerAsn: 2, SendCommunity: &standard},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(NewBgpCollector(s))
+	families, err := reg.Gather()
+	assert.NoError(err)
+
+	got := map[string]float64{}
+	for _, f := range families {
+		if f.GetName() != "bgp_peer_send_community" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "peer" {
+					got[l.GetValue()] = m.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	assert.Equal(map[string]float64{"127.0.0.2": 0}, got,
+		"only the configured peer gets a series, and its value is 0 for standard")
 }

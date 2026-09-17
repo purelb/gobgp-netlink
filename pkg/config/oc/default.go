@@ -100,6 +100,13 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 
 	n.Config.PeerType = getConfigPeerType(n.Config.PeerAs, n.Config.LocalAs)
 	n.State.PeerType = n.Config.PeerType
+	// Unconditional, unlike RemovePrivateAs below: which communities to send
+	// applies to iBGP and eBGP alike. An empty value stays empty and means
+	// "not configured".
+	if err := validateSendCommunity(n.Config.SendCommunity); err != nil {
+		return err
+	}
+	n.State.SendCommunity = n.Config.SendCommunity
 	if n.Config.PeerType == PEER_TYPE_EXTERNAL {
 		n.State.RemovePrivateAs = n.Config.RemovePrivateAs
 		n.AsPathOptions.State.ReplacePeerAs = n.AsPathOptions.Config.ReplacePeerAs
@@ -307,6 +314,10 @@ func SetPeerGroupStateValues(pg *PeerGroup, g *Global) error {
 
 	pg.Config.PeerType = getConfigPeerType(pg.Config.PeerAs, pg.Config.LocalAs)
 	pg.State.PeerType = pg.Config.PeerType
+	if err := validateSendCommunity(pg.Config.SendCommunity); err != nil {
+		return err
+	}
+	pg.State.SendCommunity = pg.Config.SendCommunity
 
 	if pg.RouteReflector.Config.RouteReflectorClient {
 		clusterId, err := getConfigClusterId(g, pg.RouteReflector.Config.RouteReflectorClusterId)
@@ -611,6 +622,25 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 		c.AfiSafis = append([]AfiSafi{}, pg.AfiSafis...)
 	}
 
+	return nil
+}
+
+// validateSendCommunity rejects a send-community value that is neither empty
+// nor one of the four the OpenConfig enum defines. Empty means unconfigured.
+//
+// The TOML path rejects; the gRPC path in SendCommunityFromAPI coerces an
+// out-of-range number to unconfigured instead. The asymmetry is deliberate: a
+// bad string here is a human typo in a file, and silently meaning "no filtering"
+// is the worst possible reading of it, whereas the API field was ignored
+// entirely until now, so a client that has been pushing junk into it should keep
+// working exactly as it did.
+func validateSendCommunity(t CommunityType) error {
+	if t == "" {
+		return nil
+	}
+	if _, ok := CommunityTypeToIntMap[t]; !ok {
+		return fmt.Errorf("invalid send-community %q: want standard, extended, both or none", t)
+	}
 	return nil
 }
 

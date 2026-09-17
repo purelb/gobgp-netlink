@@ -803,6 +803,21 @@ func (s *BgpServer) postFilterpath(peer *peer, path *table.Path) *table.Path {
 		path.RemoveLocalPref()
 	}
 
+	// send-community handling, here for the same reason: export policy can add
+	// communities, so this has to be the last word before encoding.
+	//
+	// Route-server clients are exempt like everything else on this path. Two
+	// reasons, either sufficient: RFC 7947 transparency, which is why
+	// UpdatePathAttrs returns early for them and why RemoveLocalPref above is
+	// guarded the same way; and aliasing - UpdatePathAttrs returns the *un-cloned*
+	// original for RS clients and ApplyPolicy only clones when a statement has
+	// ModActions, so this path can be the object owned by s.rsRib. delPathAttr
+	// records on it and GetPathAttrs honours dels through the parent chain, so
+	// filtering here would strip the attribute for every peer and for the RIB.
+	if path != nil && !path.IsWithdraw && !peer.isRouteServerClient() {
+		path.FilterCommunities(peer.sendCommunity())
+	}
+
 	return path
 }
 
@@ -3327,10 +3342,29 @@ func (s *BgpServer) policyEvaluatedAdjRibOutPaths(peer *peer, family bgp.Family,
 			continue
 		}
 		options.Validate = s.roaTable.Validate
-		if p = peer.policy.ApplyPolicy(peer.TableID(), table.POLICY_DIRECTION_EXPORT, p, options); p == nil {
+		p = peer.policy.ApplyPolicy(peer.TableID(), table.POLICY_DIRECTION_EXPORT, p, options)
+		if p == nil {
 			filtered[pathLocalKey] = table.PolicyFiltered
+			// Policy rejected it, so nothing was advertised and there is no
+			// transformed path to show. Display the candidate as it was
+			// considered - this branch keeps the pre-transform path, and keys
+			// `filtered` off the pre-transform local key to match.
+			pathList = append(pathList, path)
+			continue
 		}
-		pathList = append(pathList, path)
+		// Accepted, so show what was actually advertised.
+		//
+		// This used to append the raw local-RIB `path` and throw `p` away, which
+		// meant adj-out with enable_filtered reported un-prepended AS_PATH,
+		// un-rewritten next-hop, and retained LOCAL_PREF and MED - every per-peer
+		// egress transform, not just communities.
+		//
+		// For VRF-attached peers prePolicyFilterpath ran ToLocal(), which rewrites
+		// the NLRI from RD:prefix to prefix, so the prefix reported here is now
+		// the unicast one actually sent to the CE rather than the VPN form.
+		if p = s.postFilterpath(peer, p); p != nil {
+			pathList = append(pathList, p)
+		}
 	}
 	return adjRibOutPathsToUpdate(peer, pathList, filtered)
 }
@@ -3805,6 +3839,34 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 		return fmt.Errorf("can't overwrite the existing peer: %s", addr)
 	}
 
+	// send-community is silently inert for route-server clients and for every
+	// family outside the filter's allowlist, and there is no per-family form of
+	// the setting to express the difference. Say so once, here, rather than
+	// leaving an operator with a knob that reads as configured and does nothing.
+	// Config time only - never on the per-path egress hot path.
+	if c.Config.SendCommunity != "" {
+		if c.RouteServer.Config.RouteServerClient {
+			s.logger.Warn("send-community is ignored for route server clients",
+				slog.String("Topic", "config"),
+				slog.String("Key", addr),
+				slog.String("SendCommunity", string(c.Config.SendCommunity)))
+		} else if families, _ := oc.AfiSafis(c.AfiSafis).ToRfList(); len(families) > 0 {
+			inert := make([]string, 0, len(families))
+			for _, f := range families {
+				if !table.SendCommunityFilterApplies(f) {
+					inert = append(inert, f.String())
+				}
+			}
+			if len(inert) > 0 {
+				s.logger.Warn("send-community does not apply to these families and is ignored for them; communities are protocol payload there, not decoration",
+					slog.String("Topic", "config"),
+					slog.String("Key", addr),
+					slog.String("SendCommunity", string(c.Config.SendCommunity)),
+					slog.Any("Families", inert))
+			}
+		}
+	}
+
 	if vrf := c.Config.Vrf; vrf != "" {
 		if c.RouteServer.Config.RouteServerClient {
 			return fmt.Errorf("route server client can't be enslaved to VRF")
@@ -4269,10 +4331,35 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 		conf.Timers.Config = c.Timers.Config
 	}
 
+	// send-community is the only NeighborConfig field excluded from
+	// NeedsResendOpenMessage, and therefore the only one that reaches a live peer
+	// without going through deleteNeighbor/addNeighbor. Nothing else copies
+	// conf.Config from c.Config on this path, so without these two lines the
+	// setting would be accepted and silently never applied. State is what
+	// postFilterpath reads; SetDefaultNeighborConfigValues already validated and
+	// populated it on c near the top of this function.
+	sendCommunityChanged := original.Config.SendCommunity != c.Config.SendCommunity
+	if sendCommunityChanged {
+		peer.fsm.logger.Info("Update send-community configuration",
+			slog.String("From", string(original.Config.SendCommunity)),
+			slog.String("To", string(c.Config.SendCommunity)))
+		conf.Config.SendCommunity = c.Config.SendCommunity
+		conf.State.SendCommunity = c.State.SendCommunity
+	}
+
 	isLimit, err := peer.updatePrefixLimitConfig(&conf, c.AfiSafis)
 	if err == nil {
 		peer.fsm.pConf.Update(&conf)
 		peer.fsm.lock.Unlock()
+		// Already-advertised routes were filtered under the old setting, so they
+		// have to be re-sent. Must run after the Unlock above - softResetOut
+		// reaches back into the peer.
+		if sendCommunityChanged {
+			if rerr := s.softResetOut(addr, bgp.Family(0), false); rerr != nil {
+				peer.fsm.logger.Error("failed to soft reset out after send-community change",
+					slog.String("Err", rerr.Error()))
+			}
+		}
 		if bfdConfigChanged {
 			err = s.updateBfdPeer(
 				addr,

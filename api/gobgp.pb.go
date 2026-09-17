@@ -9077,24 +9077,33 @@ func (x *PrefixLimit) GetShutdownThresholdPct() uint32 {
 }
 
 type PeerConf struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	AuthPassword         string                 `protobuf:"bytes,1,opt,name=auth_password,json=authPassword,proto3" json:"auth_password,omitempty"`
-	Description          string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	LocalAsn             uint32                 `protobuf:"varint,3,opt,name=local_asn,json=localAsn,proto3" json:"local_asn,omitempty"`
-	NeighborAddress      string                 `protobuf:"bytes,4,opt,name=neighbor_address,json=neighborAddress,proto3" json:"neighbor_address,omitempty"`
-	PeerAsn              uint32                 `protobuf:"varint,5,opt,name=peer_asn,json=peerAsn,proto3" json:"peer_asn,omitempty"`
-	PeerGroup            string                 `protobuf:"bytes,6,opt,name=peer_group,json=peerGroup,proto3" json:"peer_group,omitempty"`
-	Type                 PeerType               `protobuf:"varint,7,opt,name=type,proto3,enum=api.PeerType" json:"type,omitempty"`
-	RemovePrivate        RemovePrivate          `protobuf:"varint,8,opt,name=remove_private,json=removePrivate,proto3,enum=api.RemovePrivate" json:"remove_private,omitempty"`
-	RouteFlapDamping     bool                   `protobuf:"varint,9,opt,name=route_flap_damping,json=routeFlapDamping,proto3" json:"route_flap_damping,omitempty"`
-	SendCommunity        uint32                 `protobuf:"varint,10,opt,name=send_community,json=sendCommunity,proto3" json:"send_community,omitempty"`
-	NeighborInterface    string                 `protobuf:"bytes,11,opt,name=neighbor_interface,json=neighborInterface,proto3" json:"neighbor_interface,omitempty"`
-	Vrf                  string                 `protobuf:"bytes,12,opt,name=vrf,proto3" json:"vrf,omitempty"`
-	AllowOwnAsn          uint32                 `protobuf:"varint,13,opt,name=allow_own_asn,json=allowOwnAsn,proto3" json:"allow_own_asn,omitempty"`
-	ReplacePeerAsn       bool                   `protobuf:"varint,14,opt,name=replace_peer_asn,json=replacePeerAsn,proto3" json:"replace_peer_asn,omitempty"`
-	AdminDown            bool                   `protobuf:"varint,15,opt,name=admin_down,json=adminDown,proto3" json:"admin_down,omitempty"`
-	SendSoftwareVersion  bool                   `protobuf:"varint,16,opt,name=send_software_version,json=sendSoftwareVersion,proto3" json:"send_software_version,omitempty"`
-	AllowAspathLoopLocal bool                   `protobuf:"varint,17,opt,name=allow_aspath_loop_local,json=allowAspathLoopLocal,proto3" json:"allow_aspath_loop_local,omitempty"`
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	AuthPassword     string                 `protobuf:"bytes,1,opt,name=auth_password,json=authPassword,proto3" json:"auth_password,omitempty"`
+	Description      string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	LocalAsn         uint32                 `protobuf:"varint,3,opt,name=local_asn,json=localAsn,proto3" json:"local_asn,omitempty"`
+	NeighborAddress  string                 `protobuf:"bytes,4,opt,name=neighbor_address,json=neighborAddress,proto3" json:"neighbor_address,omitempty"`
+	PeerAsn          uint32                 `protobuf:"varint,5,opt,name=peer_asn,json=peerAsn,proto3" json:"peer_asn,omitempty"`
+	PeerGroup        string                 `protobuf:"bytes,6,opt,name=peer_group,json=peerGroup,proto3" json:"peer_group,omitempty"`
+	Type             PeerType               `protobuf:"varint,7,opt,name=type,proto3,enum=api.PeerType" json:"type,omitempty"`
+	RemovePrivate    RemovePrivate          `protobuf:"varint,8,opt,name=remove_private,json=removePrivate,proto3,enum=api.RemovePrivate" json:"remove_private,omitempty"`
+	RouteFlapDamping bool                   `protobuf:"varint,9,opt,name=route_flap_damping,json=routeFlapDamping,proto3" json:"route_flap_damping,omitempty"`
+	// Which community types to send to this peer: standard=0, extended=1,
+	// both=2, none=3. Not a bitmask, and there is no "large" or "all".
+	//
+	// optional because 0 means *standard*, not unset. Without presence a peer
+	// that never set the field is indistinguishable from one asking for standard
+	// communities only - and acting on that would strip extended communities,
+	// route targets included, from every existing session on upgrade. Absent
+	// means "not configured": send whatever the path carries, as gobgpd always
+	// has.
+	SendCommunity        *uint32 `protobuf:"varint,10,opt,name=send_community,json=sendCommunity,proto3,oneof" json:"send_community,omitempty"`
+	NeighborInterface    string  `protobuf:"bytes,11,opt,name=neighbor_interface,json=neighborInterface,proto3" json:"neighbor_interface,omitempty"`
+	Vrf                  string  `protobuf:"bytes,12,opt,name=vrf,proto3" json:"vrf,omitempty"`
+	AllowOwnAsn          uint32  `protobuf:"varint,13,opt,name=allow_own_asn,json=allowOwnAsn,proto3" json:"allow_own_asn,omitempty"`
+	ReplacePeerAsn       bool    `protobuf:"varint,14,opt,name=replace_peer_asn,json=replacePeerAsn,proto3" json:"replace_peer_asn,omitempty"`
+	AdminDown            bool    `protobuf:"varint,15,opt,name=admin_down,json=adminDown,proto3" json:"admin_down,omitempty"`
+	SendSoftwareVersion  bool    `protobuf:"varint,16,opt,name=send_software_version,json=sendSoftwareVersion,proto3" json:"send_software_version,omitempty"`
+	AllowAspathLoopLocal bool    `protobuf:"varint,17,opt,name=allow_aspath_loop_local,json=allowAspathLoopLocal,proto3" json:"allow_aspath_loop_local,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -9193,8 +9202,8 @@ func (x *PeerConf) GetRouteFlapDamping() bool {
 }
 
 func (x *PeerConf) GetSendCommunity() uint32 {
-	if x != nil {
-		return x.SendCommunity
+	if x != nil && x.SendCommunity != nil {
+		return *x.SendCommunity
 	}
 	return 0
 }
@@ -9249,20 +9258,29 @@ func (x *PeerConf) GetAllowAspathLoopLocal() bool {
 }
 
 type PeerGroupConf struct {
-	state                protoimpl.MessageState `protogen:"open.v1"`
-	AuthPassword         string                 `protobuf:"bytes,1,opt,name=auth_password,json=authPassword,proto3" json:"auth_password,omitempty"`
-	Description          string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	LocalAsn             uint32                 `protobuf:"varint,3,opt,name=local_asn,json=localAsn,proto3" json:"local_asn,omitempty"`
-	PeerAsn              uint32                 `protobuf:"varint,4,opt,name=peer_asn,json=peerAsn,proto3" json:"peer_asn,omitempty"`
-	PeerGroupName        string                 `protobuf:"bytes,5,opt,name=peer_group_name,json=peerGroupName,proto3" json:"peer_group_name,omitempty"`
-	Type                 PeerType               `protobuf:"varint,6,opt,name=type,proto3,enum=api.PeerType" json:"type,omitempty"`
-	RemovePrivate        RemovePrivate          `protobuf:"varint,7,opt,name=remove_private,json=removePrivate,proto3,enum=api.RemovePrivate" json:"remove_private,omitempty"`
-	RouteFlapDamping     bool                   `protobuf:"varint,8,opt,name=route_flap_damping,json=routeFlapDamping,proto3" json:"route_flap_damping,omitempty"`
-	SendCommunity        uint32                 `protobuf:"varint,9,opt,name=send_community,json=sendCommunity,proto3" json:"send_community,omitempty"`
-	SendSoftwareVersion  bool                   `protobuf:"varint,10,opt,name=send_software_version,json=sendSoftwareVersion,proto3" json:"send_software_version,omitempty"`
-	AllowOwnAsn          uint32                 `protobuf:"varint,11,opt,name=allow_own_asn,json=allowOwnAsn,proto3" json:"allow_own_asn,omitempty"`
-	ReplacePeerAsn       bool                   `protobuf:"varint,12,opt,name=replace_peer_asn,json=replacePeerAsn,proto3" json:"replace_peer_asn,omitempty"`
-	AllowAspathLoopLocal bool                   `protobuf:"varint,13,opt,name=allow_aspath_loop_local,json=allowAspathLoopLocal,proto3" json:"allow_aspath_loop_local,omitempty"`
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	AuthPassword     string                 `protobuf:"bytes,1,opt,name=auth_password,json=authPassword,proto3" json:"auth_password,omitempty"`
+	Description      string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	LocalAsn         uint32                 `protobuf:"varint,3,opt,name=local_asn,json=localAsn,proto3" json:"local_asn,omitempty"`
+	PeerAsn          uint32                 `protobuf:"varint,4,opt,name=peer_asn,json=peerAsn,proto3" json:"peer_asn,omitempty"`
+	PeerGroupName    string                 `protobuf:"bytes,5,opt,name=peer_group_name,json=peerGroupName,proto3" json:"peer_group_name,omitempty"`
+	Type             PeerType               `protobuf:"varint,6,opt,name=type,proto3,enum=api.PeerType" json:"type,omitempty"`
+	RemovePrivate    RemovePrivate          `protobuf:"varint,7,opt,name=remove_private,json=removePrivate,proto3,enum=api.RemovePrivate" json:"remove_private,omitempty"`
+	RouteFlapDamping bool                   `protobuf:"varint,8,opt,name=route_flap_damping,json=routeFlapDamping,proto3" json:"route_flap_damping,omitempty"`
+	// Which community types to send to this peer: standard=0, extended=1,
+	// both=2, none=3. Not a bitmask, and there is no "large" or "all".
+	//
+	// optional because 0 means *standard*, not unset. Without presence a peer
+	// that never set the field is indistinguishable from one asking for standard
+	// communities only - and acting on that would strip extended communities,
+	// route targets included, from every existing session on upgrade. Absent
+	// means "not configured": send whatever the path carries, as gobgpd always
+	// has.
+	SendCommunity        *uint32 `protobuf:"varint,9,opt,name=send_community,json=sendCommunity,proto3,oneof" json:"send_community,omitempty"`
+	SendSoftwareVersion  bool    `protobuf:"varint,10,opt,name=send_software_version,json=sendSoftwareVersion,proto3" json:"send_software_version,omitempty"`
+	AllowOwnAsn          uint32  `protobuf:"varint,11,opt,name=allow_own_asn,json=allowOwnAsn,proto3" json:"allow_own_asn,omitempty"`
+	ReplacePeerAsn       bool    `protobuf:"varint,12,opt,name=replace_peer_asn,json=replacePeerAsn,proto3" json:"replace_peer_asn,omitempty"`
+	AllowAspathLoopLocal bool    `protobuf:"varint,13,opt,name=allow_aspath_loop_local,json=allowAspathLoopLocal,proto3" json:"allow_aspath_loop_local,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -9354,8 +9372,8 @@ func (x *PeerGroupConf) GetRouteFlapDamping() bool {
 }
 
 func (x *PeerGroupConf) GetSendCommunity() uint32 {
-	if x != nil {
-		return x.SendCommunity
+	if x != nil && x.SendCommunity != nil {
+		return *x.SendCommunity
 	}
 	return 0
 }
@@ -9398,11 +9416,12 @@ type PeerGroupState struct {
 	Type             PeerType               `protobuf:"varint,6,opt,name=type,proto3,enum=api.PeerType" json:"type,omitempty"`
 	RemovePrivate    RemovePrivate          `protobuf:"varint,7,opt,name=remove_private,json=removePrivate,proto3,enum=api.RemovePrivate" json:"remove_private,omitempty"`
 	RouteFlapDamping bool                   `protobuf:"varint,8,opt,name=route_flap_damping,json=routeFlapDamping,proto3" json:"route_flap_damping,omitempty"`
-	SendCommunity    uint32                 `protobuf:"varint,9,opt,name=send_community,json=sendCommunity,proto3" json:"send_community,omitempty"`
-	TotalPaths       uint32                 `protobuf:"varint,10,opt,name=total_paths,json=totalPaths,proto3" json:"total_paths,omitempty"`
-	TotalPrefixes    uint32                 `protobuf:"varint,11,opt,name=total_prefixes,json=totalPrefixes,proto3" json:"total_prefixes,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Absent when not configured. See PeerConf.send_community.
+	SendCommunity *uint32 `protobuf:"varint,9,opt,name=send_community,json=sendCommunity,proto3,oneof" json:"send_community,omitempty"`
+	TotalPaths    uint32  `protobuf:"varint,10,opt,name=total_paths,json=totalPaths,proto3" json:"total_paths,omitempty"`
+	TotalPrefixes uint32  `protobuf:"varint,11,opt,name=total_prefixes,json=totalPrefixes,proto3" json:"total_prefixes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PeerGroupState) Reset() {
@@ -9492,8 +9511,8 @@ func (x *PeerGroupState) GetRouteFlapDamping() bool {
 }
 
 func (x *PeerGroupState) GetSendCommunity() uint32 {
-	if x != nil {
-		return x.SendCommunity
+	if x != nil && x.SendCommunity != nil {
+		return *x.SendCommunity
 	}
 	return 0
 }
@@ -9669,19 +9688,20 @@ func (x *RouteReflector) GetRouteReflectorClusterId() string {
 }
 
 type PeerState struct {
-	state             protoimpl.MessageState     `protogen:"open.v1"`
-	AuthPassword      string                     `protobuf:"bytes,1,opt,name=auth_password,json=authPassword,proto3" json:"auth_password,omitempty"`
-	Description       string                     `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	LocalAsn          uint32                     `protobuf:"varint,3,opt,name=local_asn,json=localAsn,proto3" json:"local_asn,omitempty"`
-	Messages          *Messages                  `protobuf:"bytes,4,opt,name=messages,proto3" json:"messages,omitempty"`
-	NeighborAddress   string                     `protobuf:"bytes,5,opt,name=neighbor_address,json=neighborAddress,proto3" json:"neighbor_address,omitempty"`
-	PeerAsn           uint32                     `protobuf:"varint,6,opt,name=peer_asn,json=peerAsn,proto3" json:"peer_asn,omitempty"`
-	PeerGroup         string                     `protobuf:"bytes,7,opt,name=peer_group,json=peerGroup,proto3" json:"peer_group,omitempty"`
-	Type              PeerType                   `protobuf:"varint,8,opt,name=type,proto3,enum=api.PeerType" json:"type,omitempty"`
-	Queues            *Queues                    `protobuf:"bytes,9,opt,name=queues,proto3" json:"queues,omitempty"`
-	RemovePrivate     RemovePrivate              `protobuf:"varint,10,opt,name=remove_private,json=removePrivate,proto3,enum=api.RemovePrivate" json:"remove_private,omitempty"`
-	RouteFlapDamping  bool                       `protobuf:"varint,11,opt,name=route_flap_damping,json=routeFlapDamping,proto3" json:"route_flap_damping,omitempty"`
-	SendCommunity     uint32                     `protobuf:"varint,12,opt,name=send_community,json=sendCommunity,proto3" json:"send_community,omitempty"`
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	AuthPassword     string                 `protobuf:"bytes,1,opt,name=auth_password,json=authPassword,proto3" json:"auth_password,omitempty"`
+	Description      string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
+	LocalAsn         uint32                 `protobuf:"varint,3,opt,name=local_asn,json=localAsn,proto3" json:"local_asn,omitempty"`
+	Messages         *Messages              `protobuf:"bytes,4,opt,name=messages,proto3" json:"messages,omitempty"`
+	NeighborAddress  string                 `protobuf:"bytes,5,opt,name=neighbor_address,json=neighborAddress,proto3" json:"neighbor_address,omitempty"`
+	PeerAsn          uint32                 `protobuf:"varint,6,opt,name=peer_asn,json=peerAsn,proto3" json:"peer_asn,omitempty"`
+	PeerGroup        string                 `protobuf:"bytes,7,opt,name=peer_group,json=peerGroup,proto3" json:"peer_group,omitempty"`
+	Type             PeerType               `protobuf:"varint,8,opt,name=type,proto3,enum=api.PeerType" json:"type,omitempty"`
+	Queues           *Queues                `protobuf:"bytes,9,opt,name=queues,proto3" json:"queues,omitempty"`
+	RemovePrivate    RemovePrivate          `protobuf:"varint,10,opt,name=remove_private,json=removePrivate,proto3,enum=api.RemovePrivate" json:"remove_private,omitempty"`
+	RouteFlapDamping bool                   `protobuf:"varint,11,opt,name=route_flap_damping,json=routeFlapDamping,proto3" json:"route_flap_damping,omitempty"`
+	// Absent when not configured. See PeerConf.send_community.
+	SendCommunity     *uint32                    `protobuf:"varint,12,opt,name=send_community,json=sendCommunity,proto3,oneof" json:"send_community,omitempty"`
 	SessionState      PeerState_SessionState     `protobuf:"varint,13,opt,name=session_state,json=sessionState,proto3,enum=api.PeerState_SessionState" json:"session_state,omitempty"`
 	AdminState        PeerState_AdminState       `protobuf:"varint,15,opt,name=admin_state,json=adminState,proto3,enum=api.PeerState_AdminState" json:"admin_state,omitempty"`
 	OutQ              uint32                     `protobuf:"varint,16,opt,name=out_q,json=outQ,proto3" json:"out_q,omitempty"`
@@ -9823,8 +9843,8 @@ func (x *PeerState) GetRouteFlapDamping() bool {
 }
 
 func (x *PeerState) GetSendCommunity() uint32 {
-	if x != nil {
-		return x.SendCommunity
+	if x != nil && x.SendCommunity != nil {
+		return *x.SendCommunity
 	}
 	return 0
 }
@@ -16409,7 +16429,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\vPrefixLimit\x12#\n" +
 	"\x06family\x18\x01 \x01(\v2\v.api.FamilyR\x06family\x12!\n" +
 	"\fmax_prefixes\x18\x02 \x01(\rR\vmaxPrefixes\x124\n" +
-	"\x16shutdown_threshold_pct\x18\x03 \x01(\rR\x14shutdownThresholdPct\"\x9f\x05\n" +
+	"\x16shutdown_threshold_pct\x18\x03 \x01(\rR\x14shutdownThresholdPct\"\xb7\x05\n" +
 	"\bPeerConf\x12#\n" +
 	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1b\n" +
@@ -16420,9 +16440,9 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"peer_group\x18\x06 \x01(\tR\tpeerGroup\x12!\n" +
 	"\x04type\x18\a \x01(\x0e2\r.api.PeerTypeR\x04type\x129\n" +
 	"\x0eremove_private\x18\b \x01(\x0e2\x12.api.RemovePrivateR\rremovePrivate\x12,\n" +
-	"\x12route_flap_damping\x18\t \x01(\bR\x10routeFlapDamping\x12%\n" +
+	"\x12route_flap_damping\x18\t \x01(\bR\x10routeFlapDamping\x12*\n" +
 	"\x0esend_community\x18\n" +
-	" \x01(\rR\rsendCommunity\x12-\n" +
+	" \x01(\rH\x00R\rsendCommunity\x88\x01\x01\x12-\n" +
 	"\x12neighbor_interface\x18\v \x01(\tR\x11neighborInterface\x12\x10\n" +
 	"\x03vrf\x18\f \x01(\tR\x03vrf\x12\"\n" +
 	"\rallow_own_asn\x18\r \x01(\rR\vallowOwnAsn\x12(\n" +
@@ -16430,7 +16450,8 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\n" +
 	"admin_down\x18\x0f \x01(\bR\tadminDown\x122\n" +
 	"\x15send_software_version\x18\x10 \x01(\bR\x13sendSoftwareVersion\x125\n" +
-	"\x17allow_aspath_loop_local\x18\x11 \x01(\bR\x14allowAspathLoopLocal\"\xa2\x04\n" +
+	"\x17allow_aspath_loop_local\x18\x11 \x01(\bR\x14allowAspathLoopLocalB\x11\n" +
+	"\x0f_send_community\"\xba\x04\n" +
 	"\rPeerGroupConf\x12#\n" +
 	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1b\n" +
@@ -16439,13 +16460,14 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x0fpeer_group_name\x18\x05 \x01(\tR\rpeerGroupName\x12!\n" +
 	"\x04type\x18\x06 \x01(\x0e2\r.api.PeerTypeR\x04type\x129\n" +
 	"\x0eremove_private\x18\a \x01(\x0e2\x12.api.RemovePrivateR\rremovePrivate\x12,\n" +
-	"\x12route_flap_damping\x18\b \x01(\bR\x10routeFlapDamping\x12%\n" +
-	"\x0esend_community\x18\t \x01(\rR\rsendCommunity\x122\n" +
+	"\x12route_flap_damping\x18\b \x01(\bR\x10routeFlapDamping\x12*\n" +
+	"\x0esend_community\x18\t \x01(\rH\x00R\rsendCommunity\x88\x01\x01\x122\n" +
 	"\x15send_software_version\x18\n" +
 	" \x01(\bR\x13sendSoftwareVersion\x12\"\n" +
 	"\rallow_own_asn\x18\v \x01(\rR\vallowOwnAsn\x12(\n" +
 	"\x10replace_peer_asn\x18\f \x01(\bR\x0ereplacePeerAsn\x125\n" +
-	"\x17allow_aspath_loop_local\x18\r \x01(\bR\x14allowAspathLoopLocal\"\xb2\x03\n" +
+	"\x17allow_aspath_loop_local\x18\r \x01(\bR\x14allowAspathLoopLocalB\x11\n" +
+	"\x0f_send_community\"\xca\x03\n" +
 	"\x0ePeerGroupState\x12#\n" +
 	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1b\n" +
@@ -16454,12 +16476,13 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x0fpeer_group_name\x18\x05 \x01(\tR\rpeerGroupName\x12!\n" +
 	"\x04type\x18\x06 \x01(\x0e2\r.api.PeerTypeR\x04type\x129\n" +
 	"\x0eremove_private\x18\a \x01(\x0e2\x12.api.RemovePrivateR\rremovePrivate\x12,\n" +
-	"\x12route_flap_damping\x18\b \x01(\bR\x10routeFlapDamping\x12%\n" +
-	"\x0esend_community\x18\t \x01(\rR\rsendCommunity\x12\x1f\n" +
+	"\x12route_flap_damping\x18\b \x01(\bR\x10routeFlapDamping\x12*\n" +
+	"\x0esend_community\x18\t \x01(\rH\x00R\rsendCommunity\x88\x01\x01\x12\x1f\n" +
 	"\vtotal_paths\x18\n" +
 	" \x01(\rR\n" +
 	"totalPaths\x12%\n" +
-	"\x0etotal_prefixes\x18\v \x01(\rR\rtotalPrefixes\"@\n" +
+	"\x0etotal_prefixes\x18\v \x01(\rR\rtotalPrefixesB\x11\n" +
+	"\x0f_send_community\"@\n" +
 	"\vTtlSecurity\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x17\n" +
 	"\attl_min\x18\x02 \x01(\rR\x06ttlMin\"K\n" +
@@ -16468,7 +16491,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\fmultihop_ttl\x18\x02 \x01(\rR\vmultihopTtl\"\x83\x01\n" +
 	"\x0eRouteReflector\x124\n" +
 	"\x16route_reflector_client\x18\x01 \x01(\bR\x14routeReflectorClient\x12;\n" +
-	"\x1aroute_reflector_cluster_id\x18\x02 \x01(\tR\x17routeReflectorClusterId\"\xc5\x0f\n" +
+	"\x1aroute_reflector_cluster_id\x18\x02 \x01(\tR\x17routeReflectorClusterId\"\xdd\x0f\n" +
 	"\tPeerState\x12#\n" +
 	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1b\n" +
@@ -16482,8 +16505,8 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x06queues\x18\t \x01(\v2\v.api.QueuesR\x06queues\x129\n" +
 	"\x0eremove_private\x18\n" +
 	" \x01(\x0e2\x12.api.RemovePrivateR\rremovePrivate\x12,\n" +
-	"\x12route_flap_damping\x18\v \x01(\bR\x10routeFlapDamping\x12%\n" +
-	"\x0esend_community\x18\f \x01(\rR\rsendCommunity\x12@\n" +
+	"\x12route_flap_damping\x18\v \x01(\bR\x10routeFlapDamping\x12*\n" +
+	"\x0esend_community\x18\f \x01(\rH\x00R\rsendCommunity\x88\x01\x01\x12@\n" +
 	"\rsession_state\x18\r \x01(\x0e2\x1b.api.PeerState.SessionStateR\fsessionState\x12:\n" +
 	"\vadmin_state\x18\x0f \x01(\x0e2\x19.api.PeerState.AdminStateR\n" +
 	"adminState\x12\x13\n" +
@@ -16529,7 +16552,8 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x12 \n" +
 	"\x1cDISCONNECT_REASON_HARD_RESET\x10\v\x12\"\n" +
 	"\x1eDISCONNECT_REASON_DECONFIGURED\x10\f\x12!\n" +
-	"\x1dDISCONNECT_REASON_BAD_PEER_AS\x10\r\"V\n" +
+	"\x1dDISCONNECT_REASON_BAD_PEER_AS\x10\rB\x11\n" +
+	"\x0f_send_community\"V\n" +
 	"\bMessages\x12(\n" +
 	"\breceived\x18\x01 \x01(\v2\f.api.MessageR\breceived\x12 \n" +
 	"\x04sent\x18\x02 \x01(\v2\f.api.MessageR\x04sent\"\x97\x02\n" +
@@ -17829,6 +17853,10 @@ func file_api_gobgp_proto_init() {
 		(*WatchEventResponse_Peer)(nil),
 		(*WatchEventResponse_Table)(nil),
 	}
+	file_api_gobgp_proto_msgTypes[149].OneofWrappers = []any{}
+	file_api_gobgp_proto_msgTypes[150].OneofWrappers = []any{}
+	file_api_gobgp_proto_msgTypes[151].OneofWrappers = []any{}
+	file_api_gobgp_proto_msgTypes[155].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{

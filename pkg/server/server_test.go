@@ -937,7 +937,6 @@ func TestListPathEnableFiltered(test *testing.T) {
 
 	assert.NoError(err)
 
-	var wantEmptyCommunities []uint32
 	wantCommunitiesAfterExportPolicies := []uint32{100<<16 | 100}
 	wantCommunitiesAfterImportPolicies := []uint32{200<<16 | 200}
 
@@ -952,20 +951,27 @@ func TestListPathEnableFiltered(test *testing.T) {
 		return nil
 	}
 
-	// Check ADJ_OUT routes before applying export policies.
+	// ADJ_OUT with EnableFiltered reports what was advertised, the same as
+	// without it - the flag controls whether policy-rejected candidates are
+	// *included and annotated*, not which version of the attributes is shown.
+	//
+	// This used to assert empty communities here, labelled "AdjRibOutPre":
+	// policyEvaluatedAdjRibOutPaths computed the transformed path and threw it
+	// away, so this view reported the raw local-RIB path. That hid every
+	// per-peer egress transform, not just the export policy below - AS_PATH
+	// prepending, next-hop rewriting, LOCAL_PREF and MED as well.
 	for count := 0; count < 2; {
 		count = 0
 		err = server2.ListPath(apiutil.ListPathRequest{
 			TableType: api.TableType_TABLE_TYPE_ADJ_OUT,
 			Family:    bgpFamily, Name: "127.0.0.1",
-			// TODO(wenovus): This is confusing and we may want to change this.
 			EnableFiltered: true,
 		}, func(prefix bgp.NLRI, paths []*apiutil.Path) {
 			count++
 			for _, path := range paths {
 				comms := getCommunities(path)
-				if diff := cmp.Diff(wantEmptyCommunities, comms); diff != "" {
-					test.Errorf("AdjRibOutPre communities for %v (-want, +got):\n%s", prefix, diff)
+				if diff := cmp.Diff(wantCommunitiesAfterExportPolicies, comms); diff != "" {
+					test.Errorf("AdjRibOut(filtered) communities for %v (-want, +got):\n%s", prefix, diff)
 				} else {
 					test.Logf("Got expected communities for %v: %v", prefix, comms)
 				}
@@ -1717,6 +1723,88 @@ func TestFilterpathWitheBGP(t *testing.T) {
 	assert.Nil(t, path)
 }
 
+// postFilterpath is where send-community has to run: the export policy can add
+// communities, so anything applied in UpdatePathAttrs (which runs before policy)
+// is not the last word. This pins the call, which a refactor could silently drop
+// without any table-level test noticing.
+func TestPostFilterpathAppliesSendCommunity(t *testing.T) {
+	rib := table.NewTableManager(logger, []bgp.Family{bgp.RF_IPv4_UC})
+	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.10.10.0/24"))
+	rt, err := bgp.ParseExtendedCommunity(bgp.EC_SUBTYPE_ROUTE_TARGET, "65000:100")
+	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		name    string
+		typ     oc.CommunityType
+		wantStd bool
+		wantExt bool
+	}{
+		{"unconfigured peer keeps everything", "", true, true},
+		{"standard", oc.COMMUNITY_TYPE_STANDARD, true, false},
+		{"extended", oc.COMMUNITY_TYPE_EXTENDED, false, true},
+		{"both", oc.COMMUNITY_TYPE_BOTH, true, true},
+		{"none", oc.COMMUNITY_TYPE_NONE, false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newPeerandInfo(t, 65000, 65001, "192.168.0.1", rib)
+			conf := p.fsm.pConf.ReadCopy()
+			conf.State.SendCommunity = tt.typ
+			p.fsm.pConf.Update(&conf)
+
+			attrs := []bgp.PathAttributeInterface{
+				bgp.NewPathAttributeOrigin(0),
+				bgp.NewPathAttributeAsPath([]bgp.AsPathParamInterface{bgp.NewAs4PathParam(2, []uint32{65001})}),
+				bgp.NewPathAttributeCommunities([]uint32{65000<<16 | 1}),
+				bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{rt}),
+			}
+			path := table.NewPath(bgp.RF_IPv4_UC, p.peerInfo.Load(), bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+
+			got := (&BgpServer{}).postFilterpath(p, path)
+			require.NotNil(t, got)
+			assert.Equal(t, tt.wantStd, got.GetCommunities() != nil, "standard")
+			assert.Equal(t, tt.wantExt, len(got.GetExtCommunities()) > 0, "extended")
+		})
+	}
+
+	// Route-server clients are exempt, for two independent reasons and with two
+	// separate assertions.
+	//
+	// RFC 7947 transparency is the first: UpdatePathAttrs returns early for RS
+	// clients and RemoveLocalPref beside this call is guarded the same way.
+	//
+	// Aliasing is the second and the dangerous one. UpdatePathAttrs returns the
+	// *un-cloned* original for RS clients and ApplyPolicy only clones when a
+	// statement has ModActions, so the path reaching postFilterpath can be the
+	// object owned by s.rsRib. delPathAttr records on it and GetPathAttrs honours
+	// dels through the parent chain, so filtering here would strip the attribute
+	// for every peer and for the RIB itself, permanently.
+	t.Run("route server client is exempt and its path is not mutated", func(t *testing.T) {
+		p := newPeerandInfo(t, 65000, 65001, "192.168.0.1", rib)
+		conf := p.fsm.pConf.ReadCopy()
+		conf.State.SendCommunity = oc.COMMUNITY_TYPE_NONE
+		conf.RouteServer.Config.RouteServerClient = true
+		p.fsm.pConf.Update(&conf)
+		require.True(t, p.isRouteServerClient())
+
+		attrs := []bgp.PathAttributeInterface{
+			bgp.NewPathAttributeOrigin(0),
+			bgp.NewPathAttributeAsPath([]bgp.AsPathParamInterface{bgp.NewAs4PathParam(2, []uint32{65001})}),
+			bgp.NewPathAttributeCommunities([]uint32{65000<<16 | 1}),
+			bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{rt}),
+		}
+		shared := table.NewPath(bgp.RF_IPv4_UC, p.peerInfo.Load(), bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+
+		got := (&BgpServer{}).postFilterpath(p, shared)
+		require.NotNil(t, got)
+		assert.NotNil(t, got.GetCommunities(), "nothing stripped for an RS client")
+		assert.NotEmpty(t, got.GetExtCommunities(), "nothing stripped for an RS client")
+
+		// The aliasing assertion: the object we handed in must be untouched.
+		assert.NotNil(t, shared.GetCommunities(), "the shared rsRib path was mutated")
+		assert.NotEmpty(t, shared.GetExtCommunities(), "the shared rsRib path was mutated")
+	})
+}
+
 func TestFilterpathWithiBGP(t *testing.T) {
 	as := uint32(65000)
 
@@ -1829,6 +1917,10 @@ func TestPeerGroup(test *testing.T) {
 		Config: oc.PeerGroupConfig{
 			PeerAs:        2,
 			PeerGroupName: "g",
+			// send-community is set only on the group: the neighbor below
+			// registers configured fields without it, so this also covers
+			// inheritance through OverwriteNeighborConfigWithPeerGroup.
+			SendCommunity: oc.COMMUNITY_TYPE_BOTH,
 		},
 	}
 	err = s.addPeerGroup(g)
@@ -1896,6 +1988,22 @@ func TestPeerGroup(test *testing.T) {
 	assert.NoError(err)
 
 	establishedWaiter.Wait(test, 10*time.Second)
+
+	// Round trip: what went in as a peer-group setting must come back out of
+	// ListPeer, in Conf and in State. State is what pkg/metrics reads for
+	// bgp_peer_send_community, and it was written by nothing before this.
+	var seen int
+	err = s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(p *api.Peer) {
+		seen++
+		if assert.NotNil(p.Conf) && assert.NotNil(p.Conf.SendCommunity) {
+			assert.Equal(uint32(2), *p.Conf.SendCommunity)
+		}
+		if assert.NotNil(p.State) && assert.NotNil(p.State.SendCommunity) {
+			assert.Equal(uint32(2), *p.State.SendCommunity)
+		}
+	})
+	assert.NoError(err)
+	assert.Equal(1, seen)
 }
 
 func TestDynamicNeighbor(t *testing.T) {
@@ -5080,4 +5188,167 @@ func TestStopDoesNotNotifyGracefulRestartPeers(t *testing.T) {
 	assert.Equal(t, uint64(0), after,
 		"a graceful-restart peer must not be told to discard its routes: "+
 			"Stop() sent Cease/PEER_DECONFIGURED when it passed a zero-value request")
+}
+
+// The point of this test is the *effect* assertion, not the no-flap one.
+//
+// send-community is the only NeighborConfig field that reaches a live peer
+// without going through deleteNeighbor/addNeighbor, and nothing on that path
+// copies conf.Config from c.Config. So a test that only checked the session
+// survived would pass even if updateNeighbor never applied the value - leaving
+// the setting accepted and silently inert, which is the exact bug class this
+// whole change exists to eliminate.
+func TestUpdatePeerSendCommunityAppliesWithoutFlappingSession(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10379},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	peerConf := &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: peerConf}))
+
+	remote := NewBgpServer()
+	go remote.Serve()
+	assert.NoError(remote.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer remote.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(s, api.PeerState_SESSION_STATE_ESTABLISHED)
+	assert.NoError(remote.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 1},
+		Transport: &api.Transport{RemotePort: 10379},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	uptimeBefore := func() int64 {
+		var up int64
+		assert.NoError(s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(p *api.Peer) {
+			if p.Timers != nil && p.Timers.State != nil {
+				up = p.Timers.State.Uptime.GetSeconds()
+			}
+		}))
+		return up
+	}()
+
+	none := uint32(3) // COMMUNITY_TYPE_NONE
+	peerConf.Conf.SendCommunity = &none
+	_, err := s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: peerConf})
+	assert.NoError(err)
+
+	// The session must not have been torn down and rebuilt...
+	var state api.PeerState_SessionState
+	var uptimeAfter int64
+	var confAfter, stateAfter *uint32
+	assert.NoError(s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(p *api.Peer) {
+		state = p.State.GetSessionState()
+		if p.Timers != nil && p.Timers.State != nil {
+			uptimeAfter = p.Timers.State.Uptime.GetSeconds()
+		}
+		confAfter = p.Conf.SendCommunity
+		stateAfter = p.State.SendCommunity
+	}))
+	assert.Equal(api.PeerState_SESSION_STATE_ESTABLISHED, state, "the session was flapped by a send-community change")
+	assert.Equal(uptimeBefore, uptimeAfter, "uptime moved, so the session was rebuilt")
+
+	// ...and the value must actually have been applied. State is what
+	// postFilterpath reads; Conf alone would not gate anything.
+	if assert.NotNil(confAfter) {
+		assert.Equal(none, *confAfter, "Conf.SendCommunity")
+	}
+	if assert.NotNil(stateAfter) {
+		assert.Equal(none, *stateAfter, "State.SendCommunity is what the egress filter reads")
+	}
+}
+
+// D6 was broader than communities: policyEvaluatedAdjRibOutPaths discarded the
+// transformed path entirely, so adj-out with EnableFiltered reported the raw
+// local-RIB path. This asserts on AS_PATH rather than communities precisely
+// because AS_PATH has nothing to do with send-community - it is an
+// UpdatePathAttrs transform that this view has misreported since it was written.
+func TestFilteredAdjOutShowsAdvertisedAttributes(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: 10479},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	// eBGP, so UpdatePathAttrs prepends the local AS.
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65001},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	remote := NewBgpServer()
+	go remote.Serve()
+	assert.NoError(remote.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65001, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer remote.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(s, api.PeerState_SESSION_STATE_ESTABLISHED)
+	assert.NoError(remote.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65000},
+		Transport: &api.Transport{RemotePort: 10479},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	_, err := s.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{
+		mustApi2apiutilPath(&api.Path{
+			Family: &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST},
+			Nlri: &api.NLRI{Nlri: &api.NLRI_Prefix{Prefix: &api.IPAddressPrefix{
+				Prefix: "10.77.0.0", PrefixLen: 24,
+			}}},
+			Pattrs: []*api.Attribute{
+				{Attr: &api.Attribute_Origin{Origin: &api.OriginAttribute{Origin: 0}}},
+				{Attr: &api.Attribute_NextHop{NextHop: &api.NextHopAttribute{NextHop: "0.0.0.0"}}},
+			},
+		}),
+	}})
+	assert.NoError(err)
+
+	readASPath := func(enableFiltered bool) []uint32 {
+		var asPath []uint32
+		var seen bool
+		assert.NoError(s.ListPath(apiutil.ListPathRequest{
+			TableType:      api.TableType_TABLE_TYPE_ADJ_OUT,
+			Family:         bgp.RF_IPv4_UC,
+			Name:           "127.0.0.1",
+			EnableFiltered: enableFiltered,
+		}, func(prefix bgp.NLRI, paths []*apiutil.Path) {
+			if prefix.String() != "10.77.0.0/24" {
+				return
+			}
+			for _, p := range paths {
+				seen = true
+				for _, attr := range p.Attrs {
+					if a, ok := attr.(*bgp.PathAttributeAsPath); ok {
+						for _, param := range a.Value {
+							asPath = append(asPath, param.GetAS()...)
+						}
+					}
+				}
+			}
+		}))
+		assert.True(seen, "the path should appear in adj-out (enableFiltered=%v)", enableFiltered)
+		return asPath
+	}
+
+	// The two views must agree. Before this fix the filtered one reported the
+	// raw local-RIB path, whose AS_PATH is empty for a locally-originated route.
+	assert.Equal([]uint32{65000}, readASPath(false), "unfiltered adj-out")
+	assert.Equal([]uint32{65000}, readASPath(true),
+		"filtered adj-out must show the same advertised attributes, not the raw local-RIB path")
 }

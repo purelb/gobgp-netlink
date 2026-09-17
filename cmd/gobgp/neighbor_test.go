@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	bgp "github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/stretchr/testify/assert"
@@ -64,4 +65,24 @@ func TestBfdIntervalRendersMicrosecondsAsTime(t *testing.T) {
 	assert.Equal(t, "1s", bfdInterval(1000000))
 	assert.Equal(t, "300µs", bfdInterval(300),
 		"the mis-entered value must render visibly wrong, not plausibly right")
+}
+
+// The CLI hard-codes send-community's numeric values, so they can drift from the
+// config model without anything noticing. Assert against oc's own map rather
+// than restating the numbers: a mismatch here means `gobgp neighbor add ...
+// send-community extended` silently configures something else.
+func TestParseSendCommunityMatchesOpenConfig(t *testing.T) {
+	for typ, want := range oc.CommunityTypeToIntMap {
+		got, err := parseSendCommunity(string(typ))
+		assert.NoError(t, err, "%q must parse", typ)
+		assert.Equal(t, uint32(want), got, "%q", typ)
+		assert.Equal(t, string(typ), sendCommunityNames[uint32(want)], "display name for %q", typ)
+	}
+	assert.Len(t, sendCommunityNames, len(oc.CommunityTypeToIntMap),
+		"the CLI knows a different number of values than the config model")
+
+	for _, bad := range []string{"", "all", "large", "Standard", "0", "none "} {
+		_, err := parseSendCommunity(bad)
+		assert.Error(t, err, "%q must be rejected, not silently ignored", bad)
+	}
 }

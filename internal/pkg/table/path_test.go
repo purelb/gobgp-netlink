@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"net"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPathNewIPv4(t *testing.T) {
@@ -671,4 +673,157 @@ func TestPathAttrsHashConsistency(t *testing.T) {
 
 	assert.Equal(t, eager.GetHash(), lazy.GetHash())
 	assert.True(t, eager.Equal(lazy))
+}
+
+func TestFilterCommunities(t *testing.T) {
+	// The large community is in every case to pin the documented decision that
+	// send-community never touches it: the OpenConfig enum cannot express
+	// "send large", so "none" stripping it would make it unsendable.
+	newPath := func() *Path {
+		nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.0.0.0/24"))
+		nexthop, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("10.0.0.1"))
+		rt, _ := bgp.ParseExtendedCommunity(bgp.EC_SUBTYPE_ROUTE_TARGET, "65000:100")
+		ip6rt, _ := bgp.NewIPv6AddressSpecificExtended(
+			bgp.EC_SUBTYPE_ROUTE_TARGET, netip.MustParseAddr("2001:db8::1"), 100, true)
+		attrs := []bgp.PathAttributeInterface{
+			bgp.NewPathAttributeOrigin(0),
+			nexthop,
+			bgp.NewPathAttributeCommunities([]uint32{65000<<16 | 1}),
+			bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{rt}),
+			bgp.NewPathAttributeIP6ExtendedCommunities([]bgp.ExtendedCommunityInterface{ip6rt}),
+			bgp.NewPathAttributeLargeCommunities([]*bgp.LargeCommunity{{ASN: 65000, LocalData1: 1, LocalData2: 2}}),
+		}
+		return NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+	}
+
+	for _, tt := range []struct {
+		name    string
+		typ     oc.CommunityType
+		wantStd bool
+		wantExt bool
+	}{
+		// Unset is the upgrade-safety case: a peer that never configured this
+		// must keep receiving everything, extended communities included.
+		{"unset", "", true, true},
+		{"standard", oc.COMMUNITY_TYPE_STANDARD, true, false},
+		{"extended", oc.COMMUNITY_TYPE_EXTENDED, false, true},
+		{"both", oc.COMMUNITY_TYPE_BOTH, true, true},
+		{"none", oc.COMMUNITY_TYPE_NONE, false, false},
+		// Unrecognised values reach here only from the gRPC path, which maps
+		// them to "" - but assert the no-op rather than trusting that.
+		{"unrecognised", oc.CommunityType("all"), true, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newPath()
+			p.FilterCommunities(tt.typ)
+			assert.Equal(t, tt.wantStd, p.getPathAttr(bgp.BGP_ATTR_TYPE_COMMUNITIES) != nil, "standard")
+			assert.Equal(t, tt.wantExt, p.getPathAttr(bgp.BGP_ATTR_TYPE_EXTENDED_COMMUNITIES) != nil, "extended")
+			// Attr 25 tracks attr 16 in every row. That it tracks rather than
+			// being asserted independently is the point: RFC 5701's IPv6 form is
+			// a wider encoding of the same concept, not a separate one.
+			assert.Equal(t, tt.wantExt, p.getPathAttr(bgp.BGP_ATTR_TYPE_IP6_EXTENDED_COMMUNITIES) != nil, "ipv6 extended")
+			assert.NotNil(t, p.getPathAttr(bgp.BGP_ATTR_TYPE_LARGE_COMMUNITY), "large is never stripped")
+		})
+	}
+}
+
+func TestFilterCommunitiesLeavesHashCleanWhenNothingToStrip(t *testing.T) {
+	// delPathAttr unconditionally invalidates attrsHash and grows path.dels, so
+	// an unguarded delete would cost a rehash on every advertised path.
+	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.0.0.0/24"))
+	nexthop, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr("10.0.0.1"))
+	p := NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false,
+		[]bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0), nexthop}, time.Now(), false)
+
+	p.FilterCommunities(oc.COMMUNITY_TYPE_NONE)
+	assert.Empty(t, p.dels)
+}
+
+// The allowlist is pinned exhaustively rather than by example, and that is
+// deliberate. In most families communities are protocol payload: VPN and EVPN
+// carry the Route Target that CanImportToVrf gates on, and every FlowSpec
+// traffic action is an extended community - strip those and a discard rule
+// arrives as a bare accept, which fails open.
+//
+// This test is EXPECTED TO FAIL on an upstream catch-up that adds an address
+// family. The correct response is to classify the new family and add it to one
+// side of this table with a reason. Loosening the assertion removes the only
+// guard against the fail-open case above.
+func TestFilterCommunitiesOnlyFiltersAllowlistedFamilies(t *testing.T) {
+	filtered := map[bgp.Family]bool{
+		bgp.RF_IPv4_UC:   true,
+		bgp.RF_IPv6_UC:   true,
+		bgp.RF_IPv4_MPLS: true,
+		bgp.RF_IPv6_MPLS: true,
+	}
+
+	for f, name := range bgp.AddressFamilyNameMap {
+		want := filtered[f]
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, want, SendCommunityFilterApplies(f),
+				"family %s: if this is a new family, classify it - do not loosen the assertion", name)
+		})
+	}
+
+	// And prove the predicate is actually load-bearing, not just consulted: a
+	// VPN path carrying a Route Target must come through "none" untouched.
+	rt, err := bgp.ParseExtendedCommunity(bgp.EC_SUBTYPE_ROUTE_TARGET, "65000:100")
+	require.NoError(t, err)
+	rd, err := bgp.ParseRouteDistinguisher("65000:100")
+	require.NoError(t, err)
+	nlri, err := bgp.NewLabeledVPNIPAddrPrefix(
+		netip.MustParsePrefix("10.0.0.0/24"), *bgp.NewMPLSLabelStack(100), rd)
+	require.NoError(t, err)
+	attrs := []bgp.PathAttributeInterface{
+		bgp.NewPathAttributeOrigin(0),
+		bgp.NewPathAttributeCommunities([]uint32{65000<<16 | 1}),
+		bgp.NewPathAttributeExtendedCommunities([]bgp.ExtendedCommunityInterface{rt}),
+	}
+	p := NewPath(bgp.RF_IPv4_VPN, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+	p.FilterCommunities(oc.COMMUNITY_TYPE_NONE)
+	assert.NotEmpty(t, p.GetRouteTargets(), "stripping the RT would make this route unimportable")
+	assert.NotNil(t, p.getPathAttr(bgp.BGP_ATTR_TYPE_COMMUNITIES), "VPN is exempt entirely")
+}
+
+// LLGR_STALE is stamped by AdjRib.MarkLLGRStaleOrDrop and re-advertised onward.
+// Stripping it while still honouring the capability the peer negotiated would
+// leave that peer treating stale routes as fresh.
+func TestFilterCommunitiesPreservesLLGR(t *testing.T) {
+	const ordinary = uint32(65000<<16 | 1)
+	newPath := func(comms ...uint32) *Path {
+		nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.0.0.0/24"))
+		attrs := []bgp.PathAttributeInterface{
+			bgp.NewPathAttributeOrigin(0),
+			bgp.NewPathAttributeCommunities(comms),
+		}
+		return NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false, attrs, time.Now(), false)
+	}
+
+	for _, typ := range []oc.CommunityType{
+		"", oc.COMMUNITY_TYPE_STANDARD, oc.COMMUNITY_TYPE_EXTENDED,
+		oc.COMMUNITY_TYPE_BOTH, oc.COMMUNITY_TYPE_NONE,
+	} {
+		t.Run("survives_"+string(typ), func(t *testing.T) {
+			p := newPath(ordinary, uint32(bgp.COMMUNITY_LLGR_STALE), uint32(bgp.COMMUNITY_NO_LLGR))
+			p.FilterCommunities(typ)
+			assert.Contains(t, p.GetCommunities(), uint32(bgp.COMMUNITY_LLGR_STALE), "llgr-stale")
+			assert.Contains(t, p.GetCommunities(), uint32(bgp.COMMUNITY_NO_LLGR), "no-llgr")
+
+			stripsStandard := typ == oc.COMMUNITY_TYPE_EXTENDED || typ == oc.COMMUNITY_TYPE_NONE
+			assert.Equal(t, !stripsStandard, slices.Contains(p.GetCommunities(), ordinary),
+				"the ordinary community is the one that should go")
+		})
+	}
+
+	// With nothing worth keeping the attribute is removed outright, not left as
+	// an empty list.
+	p := newPath(ordinary)
+	p.FilterCommunities(oc.COMMUNITY_TYPE_NONE)
+	assert.Nil(t, p.getPathAttr(bgp.BGP_ATTR_TYPE_COMMUNITIES))
+
+	// And with only LLGR present there is nothing to strip, so the attribute
+	// must not be rewritten at all - see the hash-churn test below.
+	p = newPath(uint32(bgp.COMMUNITY_LLGR_STALE))
+	p.FilterCommunities(oc.COMMUNITY_TYPE_NONE)
+	assert.Empty(t, p.dels)
 }

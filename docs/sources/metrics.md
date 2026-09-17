@@ -102,7 +102,7 @@ the loop.
 | bgp_peer_out_queue_count           | Length of the outgoing message queue                                         | `peer`                                 |
 | bgp_peer_password_set              | Whether the peer is configured with a TCP-MD5 password (1) or not (0). Reported correctly since v1.3.0; before that it read 0 for every peer including authenticated ones | `peer`                                 |
 | bgp_peer_remove_private_as         | Do we remove private ASNs from the paths sent to the peer                    | `peer`                                 |
-| bgp_peer_send_community            | BGP community with the peer                                                  | `peer`                                 |
+| bgp_peer_send_community            | Configured `send-community`: standard=0, extended=1, both=2, none=3. Absent when not configured, because 0 means *standard*. Reports configuration, not effect - see configuration.md for the families and peer types it is ignored for | `peer`                                 |
 | bgp_peer_type                      | Type of the BGP peer, internal (0) or external (1)                           | `peer`                                 |
 | bgp_peer_established_timestamp_seconds | Unix timestamp at which the session was most recently established. Absent for a peer that has never established. **Not** removed when a session goes down, so gate on `bgp_peer_state` rather than reading it alone. Replaces `bgp_peer_uptime`, which despite its name and help text was always this same absolute timestamp | `peer` |
 | bgp_routes_accepted                | Number of routes accepted from peer                                          | `peer`, `route_family`                 |
