@@ -45,6 +45,19 @@ service GoBgpService {
   // the process. Construct a new BgpServer to start BGP again.
   rpc StopBgp(StopBgpRequest) returns (StopBgpResponse);
   rpc GetBgp(GetBgpRequest) returns (GetBgpResponse);
+  // GetRunningConfig returns the daemon's complete running configuration as
+  // text, composed from the global config plus every live peer and peer group.
+  //
+  // This is a debugging and verification surface, not a control API: the shape
+  // is gobgpd's internal configuration model, which is generated from YANG and
+  // can change without a proto version bump. Read it, diff it, attach it to a
+  // bug report - do not build control logic against its field layout.
+  //
+  // Secrets are redacted. An auth-password is reported as "<redacted>" when one
+  // is set and empty when none is, so the dump shows whether MD5 is configured
+  // without disclosing the key. That also means the output is not directly
+  // loadable as a config file when authentication is in use.
+  rpc GetRunningConfig(GetRunningConfigRequest) returns (GetRunningConfigResponse);
   rpc GetBfdServerState(GetBfdServerStateRequest) returns (GetBfdServerStateResponse);
 
   rpc WatchEvent(WatchEventRequest) returns (stream WatchEventResponse);
@@ -154,6 +167,20 @@ message GetNetlinkResponse {
   // anything, so a caller could set them and never confirm them.
   uint32 dampening_interval = 6; // Update dampening interval in milliseconds
   int32 route_protocol = 7; // RTPROT_* value (default: 186 for BGP)
+}
+
+enum ConfigFormat {
+  CONFIG_FORMAT_UNSPECIFIED = 0; // defaults to JSON
+  CONFIG_FORMAT_JSON = 1;
+  CONFIG_FORMAT_TOML = 2;
+}
+
+message GetRunningConfigRequest {
+  ConfigFormat format = 1;
+}
+
+message GetRunningConfigResponse {
+  string config = 1;
 }
 
 message StartBgpRequest {

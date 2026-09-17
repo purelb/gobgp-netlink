@@ -44,6 +44,7 @@ const (
 	GoBgpService_StartBgp_FullMethodName                = "/api.GoBgpService/StartBgp"
 	GoBgpService_StopBgp_FullMethodName                 = "/api.GoBgpService/StopBgp"
 	GoBgpService_GetBgp_FullMethodName                  = "/api.GoBgpService/GetBgp"
+	GoBgpService_GetRunningConfig_FullMethodName        = "/api.GoBgpService/GetRunningConfig"
 	GoBgpService_GetBfdServerState_FullMethodName       = "/api.GoBgpService/GetBfdServerState"
 	GoBgpService_WatchEvent_FullMethodName              = "/api.GoBgpService/WatchEvent"
 	GoBgpService_AddPeer_FullMethodName                 = "/api.GoBgpService/AddPeer"
@@ -133,6 +134,19 @@ type GoBgpServiceClient interface {
 	// the process. Construct a new BgpServer to start BGP again.
 	StopBgp(ctx context.Context, in *StopBgpRequest, opts ...grpc.CallOption) (*StopBgpResponse, error)
 	GetBgp(ctx context.Context, in *GetBgpRequest, opts ...grpc.CallOption) (*GetBgpResponse, error)
+	// GetRunningConfig returns the daemon's complete running configuration as
+	// text, composed from the global config plus every live peer and peer group.
+	//
+	// This is a debugging and verification surface, not a control API: the shape
+	// is gobgpd's internal configuration model, which is generated from YANG and
+	// can change without a proto version bump. Read it, diff it, attach it to a
+	// bug report - do not build control logic against its field layout.
+	//
+	// Secrets are redacted. An auth-password is reported as "<redacted>" when one
+	// is set and empty when none is, so the dump shows whether MD5 is configured
+	// without disclosing the key. That also means the output is not directly
+	// loadable as a config file when authentication is in use.
+	GetRunningConfig(ctx context.Context, in *GetRunningConfigRequest, opts ...grpc.CallOption) (*GetRunningConfigResponse, error)
 	GetBfdServerState(ctx context.Context, in *GetBfdServerStateRequest, opts ...grpc.CallOption) (*GetBfdServerStateResponse, error)
 	WatchEvent(ctx context.Context, in *WatchEventRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WatchEventResponse], error)
 	AddPeer(ctx context.Context, in *AddPeerRequest, opts ...grpc.CallOption) (*AddPeerResponse, error)
@@ -238,6 +252,16 @@ func (c *goBgpServiceClient) GetBgp(ctx context.Context, in *GetBgpRequest, opts
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetBgpResponse)
 	err := c.cc.Invoke(ctx, GoBgpService_GetBgp_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *goBgpServiceClient) GetRunningConfig(ctx context.Context, in *GetRunningConfigRequest, opts ...grpc.CallOption) (*GetRunningConfigResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRunningConfigResponse)
+	err := c.cc.Invoke(ctx, GoBgpService_GetRunningConfig_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1108,6 +1132,19 @@ type GoBgpServiceServer interface {
 	// the process. Construct a new BgpServer to start BGP again.
 	StopBgp(context.Context, *StopBgpRequest) (*StopBgpResponse, error)
 	GetBgp(context.Context, *GetBgpRequest) (*GetBgpResponse, error)
+	// GetRunningConfig returns the daemon's complete running configuration as
+	// text, composed from the global config plus every live peer and peer group.
+	//
+	// This is a debugging and verification surface, not a control API: the shape
+	// is gobgpd's internal configuration model, which is generated from YANG and
+	// can change without a proto version bump. Read it, diff it, attach it to a
+	// bug report - do not build control logic against its field layout.
+	//
+	// Secrets are redacted. An auth-password is reported as "<redacted>" when one
+	// is set and empty when none is, so the dump shows whether MD5 is configured
+	// without disclosing the key. That also means the output is not directly
+	// loadable as a config file when authentication is in use.
+	GetRunningConfig(context.Context, *GetRunningConfigRequest) (*GetRunningConfigResponse, error)
 	GetBfdServerState(context.Context, *GetBfdServerStateRequest) (*GetBfdServerStateResponse, error)
 	WatchEvent(*WatchEventRequest, grpc.ServerStreamingServer[WatchEventResponse]) error
 	AddPeer(context.Context, *AddPeerRequest) (*AddPeerResponse, error)
@@ -1197,6 +1234,9 @@ func (UnimplementedGoBgpServiceServer) StopBgp(context.Context, *StopBgpRequest)
 }
 func (UnimplementedGoBgpServiceServer) GetBgp(context.Context, *GetBgpRequest) (*GetBgpResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBgp not implemented")
+}
+func (UnimplementedGoBgpServiceServer) GetRunningConfig(context.Context, *GetRunningConfigRequest) (*GetRunningConfigResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetRunningConfig not implemented")
 }
 func (UnimplementedGoBgpServiceServer) GetBfdServerState(context.Context, *GetBfdServerStateRequest) (*GetBfdServerStateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetBfdServerState not implemented")
@@ -1482,6 +1522,24 @@ func _GoBgpService_GetBgp_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(GoBgpServiceServer).GetBgp(ctx, req.(*GetBgpRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _GoBgpService_GetRunningConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRunningConfigRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GoBgpServiceServer).GetRunningConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: GoBgpService_GetRunningConfig_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GoBgpServiceServer).GetRunningConfig(ctx, req.(*GetRunningConfigRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2666,6 +2724,10 @@ var GoBgpService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetBgp",
 			Handler:    _GoBgpService_GetBgp_Handler,
+		},
+		{
+			MethodName: "GetRunningConfig",
+			Handler:    _GoBgpService_GetRunningConfig_Handler,
 		},
 		{
 			MethodName: "GetBfdServerState",

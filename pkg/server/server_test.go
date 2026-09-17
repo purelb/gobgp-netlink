@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -5496,4 +5497,76 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 		assert.True(got.GracefulRestart.NotificationEnabled)
 		assert.True(got.GracefulRestart.LonglivedEnabled)
 	}
+}
+
+// GetRunningConfig composes the running configuration. The trap it exists to
+// avoid: s.bgpConfig alone is NOT the running config - nothing appends
+// API-added peers or peer groups to it, so dumping it directly silently omits
+// every peer configured over gRPC, which is worse than no dump because it looks
+// complete.
+func TestGetRunningConfigComposesLivePeersAndGroups(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	both := uint32(2)
+	assert.NoError(s.AddPeerGroup(context.Background(), &api.AddPeerGroupRequest{
+		PeerGroup: &api.PeerGroup{Conf: &api.PeerGroupConf{
+			PeerGroupName: "upstreams", PeerAsn: 65100, SendCommunity: &both,
+			AuthPassword: "GROUPSECRET",
+		}},
+	}))
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "10.9.0.1", PeerAsn: 65001, AuthPassword: "PEERSECRET"},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	rsp, err := s.GetRunningConfig(context.Background(), &api.GetRunningConfigRequest{})
+	require.NoError(t, err)
+
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal([]byte(rsp.Config), &cfg), "output must be valid JSON")
+
+	neighbors, _ := cfg["neighbors"].([]any)
+	require.Len(t, neighbors, 1, "the API-added peer must be in the dump")
+	groups, _ := cfg["peer-groups"].([]any)
+	require.Len(t, groups, 1, "the API-added peer group must be in the dump")
+
+	// Secrets must not appear, and a set password must still be visible as set -
+	// reporting "" would make an authenticated session look unauthenticated,
+	// which is the more dangerous way to be wrong.
+	assert.NotContains(rsp.Config, "PEERSECRET")
+	assert.NotContains(rsp.Config, "GROUPSECRET")
+	assert.Contains(rsp.Config, redactedMarker)
+	// And not HTML-escaped: encoding/json escapes "<" by default, which would
+	// render the marker as a \u003c... sequence. People read this output.
+	assert.NotContains(rsp.Config, "u003c", "redaction marker must not be HTML-escaped")
+}
+
+// TOML has to come out with the config-file key names. The oc types carry
+// mapstructure and json tags but no toml tags, so encoding the struct directly
+// emits Go field names ("RouterId", "PeerGroups") and the result is not
+// loadable - which is the only reason to offer TOML.
+func TestGetRunningConfigTOMLUsesConfigFileKeys(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	rsp, err := s.GetRunningConfig(context.Background(), &api.GetRunningConfigRequest{
+		Format: api.ConfigFormat_CONFIG_FORMAT_TOML,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, rsp.Config, "[global]", "kebab-case config-file keys")
+	assert.Contains(t, rsp.Config, "router-id", "kebab-case config-file keys")
+	assert.NotContains(t, rsp.Config, "RouterId", "Go field names mean the TOML is not loadable")
+	assert.NotContains(t, rsp.Config, "[Global]", "Go field names mean the TOML is not loadable")
 }

@@ -18,6 +18,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,10 +27,12 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/dgryski/go-farm"
 	"github.com/eapache/channels"
 	"github.com/google/uuid"
@@ -3674,6 +3677,114 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 		return nil
 	}, false)
 	return rsp, err
+}
+
+// GetRunningConfig returns the daemon's complete running configuration as text.
+//
+// s.bgpConfig on its own is NOT the running configuration: nothing appends
+// API-added peers or peer groups to it, so a dump of it alone silently omits
+// every peer configured over gRPC - which is worse than no dump, because it
+// looks complete. The live peers are in neighborMap and the groups in
+// peerGroupMap, and they are composed back in here.
+//
+// The peer config taken is pConf, which is what the FSM actually applies, so
+// this reflects defaults and peer-group inheritance as resolved rather than as
+// submitted.
+func (s *BgpServer) GetRunningConfig(ctx context.Context, r *api.GetRunningConfigRequest) (*api.GetRunningConfigResponse, error) {
+	if r == nil {
+		return nil, fmt.Errorf("nil request")
+	}
+
+	var out string
+	err := s.mgmtOperation(func() error {
+		cfg := s.bgpConfig
+
+		cfg.Neighbors = make([]oc.Neighbor, 0, len(s.neighborMap))
+		for _, peer := range s.neighborMap {
+			cfg.Neighbors = append(cfg.Neighbors, peer.fsm.pConf.ReadCopy())
+		}
+		slices.SortFunc(cfg.Neighbors, func(a, b oc.Neighbor) int {
+			return strings.Compare(a.State.NeighborAddress.String(), b.State.NeighborAddress.String())
+		})
+
+		cfg.PeerGroups = make([]oc.PeerGroup, 0, len(s.peerGroupMap))
+		for _, pg := range s.peerGroupMap {
+			if pg.Conf != nil {
+				cfg.PeerGroups = append(cfg.PeerGroups, *pg.Conf)
+			}
+		}
+		slices.SortFunc(cfg.PeerGroups, func(a, b oc.PeerGroup) int {
+			return strings.Compare(a.Config.PeerGroupName, b.Config.PeerGroupName)
+		})
+
+		redactRunningConfig(&cfg)
+
+		var err error
+		out, err = marshalRunningConfig(&cfg, r.Format)
+		return err
+	}, false)
+	if err != nil {
+		return nil, err
+	}
+	return &api.GetRunningConfigResponse{Config: out}, nil
+}
+
+// redactRunningConfig replaces secrets with a marker that still says whether one
+// is configured. Reporting "" for a set password would make an authenticated
+// session look unauthenticated, which is the more dangerous way to be wrong.
+const redactedMarker = "<redacted>"
+
+func redactRunningConfig(cfg *oc.Bgp) {
+	redact := func(p *string) {
+		if *p != "" {
+			*p = redactedMarker
+		}
+	}
+	for i := range cfg.Neighbors {
+		redact(&cfg.Neighbors[i].Config.AuthPassword)
+		redact(&cfg.Neighbors[i].State.AuthPassword)
+	}
+	for i := range cfg.PeerGroups {
+		redact(&cfg.PeerGroups[i].Config.AuthPassword)
+		redact(&cfg.PeerGroups[i].State.AuthPassword)
+	}
+}
+
+func marshalRunningConfig(cfg *oc.Bgp, format api.ConfigFormat) (string, error) {
+	switch format {
+	case api.ConfigFormat_CONFIG_FORMAT_TOML:
+		// Route through JSON rather than encoding the struct directly. The oc
+		// types are generated with mapstructure and json tags but no toml tags,
+		// so a direct encode emits Go field names - "RouterId", "PeerGroups" -
+		// and the result is not loadable as a gobgpd config file, which is the
+		// only reason to offer TOML at all. The json names match the
+		// mapstructure names the config loader reads, so this produces the real
+		// key names.
+		b, err := json.Marshal(cfg)
+		if err != nil {
+			return "", fmt.Errorf("failed to encode running config: %w", err)
+		}
+		var generic map[string]any
+		if err := json.Unmarshal(b, &generic); err != nil {
+			return "", fmt.Errorf("failed to re-read running config: %w", err)
+		}
+		var buf bytes.Buffer
+		if err := toml.NewEncoder(&buf).Encode(generic); err != nil {
+			return "", fmt.Errorf("failed to encode running config as TOML: %w", err)
+		}
+		return buf.String(), nil
+	default:
+		// Not MarshalIndent: it HTML-escapes, which renders the redaction marker
+		// as "\u003credacted\u003e". This output is read by people.
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(cfg); err != nil {
+			return "", fmt.Errorf("failed to encode running config as JSON: %w", err)
+		}
+		return strings.TrimRight(buf.String(), "\n"), nil
+	}
 }
 
 func (s *BgpServer) ListDynamicNeighbor(ctx context.Context, r *api.ListDynamicNeighborRequest, fn func(neighbor *api.DynamicNeighbor)) error {

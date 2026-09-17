@@ -2526,6 +2526,10 @@ func (s *server) GetBgp(ctx context.Context, r *api.GetBgpRequest) (*api.GetBgpR
 	return s.bgpServer.GetBgp(ctx, r)
 }
 
+func (s *server) GetRunningConfig(ctx context.Context, r *api.GetRunningConfigRequest) (*api.GetRunningConfigResponse, error) {
+	return s.bgpServer.GetRunningConfig(ctx, r)
+}
+
 // GetBfdServerState exposes the BFD server's receive-path counters.
 //
 // These were previously computed and discarded: GetBfdServerStats had no caller
