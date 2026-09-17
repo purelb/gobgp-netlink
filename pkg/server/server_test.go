@@ -937,7 +937,6 @@ func TestListPathEnableFiltered(test *testing.T) {
 
 	assert.NoError(err)
 
-	var wantEmptyCommunities []uint32
 	wantCommunitiesAfterExportPolicies := []uint32{100<<16 | 100}
 	wantCommunitiesAfterImportPolicies := []uint32{200<<16 | 200}
 
@@ -952,20 +951,27 @@ func TestListPathEnableFiltered(test *testing.T) {
 		return nil
 	}
 
-	// Check ADJ_OUT routes before applying export policies.
+	// ADJ_OUT with EnableFiltered reports what was advertised, the same as
+	// without it - the flag controls whether policy-rejected candidates are
+	// *included and annotated*, not which version of the attributes is shown.
+	//
+	// This used to assert empty communities here, labelled "AdjRibOutPre":
+	// policyEvaluatedAdjRibOutPaths computed the transformed path and threw it
+	// away, so this view reported the raw local-RIB path. That hid every
+	// per-peer egress transform, not just the export policy below - AS_PATH
+	// prepending, next-hop rewriting, LOCAL_PREF and MED as well.
 	for count := 0; count < 2; {
 		count = 0
 		err = server2.ListPath(apiutil.ListPathRequest{
 			TableType: api.TableType_TABLE_TYPE_ADJ_OUT,
 			Family:    bgpFamily, Name: "127.0.0.1",
-			// TODO(wenovus): This is confusing and we may want to change this.
 			EnableFiltered: true,
 		}, func(prefix bgp.NLRI, paths []*apiutil.Path) {
 			count++
 			for _, path := range paths {
 				comms := getCommunities(path)
-				if diff := cmp.Diff(wantEmptyCommunities, comms); diff != "" {
-					test.Errorf("AdjRibOutPre communities for %v (-want, +got):\n%s", prefix, diff)
+				if diff := cmp.Diff(wantCommunitiesAfterExportPolicies, comms); diff != "" {
+					test.Errorf("AdjRibOut(filtered) communities for %v (-want, +got):\n%s", prefix, diff)
 				} else {
 					test.Logf("Got expected communities for %v: %v", prefix, comms)
 				}
@@ -5261,4 +5267,88 @@ func TestUpdatePeerSendCommunityAppliesWithoutFlappingSession(t *testing.T) {
 	if assert.NotNil(stateAfter) {
 		assert.Equal(none, *stateAfter, "State.SendCommunity is what the egress filter reads")
 	}
+}
+
+// D6 was broader than communities: policyEvaluatedAdjRibOutPaths discarded the
+// transformed path entirely, so adj-out with EnableFiltered reported the raw
+// local-RIB path. This asserts on AS_PATH rather than communities precisely
+// because AS_PATH has nothing to do with send-community - it is an
+// UpdatePathAttrs transform that this view has misreported since it was written.
+func TestFilteredAdjOutShowsAdvertisedAttributes(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: 10479},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	// eBGP, so UpdatePathAttrs prepends the local AS.
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65001},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	remote := NewBgpServer()
+	go remote.Serve()
+	assert.NoError(remote.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65001, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer remote.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(s, api.PeerState_SESSION_STATE_ESTABLISHED)
+	assert.NoError(remote.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65000},
+		Transport: &api.Transport{RemotePort: 10479},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	_, err := s.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{
+		mustApi2apiutilPath(&api.Path{
+			Family: &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST},
+			Nlri: &api.NLRI{Nlri: &api.NLRI_Prefix{Prefix: &api.IPAddressPrefix{
+				Prefix: "10.77.0.0", PrefixLen: 24,
+			}}},
+			Pattrs: []*api.Attribute{
+				{Attr: &api.Attribute_Origin{Origin: &api.OriginAttribute{Origin: 0}}},
+				{Attr: &api.Attribute_NextHop{NextHop: &api.NextHopAttribute{NextHop: "0.0.0.0"}}},
+			},
+		}),
+	}})
+	assert.NoError(err)
+
+	readASPath := func(enableFiltered bool) []uint32 {
+		var asPath []uint32
+		var seen bool
+		assert.NoError(s.ListPath(apiutil.ListPathRequest{
+			TableType:      api.TableType_TABLE_TYPE_ADJ_OUT,
+			Family:         bgp.RF_IPv4_UC,
+			Name:           "127.0.0.1",
+			EnableFiltered: enableFiltered,
+		}, func(prefix bgp.NLRI, paths []*apiutil.Path) {
+			if prefix.String() != "10.77.0.0/24" {
+				return
+			}
+			for _, p := range paths {
+				seen = true
+				for _, attr := range p.Attrs {
+					if a, ok := attr.(*bgp.PathAttributeAsPath); ok {
+						for _, param := range a.Value {
+							asPath = append(asPath, param.GetAS()...)
+						}
+					}
+				}
+			}
+		}))
+		assert.True(seen, "the path should appear in adj-out (enableFiltered=%v)", enableFiltered)
+		return asPath
+	}
+
+	// The two views must agree. Before this fix the filtered one reported the
+	// raw local-RIB path, whose AS_PATH is empty for a locally-originated route.
+	assert.Equal([]uint32{65000}, readASPath(false), "unfiltered adj-out")
+	assert.Equal([]uint32{65000}, readASPath(true),
+		"filtered adj-out must show the same advertised attributes, not the raw local-RIB path")
 }

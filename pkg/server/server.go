@@ -3342,10 +3342,29 @@ func (s *BgpServer) policyEvaluatedAdjRibOutPaths(peer *peer, family bgp.Family,
 			continue
 		}
 		options.Validate = s.roaTable.Validate
-		if p = peer.policy.ApplyPolicy(peer.TableID(), table.POLICY_DIRECTION_EXPORT, p, options); p == nil {
+		p = peer.policy.ApplyPolicy(peer.TableID(), table.POLICY_DIRECTION_EXPORT, p, options)
+		if p == nil {
 			filtered[pathLocalKey] = table.PolicyFiltered
+			// Policy rejected it, so nothing was advertised and there is no
+			// transformed path to show. Display the candidate as it was
+			// considered - this branch keeps the pre-transform path, and keys
+			// `filtered` off the pre-transform local key to match.
+			pathList = append(pathList, path)
+			continue
 		}
-		pathList = append(pathList, path)
+		// Accepted, so show what was actually advertised.
+		//
+		// This used to append the raw local-RIB `path` and throw `p` away, which
+		// meant adj-out with enable_filtered reported un-prepended AS_PATH,
+		// un-rewritten next-hop, and retained LOCAL_PREF and MED - every per-peer
+		// egress transform, not just communities.
+		//
+		// For VRF-attached peers prePolicyFilterpath ran ToLocal(), which rewrites
+		// the NLRI from RD:prefix to prefix, so the prefix reported here is now
+		// the unicast one actually sent to the CE rather than the VPN form.
+		if p = s.postFilterpath(peer, p); p != nil {
+			pathList = append(pathList, p)
+		}
 	}
 	return adjRibOutPathsToUpdate(peer, pathList, filtered)
 }
