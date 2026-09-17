@@ -1575,6 +1575,17 @@ message Global {
   string router_id = 2;
   int32 listen_port = 3;
   repeated string listen_addresses = 4;
+  // Address families to enable, as *indexes* into gobgpd's AfiSafiType list
+  // (oc.IntToAfiSafiTypeMap): 0=ipv4-unicast, 1=ipv6-unicast,
+  // 2=ipv4-labelled-unicast, 3=ipv6-labelled-unicast, 4=l3vpn-ipv4-unicast,
+  // 5=l3vpn-ipv6-unicast, 8=l2vpn-vpls, 9=l2vpn-evpn, 10=ipv4-multicast,
+  // 11=ipv6-multicast, 12=rtc, 15=ipv4-flowspec, and so on.
+  //
+  // These are NOT afi<<16|safi, and they are not the RouteFamily constants the
+  // Go packet library exports. Passing 65537 - the RouteFamily value for
+  // ipv4-unicast, and the obvious thing to reach for - is not ipv4-unicast
+  // here. Unknown indexes are rejected rather than silently enabling nothing,
+  // which is what happened before.
   repeated uint32 families = 5;
   bool use_multiple_paths = 6;
   RouteSelectionOptionsConfig route_selection_options = 7;

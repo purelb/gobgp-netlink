@@ -13735,11 +13735,22 @@ func (x *DefaultRouteDistance) GetInternalRouteDistance() uint32 {
 }
 
 type Global struct {
-	state                 protoimpl.MessageState       `protogen:"open.v1"`
-	Asn                   uint32                       `protobuf:"varint,1,opt,name=asn,proto3" json:"asn,omitempty"`
-	RouterId              string                       `protobuf:"bytes,2,opt,name=router_id,json=routerId,proto3" json:"router_id,omitempty"`
-	ListenPort            int32                        `protobuf:"varint,3,opt,name=listen_port,json=listenPort,proto3" json:"listen_port,omitempty"`
-	ListenAddresses       []string                     `protobuf:"bytes,4,rep,name=listen_addresses,json=listenAddresses,proto3" json:"listen_addresses,omitempty"`
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Asn             uint32                 `protobuf:"varint,1,opt,name=asn,proto3" json:"asn,omitempty"`
+	RouterId        string                 `protobuf:"bytes,2,opt,name=router_id,json=routerId,proto3" json:"router_id,omitempty"`
+	ListenPort      int32                  `protobuf:"varint,3,opt,name=listen_port,json=listenPort,proto3" json:"listen_port,omitempty"`
+	ListenAddresses []string               `protobuf:"bytes,4,rep,name=listen_addresses,json=listenAddresses,proto3" json:"listen_addresses,omitempty"`
+	// Address families to enable, as *indexes* into gobgpd's AfiSafiType list
+	// (oc.IntToAfiSafiTypeMap): 0=ipv4-unicast, 1=ipv6-unicast,
+	// 2=ipv4-labelled-unicast, 3=ipv6-labelled-unicast, 4=l3vpn-ipv4-unicast,
+	// 5=l3vpn-ipv6-unicast, 8=l2vpn-vpls, 9=l2vpn-evpn, 10=ipv4-multicast,
+	// 11=ipv6-multicast, 12=rtc, 15=ipv4-flowspec, and so on.
+	//
+	// These are NOT afi<<16|safi, and they are not the RouteFamily constants the
+	// Go packet library exports. Passing 65537 - the RouteFamily value for
+	// ipv4-unicast, and the obvious thing to reach for - is not ipv4-unicast
+	// here. Unknown indexes are rejected rather than silently enabling nothing,
+	// which is what happened before.
 	Families              []uint32                     `protobuf:"varint,5,rep,packed,name=families,proto3" json:"families,omitempty"`
 	UseMultiplePaths      bool                         `protobuf:"varint,6,opt,name=use_multiple_paths,json=useMultiplePaths,proto3" json:"use_multiple_paths,omitempty"`
 	RouteSelectionOptions *RouteSelectionOptionsConfig `protobuf:"bytes,7,opt,name=route_selection_options,json=routeSelectionOptions,proto3" json:"route_selection_options,omitempty"`

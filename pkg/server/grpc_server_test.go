@@ -721,3 +721,40 @@ func TestToPathAPINetlinkPresenceIsMeaningful(t *testing.T) {
 		assert.Empty(t, p.GetNetlink().GetIfName())
 	})
 }
+
+// Global.families are indexes into the AfiSafiType list, not afi<<16|safi and
+// not the RouteFamily constants the packet library exports. An unknown index
+// used to yield the empty AfiSafiType, whose GetFamily error was discarded, so
+// the daemon started having enabled nothing and said nothing about it.
+func TestNewGlobalFromAPIStructRejectsUnknownFamilies(t *testing.T) {
+	// 65537 is bgp.RF_IPv4_UC - the obvious value to reach for, and wrong here.
+	for _, f := range []uint32{65537, 1 << 20, 999} {
+		_, err := newGlobalFromAPIStruct(&api.Global{
+			Asn: 65000, RouterId: "1.1.1.1", Families: []uint32{f},
+		})
+		assert.ErrorContains(t, err, "unknown address family", "value %d", f)
+	}
+
+	// Valid indexes still work and resolve to the right family.
+	g, err := newGlobalFromAPIStruct(&api.Global{
+		Asn: 65000, RouterId: "1.1.1.1", Families: []uint32{0, 1},
+	})
+	assert.NoError(t, err)
+	if assert.Len(t, g.AfiSafis, 2) {
+		assert.Equal(t, oc.AFI_SAFI_TYPE_IPV4_UNICAST, g.AfiSafis[0].Config.AfiSafiName)
+		assert.Equal(t, bgp.RF_IPv4_UC, g.AfiSafis[0].State.Family)
+		assert.Equal(t, oc.AFI_SAFI_TYPE_IPV6_UNICAST, g.AfiSafis[1].Config.AfiSafiName)
+		assert.Equal(t, bgp.RF_IPv6_UC, g.AfiSafis[1].State.Family)
+	}
+
+	// Every index the map defines resolves at this layer, so the rejection above
+	// is specifically for indexes outside it. Anything the map does define must
+	// keep working - this is what stops the validation being over-tightened into
+	// a regression.
+	for i := range oc.IntToAfiSafiTypeMap {
+		_, err := newGlobalFromAPIStruct(&api.Global{
+			Asn: 65000, RouterId: "1.1.1.1", Families: []uint32{uint32(i)},
+		})
+		assert.NoError(t, err, "index %d is in IntToAfiSafiTypeMap and must be accepted", i)
+	}
+}

@@ -2870,7 +2870,10 @@ func (s *BgpServer) StartBgp(ctx context.Context, r *api.StartBgpRequest) error 
 			return fmt.Errorf("router-id must be an IPv4 address: %s", g.RouterId)
 		}
 
-		c := newGlobalFromAPIStruct(g)
+		c, err := newGlobalFromAPIStruct(g)
+		if err != nil {
+			return err
+		}
 		if err := oc.SetDefaultGlobalConfigValues(c); err != nil {
 			return err
 		}

@@ -2538,11 +2538,23 @@ func (s *server) GetBfdServerState(ctx context.Context, r *api.GetBfdServerState
 	return &api.GetBfdServerStateResponse{State: s.bgpServer.GetBfdServerStats()}, nil
 }
 
-func newGlobalFromAPIStruct(a *api.Global) *oc.Global {
+func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 	families := make([]oc.AfiSafi, 0, len(a.Families))
 	for _, f := range a.Families {
-		name := oc.IntToAfiSafiTypeMap[int(f)]
-		rf, _ := bgp.GetFamily(string(name))
+		// These are indexes into oc.IntToAfiSafiTypeMap, not afi<<16|safi. An
+		// unknown ordinal used to yield the empty AfiSafiType, whose GetFamily
+		// error was discarded, so the entry was appended with no name and no
+		// family: the daemon started, enabled nothing, and said nothing. Sending
+		// gobgp's own RouteFamily constant for ipv4-unicast (65537) - the obvious
+		// value to reach for - lands exactly there.
+		name, ok := oc.IntToAfiSafiTypeMap[int(f)]
+		if !ok {
+			return nil, fmt.Errorf("unknown address family %d: Global.families are indexes into the AfiSafiType list, not afi<<16|safi values", f)
+		}
+		rf, err := bgp.GetFamily(string(name))
+		if err != nil {
+			return nil, fmt.Errorf("address family %q (index %d) is not supported: %w", name, f, err)
+		}
 		families = append(families, oc.AfiSafi{
 			Config: oc.AfiSafiConfig{
 				AfiSafiName: name,
@@ -2619,7 +2631,7 @@ func newGlobalFromAPIStruct(a *api.Global) *oc.Global {
 			},
 		}
 	}
-	return global
+	return global, nil
 }
 
 func (s *server) StartBgp(ctx context.Context, r *api.StartBgpRequest) (*api.StartBgpResponse, error) {
