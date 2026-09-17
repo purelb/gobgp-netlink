@@ -5352,3 +5352,47 @@ func TestFilteredAdjOutShowsAdvertisedAttributes(t *testing.T) {
 	assert.Equal([]uint32{65000}, readASPath(true),
 		"filtered adj-out must show the same advertised attributes, not the raw local-RIB path")
 }
+
+// ListPeerGroup's Info block reported zeros for every field: peer_asn 0, and
+// PEER_TYPE_INTERNAL for an eBGP group, which is worse than absent because it
+// reads as a real answer. PeerGroup.State was never populated by anything -
+// SetPeerGroupStateValues existed, with a comment saying what it was for, and
+// had no callers anywhere in the tree.
+func TestListPeerGroupReportsState(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	both := uint32(2)
+	assert.NoError(s.AddPeerGroup(context.Background(), &api.AddPeerGroupRequest{
+		PeerGroup: &api.PeerGroup{Conf: &api.PeerGroupConf{
+			PeerGroupName: "ebgp-group",
+			PeerAsn:       65001, // differs from the local AS, so eBGP
+			SendCommunity: &both,
+			RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL,
+		}},
+	}))
+
+	var seen int
+	assert.NoError(s.ListPeerGroup(context.Background(), &api.ListPeerGroupRequest{}, func(g *api.PeerGroup) {
+		seen++
+		if assert.NotNil(g.Info) {
+			assert.Equal(uint32(65001), g.Info.PeerAsn, "Info.peer_asn")
+			assert.Equal(api.PeerType_PEER_TYPE_EXTERNAL, g.Info.Type,
+				"Info.type - it reported INTERNAL for an eBGP group")
+			if assert.NotNil(g.Info.SendCommunity, "Info.send_community") {
+				assert.Equal(both, *g.Info.SendCommunity)
+			}
+		}
+		// And the Conf side, including the field that was write-only.
+		if assert.NotNil(g.Conf) {
+			assert.Equal(api.RemovePrivate_REMOVE_PRIVATE_ALL, g.Conf.RemovePrivate, "Conf.remove_private")
+		}
+	}))
+	assert.Equal(1, seen)
+}

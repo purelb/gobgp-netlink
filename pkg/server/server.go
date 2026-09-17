@@ -3791,6 +3791,13 @@ func (s *BgpServer) addPeerGroup(c *oc.PeerGroup) error {
 		slog.String("Topic", "Peer"),
 		slog.String("Name", name))
 
+	// Fill State. Nothing did, so ListPeerGroup's Info block reported zeros for
+	// every field it carries - peer_asn 0, and type INTERNAL for an eBGP group,
+	// which is worse than absent because it reads as a real answer.
+	if err := oc.SetPeerGroupStateValues(c, &s.bgpConfig.Global); err != nil {
+		return err
+	}
+
 	s.peerGroupMap[c.Config.PeerGroupName] = newPeerGroup(c)
 
 	return nil
@@ -4208,6 +4215,9 @@ func (s *BgpServer) updatePeerGroup(pg *oc.PeerGroup) (needsSoftResetIn bool, er
 	_, ok := s.peerGroupMap[name]
 	if !ok {
 		return false, fmt.Errorf("peer-group %s doesn't exist", name)
+	}
+	if err := oc.SetPeerGroupStateValues(pg, &s.bgpConfig.Global); err != nil {
+		return false, err
 	}
 	s.peerGroupMap[name].Conf = pg
 
