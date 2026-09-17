@@ -5396,3 +5396,25 @@ func TestListPeerGroupReportsState(t *testing.T) {
 	}))
 	assert.Equal(1, seen)
 }
+
+// StopBgp reads as the counterpart to StartBgp, but it is terminal for the
+// BgpServer: it cancels the running context, Serve() returns and closes the
+// channel every management operation selects on, so StartBgp afterwards fails
+// with "server stopped" for the life of the process.
+//
+// That is the documented contract as of the proto comment on StopBgp. Pinned
+// here so it stays deliberate - it has already cost one test rewrite.
+func TestStopBgpIsTerminalForTheServer(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	require.NoError(t, s.StopBgp(context.Background(), &api.StopBgpRequest{}))
+
+	err := s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	})
+	require.Error(t, err, "StartBgp after StopBgp must fail rather than silently doing nothing")
+	assert.Contains(t, err.Error(), "server stopped")
+}

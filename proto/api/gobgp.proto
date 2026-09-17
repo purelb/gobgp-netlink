@@ -36,6 +36,13 @@ option go_package = "github.com/osrg/gobgp/v4/api;api";
 // Interface exported by the server.
 service GoBgpService {
   rpc StartBgp(StartBgpRequest) returns (StartBgpResponse);
+  // StopBgp is terminal for the BgpServer, not a counterpart to StartBgp that
+  // can be paired with it repeatedly.
+  //
+  // It cancels the server's running context, so Serve() returns and closes the
+  // channel every management operation selects on. From then on StartBgp - and
+  // every other management call - fails with "server stopped" for the life of
+  // the process. Construct a new BgpServer to start BGP again.
   rpc StopBgp(StopBgpRequest) returns (StopBgpResponse);
   rpc GetBgp(GetBgpRequest) returns (GetBgpResponse);
   rpc GetBfdServerState(GetBfdServerStateRequest) returns (GetBfdServerStateResponse);

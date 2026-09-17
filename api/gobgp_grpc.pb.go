@@ -124,6 +124,13 @@ const (
 // Interface exported by the server.
 type GoBgpServiceClient interface {
 	StartBgp(ctx context.Context, in *StartBgpRequest, opts ...grpc.CallOption) (*StartBgpResponse, error)
+	// StopBgp is terminal for the BgpServer, not a counterpart to StartBgp that
+	// can be paired with it repeatedly.
+	//
+	// It cancels the server's running context, so Serve() returns and closes the
+	// channel every management operation selects on. From then on StartBgp - and
+	// every other management call - fails with "server stopped" for the life of
+	// the process. Construct a new BgpServer to start BGP again.
 	StopBgp(ctx context.Context, in *StopBgpRequest, opts ...grpc.CallOption) (*StopBgpResponse, error)
 	GetBgp(ctx context.Context, in *GetBgpRequest, opts ...grpc.CallOption) (*GetBgpResponse, error)
 	GetBfdServerState(ctx context.Context, in *GetBfdServerStateRequest, opts ...grpc.CallOption) (*GetBfdServerStateResponse, error)
@@ -1092,6 +1099,13 @@ type GoBgpService_ListTcpAoKeychainClient = grpc.ServerStreamingClient[ListTcpAo
 // Interface exported by the server.
 type GoBgpServiceServer interface {
 	StartBgp(context.Context, *StartBgpRequest) (*StartBgpResponse, error)
+	// StopBgp is terminal for the BgpServer, not a counterpart to StartBgp that
+	// can be paired with it repeatedly.
+	//
+	// It cancels the server's running context, so Serve() returns and closes the
+	// channel every management operation selects on. From then on StartBgp - and
+	// every other management call - fails with "server stopped" for the life of
+	// the process. Construct a new BgpServer to start BGP again.
 	StopBgp(context.Context, *StopBgpRequest) (*StopBgpResponse, error)
 	GetBgp(context.Context, *GetBgpRequest) (*GetBgpResponse, error)
 	GetBfdServerState(context.Context, *GetBfdServerStateRequest) (*GetBfdServerStateResponse, error)
