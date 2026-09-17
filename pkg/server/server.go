@@ -3820,6 +3820,34 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 		return fmt.Errorf("can't overwrite the existing peer: %s", addr)
 	}
 
+	// send-community is silently inert for route-server clients and for every
+	// family outside the filter's allowlist, and there is no per-family form of
+	// the setting to express the difference. Say so once, here, rather than
+	// leaving an operator with a knob that reads as configured and does nothing.
+	// Config time only - never on the per-path egress hot path.
+	if c.Config.SendCommunity != "" {
+		if c.RouteServer.Config.RouteServerClient {
+			s.logger.Warn("send-community is ignored for route server clients",
+				slog.String("Topic", "config"),
+				slog.String("Key", addr),
+				slog.String("SendCommunity", string(c.Config.SendCommunity)))
+		} else if families, _ := oc.AfiSafis(c.AfiSafis).ToRfList(); len(families) > 0 {
+			inert := make([]string, 0, len(families))
+			for _, f := range families {
+				if !table.SendCommunityFilterApplies(f) {
+					inert = append(inert, f.String())
+				}
+			}
+			if len(inert) > 0 {
+				s.logger.Warn("send-community does not apply to these families and is ignored for them; communities are protocol payload there, not decoration",
+					slog.String("Topic", "config"),
+					slog.String("Key", addr),
+					slog.String("SendCommunity", string(c.Config.SendCommunity)),
+					slog.Any("Families", inert))
+			}
+		}
+	}
+
 	if vrf := c.Config.Vrf; vrf != "" {
 		if c.RouteServer.Config.RouteServerClient {
 			return fmt.Errorf("route server client can't be enslaved to VRF")
