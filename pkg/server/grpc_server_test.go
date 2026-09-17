@@ -74,6 +74,34 @@ func TestNewPeerGroupFromAPIStructRejectsInvalidAllowOwnAsn(t *testing.T) {
 	assert.ErrorContains(t, err, "allow_own_asn is out of range")
 }
 
+// The neighbour path had no range check while the peer-group path did, so
+// allow_own_asn=256 was accepted and stored as 0. 0 means "do not allow our own
+// ASN at all", so an operator asking for the loosest setting silently got the
+// strictest - the peer then rejected paths it was meant to accept.
+func TestNewNeighborFromAPIStructRejectsInvalidAllowOwnAsn(t *testing.T) {
+	for _, v := range []uint32{256, 300, 1 << 16} {
+		_, err := newNeighborFromAPIStruct(&api.Peer{
+			Conf: &api.PeerConf{
+				NeighborAddress: "10.0.0.1",
+				PeerAsn:         65001,
+				AllowOwnAsn:     v,
+			},
+		})
+		assert.ErrorContains(t, err, "allow_own_asn is out of range", "value %d", v)
+	}
+
+	// The boundary is still accepted, and is not silently truncated.
+	n, err := newNeighborFromAPIStruct(&api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "10.0.0.1",
+			PeerAsn:         65001,
+			AllowOwnAsn:     255,
+		},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, uint8(255), n.AsPathOptions.Config.AllowOwnAs)
+}
+
 func TestToPathApi(t *testing.T) {
 	type args struct {
 		path            *table.Path

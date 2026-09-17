@@ -1094,6 +1094,14 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.Config.AdminDown = a.Conf.AdminDown
 		pconf.Config.NeighborInterface = a.Conf.NeighborInterface
 		pconf.Config.Vrf = a.Conf.Vrf
+		// The same guard the peer-group path has always had. Without it the
+		// conversion truncates: allow_own_asn=256 became 0, and 0 means "do not
+		// allow our own ASN at all" - the operator asks for the loosest setting
+		// and silently gets the strictest. It fails closed, so it leaks nothing,
+		// but the peer then rejects paths it was meant to accept.
+		if a.Conf.AllowOwnAsn > math.MaxUint8 {
+			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.AllowOwnAsn)
+		}
 		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.AllowOwnAsn)
 		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.ReplacePeerAsn
 		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.AllowAspathLoopLocal
