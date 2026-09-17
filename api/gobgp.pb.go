@@ -1680,8 +1680,13 @@ type GetNetlinkResponse struct {
 	Vrf           string                 `protobuf:"bytes,3,opt,name=vrf,proto3" json:"vrf,omitempty"`
 	Interfaces    []string               `protobuf:"bytes,4,rep,name=interfaces,proto3" json:"interfaces,omitempty"`
 	VrfImports    []*NetlinkVrfImport    `protobuf:"bytes,5,rep,name=vrf_imports,json=vrfImports,proto3" json:"vrf_imports,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Export settings, echoed back so a controller can detect drift. These are
+	// accepted by EnableNetlinkExport and applied, but were not reported by
+	// anything, so a caller could set them and never confirm them.
+	DampeningInterval uint32 `protobuf:"varint,6,opt,name=dampening_interval,json=dampeningInterval,proto3" json:"dampening_interval,omitempty"` // Update dampening interval in milliseconds
+	RouteProtocol     int32  `protobuf:"varint,7,opt,name=route_protocol,json=routeProtocol,proto3" json:"route_protocol,omitempty"`             // RTPROT_* value (default: 186 for BGP)
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *GetNetlinkResponse) Reset() {
@@ -1747,6 +1752,20 @@ func (x *GetNetlinkResponse) GetVrfImports() []*NetlinkVrfImport {
 		return x.VrfImports
 	}
 	return nil
+}
+
+func (x *GetNetlinkResponse) GetDampeningInterval() uint32 {
+	if x != nil {
+		return x.DampeningInterval
+	}
+	return 0
+}
+
+func (x *GetNetlinkResponse) GetRouteProtocol() int32 {
+	if x != nil {
+		return x.RouteProtocol
+	}
+	return 0
 }
 
 type StartBgpRequest struct {
@@ -15890,7 +15909,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\bvrf_name\x18\x01 \x01(\tR\avrfName\x12\x1e\n" +
 	"\n" +
 	"interfaces\x18\x02 \x03(\tR\n" +
-	"interfaces\"\xcc\x01\n" +
+	"interfaces\"\xa2\x02\n" +
 	"\x12GetNetlinkResponse\x12%\n" +
 	"\x0eimport_enabled\x18\x01 \x01(\bR\rimportEnabled\x12%\n" +
 	"\x0eexport_enabled\x18\x02 \x01(\bR\rexportEnabled\x12\x10\n" +
@@ -15899,7 +15918,9 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"interfaces\x18\x04 \x03(\tR\n" +
 	"interfaces\x126\n" +
 	"\vvrf_imports\x18\x05 \x03(\v2\x15.api.NetlinkVrfImportR\n" +
-	"vrfImports\"6\n" +
+	"vrfImports\x12-\n" +
+	"\x12dampening_interval\x18\x06 \x01(\rR\x11dampeningInterval\x12%\n" +
+	"\x0eroute_protocol\x18\a \x01(\x05R\rrouteProtocol\"6\n" +
 	"\x0fStartBgpRequest\x12#\n" +
 	"\x06global\x18\x01 \x01(\v2\v.api.GlobalR\x06global\"\x12\n" +
 	"\x10StartBgpResponse\"F\n" +

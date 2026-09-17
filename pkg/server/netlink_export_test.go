@@ -34,6 +34,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	go_netlink "github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -1042,3 +1043,30 @@ func benchmarkScheduleBurst(b *testing.B, n int) {
 func BenchmarkScheduleBurst100(b *testing.B)  { benchmarkScheduleBurst(b, 100) }
 func BenchmarkScheduleBurst400(b *testing.B)  { benchmarkScheduleBurst(b, 400) }
 func BenchmarkScheduleBurst1600(b *testing.B) { benchmarkScheduleBurst(b, 1600) }
+
+// EnableNetlinkExport accepts dampening_interval and route_protocol and applies
+// both, but GetNetlink reported neither. A controller could set them and had no
+// way to confirm they took, or to detect drift afterwards - the same blindness
+// remove_private had on the peer-group path.
+func TestGetNetlinkEchoesExportSettings(t *testing.T) {
+	s := newVrfTestServer(t)
+	ctx := context.Background()
+
+	// Defaults before anything is configured.
+	got, err := s.GetNetlink(ctx, &api.GetNetlinkRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), got.DampeningInterval)
+	assert.Equal(t, int32(0), got.RouteProtocol)
+
+	require.NoError(t, s.EnableNetlinkExport(ctx, &api.EnableNetlinkExportRequest{
+		DampeningInterval: 250,
+		RouteProtocol:     186,
+		Rules:             []*api.NetlinkExportRuleConfig{{Name: "r", TableId: 0}},
+	}))
+
+	got, err = s.GetNetlink(ctx, &api.GetNetlinkRequest{})
+	require.NoError(t, err)
+	assert.True(t, got.ExportEnabled)
+	assert.Equal(t, uint32(250), got.DampeningInterval, "dampening_interval must be echoed back")
+	assert.Equal(t, int32(186), got.RouteProtocol, "route_protocol must be echoed back")
+}

@@ -6221,6 +6221,11 @@ func (s *BgpServer) GetNetlink(ctx context.Context, in *api.GetNetlinkRequest) (
 		Vrf:           s.bgpConfig.Netlink.Import.Vrf,
 		Interfaces:    slices.Clone(s.bgpConfig.Netlink.Import.InterfaceList),
 		VrfImports:    vrfImports,
+		// Echo the export settings back. EnableNetlinkExport accepts and applies
+		// both, and nothing reported either, so a controller could set them and
+		// had no way to confirm or detect drift.
+		DampeningInterval: s.bgpConfig.Netlink.Export.DampeningInterval,
+		RouteProtocol:     s.bgpConfig.Netlink.Export.RouteProtocol,
 	}, nil
 }
 

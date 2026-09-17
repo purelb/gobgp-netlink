@@ -149,6 +149,11 @@ message GetNetlinkResponse {
   string vrf = 3;
   repeated string interfaces = 4;
   repeated NetlinkVrfImport vrf_imports = 5;
+  // Export settings, echoed back so a controller can detect drift. These are
+  // accepted by EnableNetlinkExport and applied, but were not reported by
+  // anything, so a caller could set them and never confirm them.
+  uint32 dampening_interval = 6; // Update dampening interval in milliseconds
+  int32 route_protocol = 7; // RTPROT_* value (default: 186 for BGP)
 }
 
 message StartBgpRequest {
