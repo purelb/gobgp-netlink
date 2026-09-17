@@ -1081,6 +1081,7 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.Config.LocalAs = a.Conf.LocalAsn
 		pconf.Config.AuthPassword = a.Conf.AuthPassword
 		pconf.Config.RouteFlapDamping = a.Conf.RouteFlapDamping
+		pconf.Config.SendCommunity = oc.SendCommunityFromAPI(a.Conf.SendCommunity)
 		pconf.Config.Description = a.Conf.Description
 		pconf.Config.PeerGroup = a.Conf.PeerGroup
 		pconf.Config.PeerType, err = PeerTypeFromApi(a.Conf.Type)
@@ -1261,6 +1262,7 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		pconf.Config.LocalAs = a.Conf.LocalAsn
 		pconf.Config.AuthPassword = a.Conf.AuthPassword
 		pconf.Config.RouteFlapDamping = a.Conf.RouteFlapDamping
+		pconf.Config.SendCommunity = oc.SendCommunityFromAPI(a.Conf.SendCommunity)
 		pconf.Config.Description = a.Conf.Description
 		pconf.Config.PeerGroupName = a.Conf.PeerGroupName
 		pconf.Config.SendSoftwareVersion = a.Conf.SendSoftwareVersion

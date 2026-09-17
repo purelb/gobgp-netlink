@@ -472,6 +472,39 @@ func newAfiSafiFromConfigStruct(c *AfiSafi) *api.AfiSafi {
 	}
 }
 
+// SendCommunityFromAPI converts an api send_community value to the internal
+// CommunityType. A nil pointer means the field was not set, which is distinct
+// from 0: 0 is COMMUNITY_TYPE_STANDARD. Without that distinction a peer that
+// never configured the field would be read as asking for standard communities
+// only, and gating on that would strip extended communities - route targets
+// among them - from every existing session.
+//
+// An out-of-range value is treated as unset rather than rejected: the field was
+// silently ignored entirely until now, so an existing client sending garbage
+// into it should keep working exactly as it did.
+func SendCommunityFromAPI(v *uint32) CommunityType {
+	if v == nil {
+		return ""
+	}
+	t, ok := IntToCommunityTypeMap[int(*v)]
+	if !ok {
+		return ""
+	}
+	return t
+}
+
+// SendCommunityToAPI is the inverse. An unset or unrecognised CommunityType
+// returns nil so ListPeer reports absence rather than a fabricated 0, which
+// would read as "standard".
+func SendCommunityToAPI(t CommunityType) *uint32 {
+	i, ok := CommunityTypeToIntMap[t]
+	if !ok {
+		return nil
+	}
+	v := uint32(i)
+	return &v
+}
+
 func ProtoTimestamp(secs int64) *tspb.Timestamp {
 	if secs == 0 {
 		return nil
@@ -577,6 +610,7 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			Type:                 toPeerType(pconf.Config.PeerType),
 			AuthPassword:         pconf.Config.AuthPassword,
 			RouteFlapDamping:     pconf.Config.RouteFlapDamping,
+			SendCommunity:        SendCommunityToAPI(pconf.Config.SendCommunity),
 			Description:          pconf.Config.Description,
 			PeerGroup:            pconf.Config.PeerGroup,
 			NeighborInterface:    pconf.Config.NeighborInterface,
@@ -589,8 +623,9 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			SendSoftwareVersion:  pconf.Config.SendSoftwareVersion,
 		},
 		State: &api.PeerState{
-			SessionState: sessionState,
-			AdminState:   admin_state,
+			SessionState:  sessionState,
+			AdminState:    admin_state,
+			SendCommunity: SendCommunityToAPI(pconf.State.SendCommunity),
 			// Computed here because this is the last point the password is
 			// still present: ListPeer redacts Conf.AuthPassword before the peer
 			// leaves the server, and PeerState.AuthPassword is never written by
@@ -800,6 +835,7 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			Type:                 toPeerType(pconf.Config.PeerType),
 			AuthPassword:         pconf.Config.AuthPassword,
 			RouteFlapDamping:     pconf.Config.RouteFlapDamping,
+			SendCommunity:        SendCommunityToAPI(pconf.Config.SendCommunity),
 			Description:          pconf.Config.Description,
 			PeerGroupName:        pconf.Config.PeerGroupName,
 			SendSoftwareVersion:  pconf.Config.SendSoftwareVersion,
@@ -810,6 +846,7 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 		Info: &api.PeerGroupState{
 			PeerAsn:       s.PeerAs,
 			Type:          toPeerType(s.PeerType),
+			SendCommunity: SendCommunityToAPI(s.SendCommunity),
 			TotalPaths:    s.TotalPaths,
 			TotalPrefixes: s.TotalPrefixes,
 		},

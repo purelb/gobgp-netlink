@@ -520,3 +520,25 @@ func TestGracefulRestartDerivesPerFamilyFlag(t *testing.T) {
 		}
 	})
 }
+
+func TestSendCommunityAPIRoundTrip(t *testing.T) {
+	// The whole point of the optional wrapper: nil and 0 must stay distinct.
+	// COMMUNITY_TYPE_STANDARD is 0, so conflating them would silently strip
+	// extended communities from every peer that never set the field.
+	assert.Equal(t, CommunityType(""), SendCommunityFromAPI(nil))
+	assert.Nil(t, SendCommunityToAPI(""))
+
+	for i, want := range IntToCommunityTypeMap {
+		v := uint32(i)
+		assert.Equal(t, want, SendCommunityFromAPI(&v), "from api %d", i)
+		got := SendCommunityToAPI(want)
+		require.NotNil(t, got, "to api %q", want)
+		assert.Equal(t, v, *got, "to api %q", want)
+	}
+
+	// Out of range coerces to unconfigured rather than erroring: the API field
+	// was ignored entirely until now, so a client pushing junk keeps working.
+	bad := uint32(99)
+	assert.Equal(t, CommunityType(""), SendCommunityFromAPI(&bad))
+	assert.Nil(t, SendCommunityToAPI(CommunityType("all")))
+}

@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // OverwriteNeighborConfigWithPeerGroup had no test of any kind before the BFD
@@ -194,4 +195,43 @@ func Test_OverwriteNeighborConfigWithPeerGroup_IsIdempotent(t *testing.T) {
 
 	assert.NoError(OverwriteNeighborConfigWithPeerGroup(n, pg))
 	assert.Equal(once, n.Bfd.Config, "a second overwrite must not change the result")
+}
+
+func TestSetDefaultNeighborConfigValuesSendCommunity(t *testing.T) {
+	newNeighbor := func(sc CommunityType) *Neighbor {
+		n := &Neighbor{}
+		n.Config.NeighborAddress = netip.MustParseAddr("10.0.0.1")
+		n.Config.PeerAs = 65001
+		n.Config.SendCommunity = sc
+		return n
+	}
+	g := &Global{}
+	g.Config.As = 65000
+	g.Config.RouterId = netip.MustParseAddr("10.0.0.254")
+
+	t.Run("copied to state for iBGP", func(t *testing.T) {
+		n := newNeighbor(COMMUNITY_TYPE_BOTH)
+		n.Config.PeerAs = 65000 // iBGP: unlike remove-private-as, this must still copy
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, g))
+		assert.Equal(t, COMMUNITY_TYPE_BOTH, n.State.SendCommunity)
+	})
+
+	t.Run("copied to state for eBGP", func(t *testing.T) {
+		n := newNeighbor(COMMUNITY_TYPE_NONE)
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, g))
+		assert.Equal(t, COMMUNITY_TYPE_NONE, n.State.SendCommunity)
+	})
+
+	t.Run("unset stays unset", func(t *testing.T) {
+		n := newNeighbor("")
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, g))
+		assert.Equal(t, CommunityType(""), n.State.SendCommunity)
+	})
+
+	t.Run("typo is rejected, not silently ignored", func(t *testing.T) {
+		n := newNeighbor(CommunityType("all"))
+		err := SetDefaultNeighborConfigValues(n, nil, g)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid send-community")
+	})
 }
