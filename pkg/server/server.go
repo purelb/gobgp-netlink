@@ -4284,10 +4284,35 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 		conf.Timers.Config = c.Timers.Config
 	}
 
+	// send-community is the only NeighborConfig field excluded from
+	// NeedsResendOpenMessage, and therefore the only one that reaches a live peer
+	// without going through deleteNeighbor/addNeighbor. Nothing else copies
+	// conf.Config from c.Config on this path, so without these two lines the
+	// setting would be accepted and silently never applied. State is what
+	// postFilterpath reads; SetDefaultNeighborConfigValues already validated and
+	// populated it on c near the top of this function.
+	sendCommunityChanged := original.Config.SendCommunity != c.Config.SendCommunity
+	if sendCommunityChanged {
+		peer.fsm.logger.Info("Update send-community configuration",
+			slog.String("From", string(original.Config.SendCommunity)),
+			slog.String("To", string(c.Config.SendCommunity)))
+		conf.Config.SendCommunity = c.Config.SendCommunity
+		conf.State.SendCommunity = c.State.SendCommunity
+	}
+
 	isLimit, err := peer.updatePrefixLimitConfig(&conf, c.AfiSafis)
 	if err == nil {
 		peer.fsm.pConf.Update(&conf)
 		peer.fsm.lock.Unlock()
+		// Already-advertised routes were filtered under the old setting, so they
+		// have to be re-sent. Must run after the Unlock above - softResetOut
+		// reaches back into the peer.
+		if sendCommunityChanged {
+			if rerr := s.softResetOut(addr, bgp.Family(0), false); rerr != nil {
+				peer.fsm.logger.Error("failed to soft reset out after send-community change",
+					slog.String("Err", rerr.Error()))
+			}
+		}
 		if bfdConfigChanged {
 			err = s.updateBfdPeer(
 				addr,

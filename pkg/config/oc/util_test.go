@@ -542,3 +542,60 @@ func TestSendCommunityAPIRoundTrip(t *testing.T) {
 	assert.Equal(t, CommunityType(""), SendCommunityFromAPI(&bad))
 	assert.Nil(t, SendCommunityToAPI(CommunityType("all")))
 }
+
+// send-community is the only NeighborConfig field excluded from
+// NeedsResendOpenMessage, and therefore the only one that reaches a live peer
+// without a session teardown. That carve-out is the one piece of the
+// send-community work that changes behaviour for peers which never set the
+// field, so both directions are pinned here.
+func TestNeedsResendOpenMessageSendCommunityCarveOut(t *testing.T) {
+	base := func() *Neighbor {
+		n := &Neighbor{}
+		n.Config.NeighborAddress = netip.MustParseAddr("10.0.0.1")
+		n.Config.PeerAs = 65001
+		n.Config.AuthPassword = "secret"
+		n.Config.SendCommunity = COMMUNITY_TYPE_BOTH
+		return n
+	}
+
+	t.Run("identical configs need no resend", func(t *testing.T) {
+		assert.False(t, base().NeedsResendOpenMessage(base()))
+	})
+
+	t.Run("send-community alone does not tear the session down", func(t *testing.T) {
+		// Before this carve-out, first-time adoption flapped every session -
+		// traffic loss on every node for a service-VIP DaemonSet.
+		for _, to := range []CommunityType{
+			"", COMMUNITY_TYPE_STANDARD, COMMUNITY_TYPE_EXTENDED, COMMUNITY_TYPE_NONE,
+		} {
+			n := base()
+			n.Config.SendCommunity = to
+			assert.False(t, base().NeedsResendOpenMessage(n),
+				"changing send-community to %q must not require a resend", to)
+		}
+	})
+
+	// The converse, and the reason the carve-out neutralises one field on copies
+	// rather than enumerating the fields that matter: everything else must still
+	// reset, including fields added by a future regeneration of this file.
+	t.Run("other config changes still reset", func(t *testing.T) {
+		for name, mutate := range map[string]func(*Neighbor){
+			"peer-as":       func(n *Neighbor) { n.Config.PeerAs = 65002 },
+			"auth-password": func(n *Neighbor) { n.Config.AuthPassword = "different" },
+			"description":   func(n *Neighbor) { n.Config.Description = "changed" },
+			"admin-down":    func(n *Neighbor) { n.Config.AdminDown = true },
+		} {
+			n := base()
+			mutate(n)
+			assert.True(t, base().NeedsResendOpenMessage(n),
+				"changing %s must still require a resend", name)
+		}
+	})
+
+	t.Run("send-community together with another change still resets", func(t *testing.T) {
+		n := base()
+		n.Config.SendCommunity = COMMUNITY_TYPE_NONE
+		n.Config.PeerAs = 65002
+		assert.True(t, base().NeedsResendOpenMessage(n))
+	})
+}

@@ -228,7 +228,19 @@ func isAfiSafiChanged(x, y []AfiSafi) bool {
 }
 
 func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
-	return !n.Config.Equal(&new.Config) ||
+	// send-community is an egress attribute filter. It has no bearing on the
+	// OPEN message, so changing it must not tear the session down - the caller
+	// applies it in place and soft-resets out instead. Before this carve-out,
+	// first-time adoption of the setting flapped every session, which for a
+	// service-VIP DaemonSet means traffic loss on every node.
+	//
+	// Neutralise the field on copies rather than enumerating the ones that do
+	// matter: NeighborConfig is generated, so a field added by a future
+	// regeneration must keep triggering a reset by default.
+	lhs, rhs := n.Config, new.Config
+	lhs.SendCommunity, rhs.SendCommunity = "", ""
+
+	return !lhs.Equal(&rhs) ||
 		!n.Transport.Config.Equal(&new.Transport.Config) ||
 		!n.AddPaths.Config.Equal(&new.AddPaths.Config) ||
 		!n.AsPathOptions.Config.Equal(&new.AsPathOptions.Config) ||

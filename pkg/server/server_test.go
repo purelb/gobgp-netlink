@@ -5183,3 +5183,82 @@ func TestStopDoesNotNotifyGracefulRestartPeers(t *testing.T) {
 		"a graceful-restart peer must not be told to discard its routes: "+
 			"Stop() sent Cease/PEER_DECONFIGURED when it passed a zero-value request")
 }
+
+// The point of this test is the *effect* assertion, not the no-flap one.
+//
+// send-community is the only NeighborConfig field that reaches a live peer
+// without going through deleteNeighbor/addNeighbor, and nothing on that path
+// copies conf.Config from c.Config. So a test that only checked the session
+// survived would pass even if updateNeighbor never applied the value - leaving
+// the setting accepted and silently inert, which is the exact bug class this
+// whole change exists to eliminate.
+func TestUpdatePeerSendCommunityAppliesWithoutFlappingSession(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10379},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	peerConf := &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: peerConf}))
+
+	remote := NewBgpServer()
+	go remote.Serve()
+	assert.NoError(remote.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer remote.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(s, api.PeerState_SESSION_STATE_ESTABLISHED)
+	assert.NoError(remote.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 1},
+		Transport: &api.Transport{RemotePort: 10379},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	uptimeBefore := func() int64 {
+		var up int64
+		assert.NoError(s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(p *api.Peer) {
+			if p.Timers != nil && p.Timers.State != nil {
+				up = p.Timers.State.Uptime.GetSeconds()
+			}
+		}))
+		return up
+	}()
+
+	none := uint32(3) // COMMUNITY_TYPE_NONE
+	peerConf.Conf.SendCommunity = &none
+	_, err := s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: peerConf})
+	assert.NoError(err)
+
+	// The session must not have been torn down and rebuilt...
+	var state api.PeerState_SessionState
+	var uptimeAfter int64
+	var confAfter, stateAfter *uint32
+	assert.NoError(s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(p *api.Peer) {
+		state = p.State.GetSessionState()
+		if p.Timers != nil && p.Timers.State != nil {
+			uptimeAfter = p.Timers.State.Uptime.GetSeconds()
+		}
+		confAfter = p.Conf.SendCommunity
+		stateAfter = p.State.SendCommunity
+	}))
+	assert.Equal(api.PeerState_SESSION_STATE_ESTABLISHED, state, "the session was flapped by a send-community change")
+	assert.Equal(uptimeBefore, uptimeAfter, "uptime moved, so the session was rebuilt")
+
+	// ...and the value must actually have been applied. State is what
+	// postFilterpath reads; Conf alone would not gate anything.
+	if assert.NotNil(confAfter) {
+		assert.Equal(none, *confAfter, "Conf.SendCommunity")
+	}
+	if assert.NotNil(stateAfter) {
+		assert.Equal(none, *stateAfter, "State.SendCommunity is what the egress filter reads")
+	}
+}
