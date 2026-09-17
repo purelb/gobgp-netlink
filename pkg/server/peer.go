@@ -183,6 +183,13 @@ func (peer *peer) isIBGPPeer() bool {
 	return conf.State.PeerType == oc.PEER_TYPE_INTERNAL
 }
 
+// sendCommunity reports which community types this peer is configured to
+// receive. An empty value means unconfigured - send whatever the path carries.
+func (peer *peer) sendCommunity() oc.CommunityType {
+	conf := peer.fsm.pConf.ReadOnly()
+	return conf.State.SendCommunity
+}
+
 func (peer *peer) isRouteServerClient() bool {
 	conf := peer.fsm.pConf.ReadOnly()
 	return conf.RouteServer.Config.RouteServerClient

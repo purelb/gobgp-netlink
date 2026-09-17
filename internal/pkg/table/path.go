@@ -1131,6 +1131,127 @@ func (path *Path) RemoveLocalPref() {
 	}
 }
 
+// SendCommunityFilterApplies reports whether send-community may touch a family's
+// community attributes at all.
+//
+// Exported so pkg/server can warn at config time when the setting is inert for a
+// peer's families. The warning and the filter must never disagree, so they read
+// the same allowlist rather than each keeping their own.
+//
+// It is an allowlist, not a denylist, because the two are not equally wrong. In
+// most families communities are not decoration, they are the payload:
+//
+//   - VPN and EVPN carry the Route Target that CanImportToVrf gates on, so a
+//     stripped route is imported into no VRF at all. EVPN also carries
+//     MAC-Mobility, ES-Import, RouterMac, ESI-Label and E-Tree there.
+//   - Every FlowSpec traffic action is an extended community. Strip them and a
+//     discard rule arrives as a bare accept - it fails open.
+//   - MUP and VPLS carry RTs and L2 info the same way.
+//
+// So a family added upstream must be opted in deliberately. Getting the default
+// wrong in the other direction is a silent security failure.
+func SendCommunityFilterApplies(f bgp.Family) bool {
+	switch f {
+	case bgp.RF_IPv4_UC, bgp.RF_IPv6_UC, bgp.RF_IPv4_MPLS, bgp.RF_IPv6_MPLS:
+		return true
+	}
+	return false
+}
+
+// delExtendedCommunities removes both extended community attributes.
+//
+// RFC 5701's IPv6 Address Specific Extended Community is a separate attribute
+// code from RFC 4360's only because the 8-octet encoding has no room for a v6
+// address. It is the same concept, and this tree pairs the two everywhere else -
+// a single `set ext-community` action writes both, see ExtCommunityAction.Apply.
+func (path *Path) delExtendedCommunities() {
+	for _, typ := range []bgp.BGPAttrType{
+		bgp.BGP_ATTR_TYPE_EXTENDED_COMMUNITIES,
+		bgp.BGP_ATTR_TYPE_IP6_EXTENDED_COMMUNITIES,
+	} {
+		// Guard: delPathAttr dirties attrsHash and grows path.dels
+		// unconditionally, and this runs per advertised path per peer.
+		if path.getPathAttr(typ) != nil {
+			path.delPathAttr(typ)
+		}
+	}
+}
+
+// stripStandardCommunitiesExceptLLGR removes the COMMUNITIES attribute but keeps
+// LLGR_STALE and NO_LLGR.
+//
+// The exception is in the name so callers do not have to read the body to learn
+// that "none" is not literal. LLGR is negotiated by capability and gobgpd stamps
+// LLGR_STALE itself when re-advertising a stale route (AdjRib.MarkLLGRStaleOrDrop);
+// honouring the capability while removing its marker would leave a downstream
+// peer treating stale routes as fresh.
+func (path *Path) stripStandardCommunitiesExceptLLGR() {
+	isLLGR := func(c uint32) bool {
+		return c == uint32(bgp.COMMUNITY_LLGR_STALE) || c == uint32(bgp.COMMUNITY_NO_LLGR)
+	}
+	comms := path.GetCommunities()
+	keep := 0
+	for _, c := range comms {
+		if isLLGR(c) {
+			keep++
+		}
+	}
+	if keep == len(comms) {
+		// Nothing to strip, including the empty case. Returning here keeps the
+		// common path free of both an allocation and an attrsHash invalidation.
+		return
+	}
+	if keep == 0 {
+		path.delPathAttr(bgp.BGP_ATTR_TYPE_COMMUNITIES)
+		return
+	}
+	// A fresh slice, not a reslice: GetCommunities returns the attribute's own
+	// backing array, which may be shared with another path.
+	kept := make([]uint32, 0, keep)
+	for _, c := range comms {
+		if isLLGR(c) {
+			kept = append(kept, c)
+		}
+	}
+	path.SetCommunities(kept, true)
+}
+
+// FilterCommunities strips the community attributes that a peer's
+// send-community setting excludes.
+//
+// It runs after the export policy, for the same reason RemoveLocalPref does:
+// policy can add communities, so anything applied before it is not the last
+// word.
+//
+// An empty CommunityType means the setting was never configured, and nothing is
+// stripped - which is how gobgpd has always behaved. That distinction matters
+// because COMMUNITY_TYPE_STANDARD is the zero value: treating unset as
+// "standard" would strip extended communities, route targets among them, from
+// every existing session on upgrade.
+//
+// "none" is not literal. Three things survive it: large communities, LLGR
+// communities, and every family outside SendCommunityFilterApplies. The setting
+// describes configuration, not guaranteed effect.
+//
+// BGP_ATTR_TYPE_LARGE_COMMUNITY is deliberately untouched. The OpenConfig
+// community-type enum has no "large" member, so no value of this setting means
+// "send large communities"; stripping them under "none" would make them
+// unsendable rather than optional.
+func (path *Path) FilterCommunities(t oc.CommunityType) {
+	if t == "" || !SendCommunityFilterApplies(path.GetFamily()) {
+		return
+	}
+	switch t {
+	case oc.COMMUNITY_TYPE_STANDARD:
+		path.delExtendedCommunities()
+	case oc.COMMUNITY_TYPE_EXTENDED:
+		path.stripStandardCommunitiesExceptLLGR()
+	case oc.COMMUNITY_TYPE_NONE:
+		path.stripStandardCommunitiesExceptLLGR()
+		path.delExtendedCommunities()
+	}
+}
+
 func (path *Path) GetOriginatorID() netip.Addr {
 	if attr := path.getPathAttr(bgp.BGP_ATTR_TYPE_ORIGINATOR_ID); attr != nil {
 		return attr.(*bgp.PathAttributeOriginatorId).Value

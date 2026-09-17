@@ -64,6 +64,50 @@
         # override global.config.as value
         local-as = 1000
         remove-private-as = "all"
+        # Which community attributes to send to this peer: "standard",
+        # "extended", "both" or "none". Omit it to send whatever the path
+        # carries, which is what gobgpd does when it is not set.
+        #
+        # "none" is not literal. Three things survive it, so treat this as a
+        # description of configuration rather than a guarantee of effect:
+        #
+        #  1. Large communities. The OpenConfig enum has no value meaning
+        #     "send large", so stripping them would make them unsendable.
+        #  2. LLGR_STALE and NO_LLGR. gobgpd stamps LLGR_STALE itself when
+        #     re-advertising a stale route, and removing it while still
+        #     honouring the capability the peer negotiated would leave that
+        #     peer treating stale routes as fresh.
+        #  3. Every address family except ipv4/ipv6 unicast and labelled
+        #     unicast. In VPN, EVPN, FlowSpec, MUP and VPLS, communities are
+        #     protocol payload rather than decoration - the Route Target that
+        #     selects a VRF, and every FlowSpec traffic action, are extended
+        #     communities. Stripping them would not filter a route, it would
+        #     destroy it, and a FlowSpec "discard" rule would arrive as a bare
+        #     "accept". There is no per-family form of this setting, so it is
+        #     simply ignored for those families; gobgpd logs a warning at
+        #     startup when it is set on a peer that has one enabled.
+        #
+        # It is also ignored entirely for route-server clients, which get no
+        # egress attribute transformation at all (RFC 7947).
+        #
+        # Two consequences worth stating plainly:
+        #
+        #  - "none" and "extended" strip NO_EXPORT, NO_ADVERTISE and
+        #    NO_EXPORT_SUBCONFED, so the receiving AS loses the signal not to
+        #    re-export the route. This is how the setting behaves on other
+        #    vendors too, but it is a route-leak vector.
+        #  - Within unicast, "color" and "encap" extended communities are
+        #    stripped along with the rest.
+        #
+        # Only `gobgp neighbor <addr> adj-out` and the "Advertised" count in
+        # `gobgp neighbor <addr>` reflect this filtering. BMP (pre-policy,
+        # post-policy and Loc-RIB), MRT, and ListPath on ADJ_OUT with
+        # enable_filtered all show the path before per-peer egress processing,
+        # so a community can appear there and still not be sent.
+        #
+        # Changing this on a live peer does not reset the session; gobgpd
+        # applies it and soft-resets outbound.
+        #send-community = "both"
         # To enable peer group setting, uncomment the following
         #peer-group = "my-peer-group"
         # Force sending Software Version Capability, default: disabled.

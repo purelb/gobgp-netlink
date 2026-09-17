@@ -803,6 +803,21 @@ func (s *BgpServer) postFilterpath(peer *peer, path *table.Path) *table.Path {
 		path.RemoveLocalPref()
 	}
 
+	// send-community handling, here for the same reason: export policy can add
+	// communities, so this has to be the last word before encoding.
+	//
+	// Route-server clients are exempt like everything else on this path. Two
+	// reasons, either sufficient: RFC 7947 transparency, which is why
+	// UpdatePathAttrs returns early for them and why RemoveLocalPref above is
+	// guarded the same way; and aliasing - UpdatePathAttrs returns the *un-cloned*
+	// original for RS clients and ApplyPolicy only clones when a statement has
+	// ModActions, so this path can be the object owned by s.rsRib. delPathAttr
+	// records on it and GetPathAttrs honours dels through the parent chain, so
+	// filtering here would strip the attribute for every peer and for the RIB.
+	if path != nil && !path.IsWithdraw && !peer.isRouteServerClient() {
+		path.FilterCommunities(peer.sendCommunity())
+	}
+
 	return path
 }
 
