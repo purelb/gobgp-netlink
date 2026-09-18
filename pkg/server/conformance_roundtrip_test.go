@@ -74,8 +74,7 @@ var knownAsymmetries = map[string]string{
 	// mtu_discovery exists in api.Transport and in the generated config struct
 	// and is referenced nowhere else in the tree: no converter stores it, and no
 	// socket option is set from it.
-	"Peer.graceful_restart.stale_routes_time": "accepted per-peer but never stored; only the global form is implemented",
-	"Peer.transport.mtu_discovery":            "declared in the proto and the config model, implemented nowhere",
+	"Peer.transport.mtu_discovery": "declared in the proto and the config model, implemented nowhere",
 }
 
 // fieldValues overrides the generic filler for fields whose valid domain is

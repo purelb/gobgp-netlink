@@ -743,6 +743,7 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			DeferralTime:        uint32(pconf.GracefulRestart.Config.DeferralTime),
 			NotificationEnabled: pconf.GracefulRestart.Config.NotificationEnabled,
 			LonglivedEnabled:    pconf.GracefulRestart.Config.LongLivedEnabled,
+			StaleRoutesTime:     uint32(pconf.GracefulRestart.Config.StaleRoutesTime),
 			LocalRestarting:     pconf.GracefulRestart.State.LocalRestarting,
 			PeerRestartTime:     uint32(pconf.GracefulRestart.State.PeerRestartTime),
 			PeerRestarting:      pconf.GracefulRestart.State.PeerRestarting,
@@ -914,6 +915,7 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			DeferralTime:        uint32(pconf.GracefulRestart.Config.DeferralTime),
 			NotificationEnabled: pconf.GracefulRestart.Config.NotificationEnabled,
 			LonglivedEnabled:    pconf.GracefulRestart.Config.LongLivedEnabled,
+			StaleRoutesTime:     uint32(pconf.GracefulRestart.Config.StaleRoutesTime),
 			LocalRestarting:     pconf.GracefulRestart.State.LocalRestarting,
 		},
 		Transport: &api.Transport{

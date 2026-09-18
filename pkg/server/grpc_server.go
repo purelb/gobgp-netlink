@@ -1185,6 +1185,7 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.GracefulRestart.Config.RestartTime = uint16(a.GracefulRestart.RestartTime)
 		pconf.GracefulRestart.Config.HelperOnly = a.GracefulRestart.HelperOnly
 		pconf.GracefulRestart.Config.DeferralTime = uint16(a.GracefulRestart.DeferralTime)
+		pconf.GracefulRestart.Config.StaleRoutesTime = float64(a.GracefulRestart.StaleRoutesTime)
 		pconf.GracefulRestart.Config.NotificationEnabled = a.GracefulRestart.NotificationEnabled
 		pconf.GracefulRestart.Config.LongLivedEnabled = a.GracefulRestart.LonglivedEnabled
 		pconf.GracefulRestart.State.LocalRestarting = a.GracefulRestart.LocalRestarting
@@ -1342,6 +1343,7 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		pconf.GracefulRestart.Config.RestartTime = uint16(a.GracefulRestart.RestartTime)
 		pconf.GracefulRestart.Config.HelperOnly = a.GracefulRestart.HelperOnly
 		pconf.GracefulRestart.Config.DeferralTime = uint16(a.GracefulRestart.DeferralTime)
+		pconf.GracefulRestart.Config.StaleRoutesTime = float64(a.GracefulRestart.StaleRoutesTime)
 		pconf.GracefulRestart.Config.NotificationEnabled = a.GracefulRestart.NotificationEnabled
 		pconf.GracefulRestart.Config.LongLivedEnabled = a.GracefulRestart.LonglivedEnabled
 		pconf.GracefulRestart.State.LocalRestarting = a.GracefulRestart.LocalRestarting

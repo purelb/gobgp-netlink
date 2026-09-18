@@ -5570,3 +5570,204 @@ func TestGetRunningConfigTOMLUsesConfigFileKeys(t *testing.T) {
 	assert.NotContains(t, rsp.Config, "RouterId", "Go field names mean the TOML is not loadable")
 	assert.NotContains(t, rsp.Config, "[Global]", "Go field names mean the TOML is not loadable")
 }
+
+// RFC 4724 4.2 / OpenConfig stale-routes-time: an upper bound on how long stale
+// routes are retained after the session comes back.
+//
+// The existing handling covered the other half - if the session does not
+// re-establish within Restart Time, the stale routes go. Nothing bounded the
+// case where it does re-establish and the restarting speaker then never sends
+// End-of-RIB: the stale routes stayed indefinitely. The field was accepted by
+// the TOML loader and both gRPC converters and read by nothing.
+func TestStaleRoutesTimePurgesRetainedRoutes(t *testing.T) {
+	assert := assert.New(t)
+
+	afiSafis := []*api.AfiSafi{{
+		Config: &api.AfiSafiConfig{
+			Family:  apiutil.ToApiFamily(bgp.AFI_IP, bgp.SAFI_UNICAST),
+			Enabled: true,
+		},
+		MpGracefulRestart: &api.MpGracefulRestart{
+			Config: &api.MpGracefulRestartConfig{Enabled: true},
+		},
+	}}
+
+	s1 := NewBgpServer()
+	go s1.Serve()
+	assert.NoError(s1.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10779},
+	}))
+	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.NoError(s1.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport:       &api.Transport{PassiveMode: true},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120, StaleRoutesTime: 1},
+		AfiSafis:        afiSafis,
+	}}))
+
+	s2 := NewBgpServer()
+	go s2.Serve()
+	assert.NoError(s2.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(s1, api.PeerState_SESSION_STATE_ESTABLISHED)
+	assert.NoError(s2.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 1},
+		Transport:       &api.Transport{RemotePort: 10779},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120},
+		AfiSafis:        afiSafis,
+		Timers:          &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.77.0.0/24"))
+	assert.NoError(err)
+	nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr("0.0.0.0"))
+	assert.NoError(err)
+	_, err = s2.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{{
+		Family: bgp.RF_IPv4_UC,
+		Nlri:   nlri,
+		Attrs:  []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0), nh},
+	}}})
+	assert.NoError(err)
+
+	adjInCount := func() int {
+		n := 0
+		_ = s1.ListPath(apiutil.ListPathRequest{
+			TableType: api.TableType_TABLE_TYPE_ADJ_IN,
+			Family:    bgp.RF_IPv4_UC,
+			Name:      "127.0.0.1",
+		}, func(_ bgp.NLRI, _ []*apiutil.Path) { n++ })
+		return n
+	}
+	assert.Eventually(func() bool { return adjInCount() > 0 }, 15*time.Second, 200*time.Millisecond,
+		"the route must reach s1's adj-rib-in before it can go stale")
+
+	// Put the peer into the state a graceful restart leaves it in: restarting,
+	// the family still running, and no End-of-RIB received. This is the case
+	// nothing bounded - the session is back but the refresh never completes.
+	var peer *peer
+	assert.NoError(s1.mgmtOperation(func() error {
+		for _, p := range s1.neighborMap {
+			peer = p
+		}
+		conf := peer.fsm.pConf.ReadCopy()
+		conf.GracefulRestart.State.PeerRestarting = true
+		for i := range conf.AfiSafis {
+			conf.AfiSafis[i].MpGracefulRestart.State.Running = true
+			conf.AfiSafis[i].MpGracefulRestart.State.EndOfRibReceived = false
+		}
+		peer.fsm.pConf.Update(&conf)
+		return nil
+	}, false))
+	require.NotNil(t, peer)
+
+	assert.Positive(adjInCount(), "precondition: routes are still retained")
+
+	// Fire the timer the way time.AfterFunc would.
+	s1.staleRoutesExpiredFunc(peer, time.Second)()
+
+	assert.Equal(0, adjInCount(), "stale-routes-time expired, so the retained routes must be purged")
+}
+
+// The converse: a family that has completed its refresh has no stale routes, so
+// the timer must leave its adj-rib-in alone. Dropping it would discard live
+// routes, which is worse than retaining stale ones.
+//
+// This needs a real session with real routes. An earlier version asserted only
+// that the peer's state was untouched, which dropAdjRIBIn never modifies - so it
+// passed whether or not the EOR check existed, and proved nothing.
+func TestStaleRoutesTimeLeavesCompletedFamiliesAlone(t *testing.T) {
+	assert := assert.New(t)
+
+	afiSafis := []*api.AfiSafi{{
+		Config: &api.AfiSafiConfig{
+			Family:  apiutil.ToApiFamily(bgp.AFI_IP, bgp.SAFI_UNICAST),
+			Enabled: true,
+		},
+		MpGracefulRestart: &api.MpGracefulRestart{
+			Config: &api.MpGracefulRestartConfig{Enabled: true},
+		},
+	}}
+
+	s1 := NewBgpServer()
+	go s1.Serve()
+	assert.NoError(s1.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10789},
+	}))
+	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.NoError(s1.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport:       &api.Transport{PassiveMode: true},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120, StaleRoutesTime: 1},
+		AfiSafis:        afiSafis,
+	}}))
+
+	s2 := NewBgpServer()
+	go s2.Serve()
+	assert.NoError(s2.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(s1, api.PeerState_SESSION_STATE_ESTABLISHED)
+	assert.NoError(s2.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 1},
+		Transport:       &api.Transport{RemotePort: 10789},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120},
+		AfiSafis:        afiSafis,
+		Timers:          &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.79.0.0/24"))
+	assert.NoError(err)
+	nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr("0.0.0.0"))
+	assert.NoError(err)
+	_, err = s2.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{{
+		Family: bgp.RF_IPv4_UC,
+		Nlri:   nlri,
+		Attrs:  []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0), nh},
+	}}})
+	assert.NoError(err)
+
+	adjInCount := func() int {
+		n := 0
+		_ = s1.ListPath(apiutil.ListPathRequest{
+			TableType: api.TableType_TABLE_TYPE_ADJ_IN,
+			Family:    bgp.RF_IPv4_UC,
+			Name:      "127.0.0.1",
+		}, func(_ bgp.NLRI, _ []*apiutil.Path) { n++ })
+		return n
+	}
+	assert.Eventually(func() bool { return adjInCount() > 0 }, 15*time.Second, 200*time.Millisecond)
+
+	// Restarting, but the refresh for this family HAS completed.
+	var peer *peer
+	assert.NoError(s1.mgmtOperation(func() error {
+		for _, p := range s1.neighborMap {
+			peer = p
+		}
+		conf := peer.fsm.pConf.ReadCopy()
+		conf.GracefulRestart.State.PeerRestarting = true
+		for i := range conf.AfiSafis {
+			conf.AfiSafis[i].MpGracefulRestart.State.Running = true
+			conf.AfiSafis[i].MpGracefulRestart.State.EndOfRibReceived = true
+		}
+		peer.fsm.pConf.Update(&conf)
+		return nil
+	}, false))
+	require.NotNil(t, peer)
+
+	before := adjInCount()
+	assert.Positive(before, "precondition: there are routes that must survive")
+
+	s1.staleRoutesExpiredFunc(peer, time.Second)()
+
+	assert.Equal(before, adjInCount(),
+		"End-of-RIB was received, so these are live routes and must not be purged")
+}

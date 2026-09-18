@@ -1377,6 +1377,46 @@ func (s *BgpServer) handleRouteRefresh(peer *peer, e *fsmMsg) {
 // propagates the resulting withdrawals. The withdrawals are also reported to
 // pre-policy Adj-RIB-In watchers (BMP) before propagation so that the monitored
 // view is cleared; propagateUpdate itself only reaches post-policy watchers.
+// staleRoutesExpiredFunc purges routes still marked stale when the
+// stale-routes timer fires.
+//
+// Only families that have not produced an End-of-RIB are touched: a family that
+// has completed its refresh has no stale routes left to retain, and dropping
+// its adj-RIB-in would discard live routes. That check is made when the timer
+// fires rather than by cancelling the timer on EOR, because the EOR arrives on
+// the FSM goroutine and the purge has to run under the management lock anyway -
+// reading the state once, at the point of use, avoids a race between the two.
+func (s *BgpServer) staleRoutesExpiredFunc(peer *peer, d time.Duration) func() {
+	return func() {
+		//nolint: errcheck // the management operation logs its own failures
+		s.mgmtOperation(func() error {
+			conf := peer.fsm.pConf.ReadOnly()
+			if !conf.GracefulRestart.State.PeerRestarting {
+				// The restart completed, so there is nothing stale left.
+				return nil
+			}
+
+			stale := make([]bgp.Family, 0, len(conf.AfiSafis))
+			for _, af := range conf.AfiSafis {
+				if af.MpGracefulRestart.State.Running && !af.MpGracefulRestart.State.EndOfRibReceived {
+					stale = append(stale, af.State.Family)
+				}
+			}
+			if len(stale) == 0 {
+				return nil
+			}
+
+			peer.fsm.logger.Info("stale-routes-time expired, purging retained routes",
+				slog.String("Topic", "Peer"),
+				slog.String("Key", peer.ID()),
+				slog.Any("Duration", d),
+				slog.Any("Families", stale))
+			s.dropAdjRIBIn(peer, stale)
+			return nil
+		}, false)
+	}
+}
+
 func (s *BgpServer) dropAdjRIBIn(peer *peer, families []bgp.Family) {
 	dropped := peer.DropAll(families)
 	s.notifyAdjInWithdrawWatcher(peer, dropped)
@@ -1983,6 +2023,26 @@ func (s *BgpServer) handleFSMMessage(peer *peer, e *fsmMsg) {
 			peer.peerInfo.Store(peerInfo)
 
 			neighborAddress := conf.State.NeighborAddress
+
+			// RFC 4724 4.2 / OpenConfig stale-routes-time: an upper bound on how
+			// long stale routes are retained after the session comes back.
+			//
+			// The existing handling covers the other half - if the session does
+			// not re-establish within Restart Time, the stale routes go. Nothing
+			// bounded the case where it *does* re-establish and the restarting
+			// speaker then never sends End-of-RIB, which left the stale routes in
+			// place indefinitely with no timer to remove them.
+			//
+			// The field was accepted by both the TOML loader and the gRPC
+			// converters and read by nothing, so configuring it did nothing at
+			// all.
+			if conf.GracefulRestart.State.PeerRestarting {
+				if t := conf.GracefulRestart.Config.StaleRoutesTime; t > 0 {
+					d := time.Duration(t * float64(time.Second))
+					time.AfterFunc(d, s.staleRoutesExpiredFunc(peer, d))
+				}
+			}
+
 			deferralExpiredFunc := func(family bgp.Family, deferralTime time.Duration) func() {
 				//nolint: errcheck // ignore error
 				return func() {
