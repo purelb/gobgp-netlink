@@ -18,6 +18,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,10 +27,12 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/dgryski/go-farm"
 	"github.com/eapache/channels"
 	"github.com/google/uuid"
@@ -1374,6 +1377,46 @@ func (s *BgpServer) handleRouteRefresh(peer *peer, e *fsmMsg) {
 // propagates the resulting withdrawals. The withdrawals are also reported to
 // pre-policy Adj-RIB-In watchers (BMP) before propagation so that the monitored
 // view is cleared; propagateUpdate itself only reaches post-policy watchers.
+// staleRoutesExpiredFunc purges routes still marked stale when the
+// stale-routes timer fires.
+//
+// Only families that have not produced an End-of-RIB are touched: a family that
+// has completed its refresh has no stale routes left to retain, and dropping
+// its adj-RIB-in would discard live routes. That check is made when the timer
+// fires rather than by cancelling the timer on EOR, because the EOR arrives on
+// the FSM goroutine and the purge has to run under the management lock anyway -
+// reading the state once, at the point of use, avoids a race between the two.
+func (s *BgpServer) staleRoutesExpiredFunc(peer *peer, d time.Duration) func() {
+	return func() {
+		//nolint: errcheck // the management operation logs its own failures
+		s.mgmtOperation(func() error {
+			conf := peer.fsm.pConf.ReadOnly()
+			if !conf.GracefulRestart.State.PeerRestarting {
+				// The restart completed, so there is nothing stale left.
+				return nil
+			}
+
+			stale := make([]bgp.Family, 0, len(conf.AfiSafis))
+			for _, af := range conf.AfiSafis {
+				if af.MpGracefulRestart.State.Running && !af.MpGracefulRestart.State.EndOfRibReceived {
+					stale = append(stale, af.State.Family)
+				}
+			}
+			if len(stale) == 0 {
+				return nil
+			}
+
+			peer.fsm.logger.Info("stale-routes-time expired, purging retained routes",
+				slog.String("Topic", "Peer"),
+				slog.String("Key", peer.ID()),
+				slog.Any("Duration", d),
+				slog.Any("Families", stale))
+			s.dropAdjRIBIn(peer, stale)
+			return nil
+		}, false)
+	}
+}
+
 func (s *BgpServer) dropAdjRIBIn(peer *peer, families []bgp.Family) {
 	dropped := peer.DropAll(families)
 	s.notifyAdjInWithdrawWatcher(peer, dropped)
@@ -1980,6 +2023,26 @@ func (s *BgpServer) handleFSMMessage(peer *peer, e *fsmMsg) {
 			peer.peerInfo.Store(peerInfo)
 
 			neighborAddress := conf.State.NeighborAddress
+
+			// RFC 4724 4.2 / OpenConfig stale-routes-time: an upper bound on how
+			// long stale routes are retained after the session comes back.
+			//
+			// The existing handling covers the other half - if the session does
+			// not re-establish within Restart Time, the stale routes go. Nothing
+			// bounded the case where it *does* re-establish and the restarting
+			// speaker then never sends End-of-RIB, which left the stale routes in
+			// place indefinitely with no timer to remove them.
+			//
+			// The field was accepted by both the TOML loader and the gRPC
+			// converters and read by nothing, so configuring it did nothing at
+			// all.
+			if conf.GracefulRestart.State.PeerRestarting {
+				if t := conf.GracefulRestart.Config.StaleRoutesTime; t > 0 {
+					d := time.Duration(t * float64(time.Second))
+					time.AfterFunc(d, s.staleRoutesExpiredFunc(peer, d))
+				}
+			}
+
 			deferralExpiredFunc := func(family bgp.Family, deferralTime time.Duration) func() {
 				//nolint: errcheck // ignore error
 				return func() {
@@ -2870,7 +2933,10 @@ func (s *BgpServer) StartBgp(ctx context.Context, r *api.StartBgpRequest) error 
 			return fmt.Errorf("router-id must be an IPv4 address: %s", g.RouterId)
 		}
 
-		c := newGlobalFromAPIStruct(g)
+		c, err := newGlobalFromAPIStruct(g)
+		if err != nil {
+			return err
+		}
 		if err := oc.SetDefaultGlobalConfigValues(c); err != nil {
 			return err
 		}
@@ -3619,6 +3685,17 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 		for _, addr := range g.Config.LocalAddressList {
 			l = append(l, addr.String())
 		}
+		// Everything StartBgp accepts is echoed back. Five of these were applied
+		// and never reported - families, route_selection_options,
+		// default_route_distance, confederation and graceful_restart - so a
+		// controller had no way to detect drift in any of them, or even to
+		// confirm what it had sent took effect.
+		families := make([]uint32, 0, len(g.AfiSafis))
+		for _, af := range g.AfiSafis {
+			if i, ok := oc.AfiSafiTypeToIntMap[af.Config.AfiSafiName]; ok {
+				families = append(families, uint32(i))
+			}
+		}
 		rsp = &api.GetBgpResponse{
 			Global: &api.Global{
 				Asn:              g.Config.As,
@@ -3627,11 +3704,147 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 				ListenAddresses:  l,
 				UseMultiplePaths: g.UseMultiplePaths.Config.Enabled,
 				BindToDevice:     g.Config.BindToDevice,
+				Families:         families,
+				RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
+					AlwaysCompareMed:         g.RouteSelectionOptions.Config.AlwaysCompareMed,
+					IgnoreAsPathLength:       g.RouteSelectionOptions.Config.IgnoreAsPathLength,
+					ExternalCompareRouterId:  g.RouteSelectionOptions.Config.ExternalCompareRouterId,
+					AdvertiseInactiveRoutes:  g.RouteSelectionOptions.Config.AdvertiseInactiveRoutes,
+					EnableAigp:               g.RouteSelectionOptions.Config.EnableAigp,
+					IgnoreNextHopIgpMetric:   g.RouteSelectionOptions.Config.IgnoreNextHopIgpMetric,
+					DisableBestPathSelection: g.RouteSelectionOptions.Config.DisableBestPathSelection,
+				},
+				DefaultRouteDistance: &api.DefaultRouteDistance{
+					ExternalRouteDistance: uint32(g.DefaultRouteDistance.Config.ExternalRouteDistance),
+					InternalRouteDistance: uint32(g.DefaultRouteDistance.Config.InternalRouteDistance),
+				},
+				Confederation: &api.Confederation{
+					Enabled:      g.Confederation.Config.Enabled,
+					Identifier:   g.Confederation.Config.Identifier,
+					MemberAsList: g.Confederation.Config.MemberAsList,
+				},
+				GracefulRestart: &api.GracefulRestart{
+					Enabled:             g.GracefulRestart.Config.Enabled,
+					RestartTime:         uint32(g.GracefulRestart.Config.RestartTime),
+					StaleRoutesTime:     uint32(g.GracefulRestart.Config.StaleRoutesTime),
+					HelperOnly:          g.GracefulRestart.Config.HelperOnly,
+					DeferralTime:        uint32(g.GracefulRestart.Config.DeferralTime),
+					NotificationEnabled: g.GracefulRestart.Config.NotificationEnabled,
+					LonglivedEnabled:    g.GracefulRestart.Config.LongLivedEnabled,
+				},
 			},
 		}
 		return nil
 	}, false)
 	return rsp, err
+}
+
+// GetRunningConfig returns the daemon's complete running configuration as text.
+//
+// s.bgpConfig on its own is NOT the running configuration: nothing appends
+// API-added peers or peer groups to it, so a dump of it alone silently omits
+// every peer configured over gRPC - which is worse than no dump, because it
+// looks complete. The live peers are in neighborMap and the groups in
+// peerGroupMap, and they are composed back in here.
+//
+// The peer config taken is pConf, which is what the FSM actually applies, so
+// this reflects defaults and peer-group inheritance as resolved rather than as
+// submitted.
+func (s *BgpServer) GetRunningConfig(ctx context.Context, r *api.GetRunningConfigRequest) (*api.GetRunningConfigResponse, error) {
+	if r == nil {
+		return nil, fmt.Errorf("nil request")
+	}
+
+	var out string
+	err := s.mgmtOperation(func() error {
+		cfg := s.bgpConfig
+
+		cfg.Neighbors = make([]oc.Neighbor, 0, len(s.neighborMap))
+		for _, peer := range s.neighborMap {
+			cfg.Neighbors = append(cfg.Neighbors, peer.fsm.pConf.ReadCopy())
+		}
+		slices.SortFunc(cfg.Neighbors, func(a, b oc.Neighbor) int {
+			return strings.Compare(a.State.NeighborAddress.String(), b.State.NeighborAddress.String())
+		})
+
+		cfg.PeerGroups = make([]oc.PeerGroup, 0, len(s.peerGroupMap))
+		for _, pg := range s.peerGroupMap {
+			if pg.Conf != nil {
+				cfg.PeerGroups = append(cfg.PeerGroups, *pg.Conf)
+			}
+		}
+		slices.SortFunc(cfg.PeerGroups, func(a, b oc.PeerGroup) int {
+			return strings.Compare(a.Config.PeerGroupName, b.Config.PeerGroupName)
+		})
+
+		redactRunningConfig(&cfg)
+
+		var err error
+		out, err = marshalRunningConfig(&cfg, r.Format)
+		return err
+	}, false)
+	if err != nil {
+		return nil, err
+	}
+	return &api.GetRunningConfigResponse{Config: out}, nil
+}
+
+// redactRunningConfig replaces secrets with a marker that still says whether one
+// is configured. Reporting "" for a set password would make an authenticated
+// session look unauthenticated, which is the more dangerous way to be wrong.
+const redactedMarker = "<redacted>"
+
+func redactRunningConfig(cfg *oc.Bgp) {
+	redact := func(p *string) {
+		if *p != "" {
+			*p = redactedMarker
+		}
+	}
+	for i := range cfg.Neighbors {
+		redact(&cfg.Neighbors[i].Config.AuthPassword)
+		redact(&cfg.Neighbors[i].State.AuthPassword)
+	}
+	for i := range cfg.PeerGroups {
+		redact(&cfg.PeerGroups[i].Config.AuthPassword)
+		redact(&cfg.PeerGroups[i].State.AuthPassword)
+	}
+}
+
+func marshalRunningConfig(cfg *oc.Bgp, format api.ConfigFormat) (string, error) {
+	switch format {
+	case api.ConfigFormat_CONFIG_FORMAT_TOML:
+		// Route through JSON rather than encoding the struct directly. The oc
+		// types are generated with mapstructure and json tags but no toml tags,
+		// so a direct encode emits Go field names - "RouterId", "PeerGroups" -
+		// and the result is not loadable as a gobgpd config file, which is the
+		// only reason to offer TOML at all. The json names match the
+		// mapstructure names the config loader reads, so this produces the real
+		// key names.
+		b, err := json.Marshal(cfg)
+		if err != nil {
+			return "", fmt.Errorf("failed to encode running config: %w", err)
+		}
+		var generic map[string]any
+		if err := json.Unmarshal(b, &generic); err != nil {
+			return "", fmt.Errorf("failed to re-read running config: %w", err)
+		}
+		var buf bytes.Buffer
+		if err := toml.NewEncoder(&buf).Encode(generic); err != nil {
+			return "", fmt.Errorf("failed to encode running config as TOML: %w", err)
+		}
+		return buf.String(), nil
+	default:
+		// Not MarshalIndent: it HTML-escapes, which renders the redaction marker
+		// as "\u003credacted\u003e". This output is read by people.
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(cfg); err != nil {
+			return "", fmt.Errorf("failed to encode running config as JSON: %w", err)
+		}
+		return strings.TrimRight(buf.String(), "\n"), nil
+	}
 }
 
 func (s *BgpServer) ListDynamicNeighbor(ctx context.Context, r *api.ListDynamicNeighborRequest, fn func(neighbor *api.DynamicNeighbor)) error {
@@ -3791,6 +4004,13 @@ func (s *BgpServer) addPeerGroup(c *oc.PeerGroup) error {
 		slog.String("Topic", "Peer"),
 		slog.String("Name", name))
 
+	// Fill State. Nothing did, so ListPeerGroup's Info block reported zeros for
+	// every field it carries - peer_asn 0, and type INTERNAL for an eBGP group,
+	// which is worse than absent because it reads as a real answer.
+	if err := oc.SetPeerGroupStateValues(c, &s.bgpConfig.Global); err != nil {
+		return err
+	}
+
 	s.peerGroupMap[c.Config.PeerGroupName] = newPeerGroup(c)
 
 	return nil
@@ -3865,6 +4085,20 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 					slog.Any("Families", inert))
 			}
 		}
+	}
+
+	// transport.mtu-discovery is declared in the proto and in the generated
+	// config model and is referenced nowhere else in the tree: no converter
+	// stores it, and no socket option is set from it. Accepting it silently
+	// leaves an operator believing path MTU discovery is on.
+	//
+	// Warned rather than rejected, because rejecting would break any config
+	// that already sets it - and those configs have been getting nothing all
+	// along, so an error now would be a new failure for no new benefit.
+	if c.Transport.Config.MtuDiscovery {
+		s.logger.Warn("transport mtu-discovery is accepted but not implemented; it has no effect. Use transport tcp-mss to constrain the segment size",
+			slog.String("Topic", "config"),
+			slog.String("Key", addr))
 	}
 
 	if vrf := c.Config.Vrf; vrf != "" {
@@ -4208,6 +4442,9 @@ func (s *BgpServer) updatePeerGroup(pg *oc.PeerGroup) (needsSoftResetIn bool, er
 	_, ok := s.peerGroupMap[name]
 	if !ok {
 		return false, fmt.Errorf("peer-group %s doesn't exist", name)
+	}
+	if err := oc.SetPeerGroupStateValues(pg, &s.bgpConfig.Global); err != nil {
+		return false, err
 	}
 	s.peerGroupMap[name].Conf = pg
 
@@ -6208,6 +6445,11 @@ func (s *BgpServer) GetNetlink(ctx context.Context, in *api.GetNetlinkRequest) (
 		Vrf:           s.bgpConfig.Netlink.Import.Vrf,
 		Interfaces:    slices.Clone(s.bgpConfig.Netlink.Import.InterfaceList),
 		VrfImports:    vrfImports,
+		// Echo the export settings back. EnableNetlinkExport accepts and applies
+		// both, and nothing reported either, so a controller could set them and
+		// had no way to confirm or detect drift.
+		DampeningInterval: s.bgpConfig.Netlink.Export.DampeningInterval,
+		RouteProtocol:     s.bgpConfig.Netlink.Export.RouteProtocol,
 	}, nil
 }
 

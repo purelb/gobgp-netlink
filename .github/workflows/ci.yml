@@ -18,6 +18,35 @@ jobs:
           go test -v -race -timeout 240s ./...
           if [ "$(go env GOARCH)" = "amd64" ]; then go test -v -race github.com/osrg/gobgp/v4/pkg/packet/bgp -run ^Test_RaceCondition$; else echo 'skip'; fi
 
+  api-conformance:
+    name: api conformance
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "stable"
+
+      # The gRPC API conformance suite, as its own job so a failure names
+      # itself rather than being one line inside the unit output.
+      #
+      # It is driven from the proto descriptors, so it covers fields nobody
+      # remembered to test. Four properties, each catching what the others
+      # cannot:
+      #
+      #   round-trip - every accepted field comes back
+      #   boundary   - an accepted value comes back unchanged, not truncated
+      #   effect     - the setting changes what goes on the wire
+      #   wire       - all of the above over a real gRPC connection
+      #
+      # A failure here usually means a proto field was added without a read
+      # path, or a per-peer setting was added without an effect test. Both are
+      # defects that have shipped from this repo before.
+      - name: API conformance
+        run: |
+          go test -v -race -timeout 300s ./pkg/server/ \
+            -run 'TestConformance|TestEffect|TestEveryPeerConfFieldIsClassified|TestEveryPeerSubMessageIsCovered|TestRegisteredWireEffectsAllRun|TestNilFamilyIsRejectedNotFatal'
+
   # Note: 32-bit builds removed as netlink feature is Linux-only and targets modern 64-bit systems
 
   protobuf-check:
@@ -828,6 +857,7 @@ jobs:
     needs:
       - unit
       - unit386
+      - api-conformance
       - tcp-md5
       - protobuf-check
       - yang-check
@@ -869,7 +899,7 @@ jobs:
     steps:
       - name: Check all jobs passed
         run: |
-          results="${{ needs.unit.result }} ${{ needs.unit386.result }} ${{ needs.tcp-md5.result }} ${{ needs.protobuf-check.result }} ${{ needs.yang-check.result }} ${{ needs.golangci.result }} ${{ needs.security.result }} ${{ needs.embedded.result }} ${{ needs.lintdoc.result }} ${{ needs.build.result }} ${{ needs.router.result }} ${{ needs.evpn.result }} ${{ needs.flowspec.result }} ${{ needs.global-policy.result }} ${{ needs.graceful-restart.result }} ${{ needs.ibgp.result }} ${{ needs.rr.result }} ${{ needs.as2.result }} ${{ needs.ipv4-v6.result }} ${{ needs.malformed.result }} ${{ needs.rs-policy-grpc.result }} ${{ needs.rs-policy.result }} ${{ needs.softreset.result }} ${{ needs.rs1.result }} ${{ needs.rs2.result }} ${{ needs.llgr.result }} ${{ needs.vrf-neighbor1.result }} ${{ needs.vrf-neighbor2.result }} ${{ needs.rtc.result }} ${{ needs.unnumbered.result }} ${{ needs.aspath.result }} ${{ needs.addpath.result }} ${{ needs.malformed-handling.result }} ${{ needs.confederation.result }} ${{ needs.zebra.result }} ${{ needs.zebra-nht.result }} ${{ needs.zapi-v3.result }} ${{ needs.zapi-v3-multipath.result }} ${{ needs.mup.result }} ${{ needs.netlink.result }}"
+          results="${{ needs.unit.result }} ${{ needs.unit386.result }} ${{ needs.api-conformance.result }} ${{ needs.tcp-md5.result }} ${{ needs.protobuf-check.result }} ${{ needs.yang-check.result }} ${{ needs.golangci.result }} ${{ needs.security.result }} ${{ needs.embedded.result }} ${{ needs.lintdoc.result }} ${{ needs.build.result }} ${{ needs.router.result }} ${{ needs.evpn.result }} ${{ needs.flowspec.result }} ${{ needs.global-policy.result }} ${{ needs.graceful-restart.result }} ${{ needs.ibgp.result }} ${{ needs.rr.result }} ${{ needs.as2.result }} ${{ needs.ipv4-v6.result }} ${{ needs.malformed.result }} ${{ needs.rs-policy-grpc.result }} ${{ needs.rs-policy.result }} ${{ needs.softreset.result }} ${{ needs.rs1.result }} ${{ needs.rs2.result }} ${{ needs.llgr.result }} ${{ needs.vrf-neighbor1.result }} ${{ needs.vrf-neighbor2.result }} ${{ needs.rtc.result }} ${{ needs.unnumbered.result }} ${{ needs.aspath.result }} ${{ needs.addpath.result }} ${{ needs.malformed-handling.result }} ${{ needs.confederation.result }} ${{ needs.zebra.result }} ${{ needs.zebra-nht.result }} ${{ needs.zapi-v3.result }} ${{ needs.zapi-v3-multipath.result }} ${{ needs.mup.result }} ${{ needs.netlink.result }}"
           for result in $results; do
             if [[ "$result" != "success" ]]; then
               echo "One or more jobs failed"

@@ -16,6 +16,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -72,6 +73,34 @@ func TestNewPeerGroupFromAPIStructRejectsInvalidAllowOwnAsn(t *testing.T) {
 		},
 	})
 	assert.ErrorContains(t, err, "allow_own_asn is out of range")
+}
+
+// The neighbour path had no range check while the peer-group path did, so
+// allow_own_asn=256 was accepted and stored as 0. 0 means "do not allow our own
+// ASN at all", so an operator asking for the loosest setting silently got the
+// strictest - the peer then rejected paths it was meant to accept.
+func TestNewNeighborFromAPIStructRejectsInvalidAllowOwnAsn(t *testing.T) {
+	for _, v := range []uint32{256, 300, 1 << 16} {
+		_, err := newNeighborFromAPIStruct(&api.Peer{
+			Conf: &api.PeerConf{
+				NeighborAddress: "10.0.0.1",
+				PeerAsn:         65001,
+				AllowOwnAsn:     v,
+			},
+		})
+		assert.ErrorContains(t, err, "allow_own_asn is out of range", "value %d", v)
+	}
+
+	// The boundary is still accepted, and is not silently truncated.
+	n, err := newNeighborFromAPIStruct(&api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "10.0.0.1",
+			PeerAsn:         65001,
+			AllowOwnAsn:     255,
+		},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, uint8(255), n.AsPathOptions.Config.AllowOwnAs)
 }
 
 func TestToPathApi(t *testing.T) {
@@ -691,5 +720,90 @@ func TestToPathAPINetlinkPresenceIsMeaningful(t *testing.T) {
 		// The nil-safe getters still answer correctly for such a path.
 		assert.False(t, p.GetNetlink().GetIsNetlink())
 		assert.Empty(t, p.GetNetlink().GetIfName())
+	})
+}
+
+// Global.families are indexes into the AfiSafiType list, not afi<<16|safi and
+// not the RouteFamily constants the packet library exports. An unknown index
+// used to yield the empty AfiSafiType, whose GetFamily error was discarded, so
+// the daemon started having enabled nothing and said nothing about it.
+func TestNewGlobalFromAPIStructRejectsUnknownFamilies(t *testing.T) {
+	// 65537 is bgp.RF_IPv4_UC - the obvious value to reach for, and wrong here.
+	for _, f := range []uint32{65537, 1 << 20, 999} {
+		_, err := newGlobalFromAPIStruct(&api.Global{
+			Asn: 65000, RouterId: "1.1.1.1", Families: []uint32{f},
+		})
+		assert.ErrorContains(t, err, "unknown address family", "value %d", f)
+	}
+
+	// Valid indexes still work and resolve to the right family.
+	g, err := newGlobalFromAPIStruct(&api.Global{
+		Asn: 65000, RouterId: "1.1.1.1", Families: []uint32{0, 1},
+	})
+	assert.NoError(t, err)
+	if assert.Len(t, g.AfiSafis, 2) {
+		assert.Equal(t, oc.AFI_SAFI_TYPE_IPV4_UNICAST, g.AfiSafis[0].Config.AfiSafiName)
+		assert.Equal(t, bgp.RF_IPv4_UC, g.AfiSafis[0].State.Family)
+		assert.Equal(t, oc.AFI_SAFI_TYPE_IPV6_UNICAST, g.AfiSafis[1].Config.AfiSafiName)
+		assert.Equal(t, bgp.RF_IPv6_UC, g.AfiSafis[1].State.Family)
+	}
+
+	// Every index the map defines resolves at this layer, so the rejection above
+	// is specifically for indexes outside it. Anything the map does define must
+	// keep working - this is what stops the validation being over-tightened into
+	// a regression.
+	for i := range oc.IntToAfiSafiTypeMap {
+		_, err := newGlobalFromAPIStruct(&api.Global{
+			Asn: 65000, RouterId: "1.1.1.1", Families: []uint32{uint32(i)},
+		})
+		assert.NoError(t, err, "index %d is in IntToAfiSafiTypeMap and must be accepted", i)
+	}
+}
+
+// A nil Family inside an otherwise valid request used to panic on the Serve
+// goroutine, inside handleMGMTOp, where nothing recovers - so four lines of
+// gRPC from any client stopped the daemon.
+//
+// readAfiSafiConfigFromAPIStruct nil-checked its two arguments and then
+// dereferenced a.Family regardless. api2apiutilPath and api2Path had the same
+// shape for path.Family.
+//
+// Found by the conformance suite filling every field of api.Peer, which is the
+// argument for generating these requests rather than writing them by hand:
+// nobody writes an AfiSafi with a config and no family on purpose.
+func TestNilFamilyIsRejectedNotFatal(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+
+	t.Run("AddPeer with an afi-safi that has no family", func(t *testing.T) {
+		// The assertion is that we get here at all: before the guard this
+		// panicked and took the process with it.
+		err := s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+			Conf:     &api.PeerConf{NeighborAddress: "10.91.0.1", PeerAsn: 65001},
+			AfiSafis: []*api.AfiSafi{{Config: &api.AfiSafiConfig{Enabled: true}}},
+		}})
+		t.Logf("AddPeer returned %v (the point is that it returned)", err)
+	})
+
+	t.Run("daemon still serves afterwards", func(t *testing.T) {
+		_, err := s.GetBgp(context.Background(), &api.GetBgpRequest{})
+		require.NoError(t, err, "the management loop must still be alive")
+	})
+
+	// The path converters had the same shape. These are the functions the gRPC
+	// layer calls before anything reaches BgpServer, so they are where a nil
+	// family has to be turned into an error.
+	t.Run("api2apiutilPath with no family", func(t *testing.T) {
+		_, err := api2apiutilPath(&api.Path{
+			Nlri: &api.NLRI{Nlri: &api.NLRI_Prefix{Prefix: &api.IPAddressPrefix{
+				Prefix: "10.92.0.0", PrefixLen: 24,
+			}}},
+		})
+		require.Error(t, err, "a path with no family must be rejected, not dereferenced")
+		assert.Contains(t, err.Error(), "family")
 	})
 }

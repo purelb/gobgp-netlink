@@ -559,6 +559,22 @@ func bfdDiagnosticCodeToAPI(d BfdDiagnosticCode) api.BfdDiagnosticCode {
 	return api.BfdDiagnosticCode(i)
 }
 
+// removePrivateToAPI maps the internal remove-private-as option to the API
+// enum. It is a function rather than an inline switch in each converter because
+// the peer path had one and the peer-group path had none: the group stored and
+// applied the setting but never reported it, so a controller diffing desired
+// against observed saw a permanent mismatch and re-issued UpdatePeerGroup
+// forever - which loops updateNeighbor over every member.
+func removePrivateToAPI(o RemovePrivateAsOption) api.RemovePrivate {
+	switch o {
+	case REMOVE_PRIVATE_AS_OPTION_ALL:
+		return api.RemovePrivate_REMOVE_PRIVATE_ALL
+	case REMOVE_PRIVATE_AS_OPTION_REPLACE:
+		return api.RemovePrivate_REMOVE_PRIVATE_REPLACE
+	}
+	return api.RemovePrivate_REMOVE_PRIVATE_UNSPECIFIED
+}
+
 func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 	afiSafis := make([]*api.AfiSafi, 0, len(pconf.AfiSafis))
 	for _, f := range pconf.AfiSafis {
@@ -581,13 +597,7 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 	if err != nil {
 		return nil
 	}
-	var removePrivate api.RemovePrivate
-	switch pconf.Config.RemovePrivateAs {
-	case REMOVE_PRIVATE_AS_OPTION_ALL:
-		removePrivate = api.RemovePrivate_REMOVE_PRIVATE_ALL
-	case REMOVE_PRIVATE_AS_OPTION_REPLACE:
-		removePrivate = api.RemovePrivate_REMOVE_PRIVATE_REPLACE
-	}
+	removePrivate := removePrivateToAPI(pconf.Config.RemovePrivateAs)
 	var admin_state api.PeerState_AdminState
 	switch s.AdminState {
 	case ADMIN_STATE_UP:
@@ -708,6 +718,8 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 				HoldTime:               uint64(timer.Config.HoldTime),
 				KeepaliveInterval:      uint64(timer.Config.KeepaliveInterval),
 				IdleHoldTimeAfterReset: uint64(timer.Config.IdleHoldTimeAfterReset),
+				// Accepted by both converters and reported by neither until now.
+				MinimumAdvertisementInterval: uint64(timer.Config.MinimumAdvertisementInterval),
 			},
 			State: &api.TimersState{
 				KeepaliveInterval:  uint64(timer.State.KeepaliveInterval),
@@ -731,6 +743,7 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			DeferralTime:        uint32(pconf.GracefulRestart.Config.DeferralTime),
 			NotificationEnabled: pconf.GracefulRestart.Config.NotificationEnabled,
 			LonglivedEnabled:    pconf.GracefulRestart.Config.LongLivedEnabled,
+			StaleRoutesTime:     uint32(pconf.GracefulRestart.Config.StaleRoutesTime),
 			LocalRestarting:     pconf.GracefulRestart.State.LocalRestarting,
 			PeerRestartTime:     uint32(pconf.GracefulRestart.State.PeerRestartTime),
 			PeerRestarting:      pconf.GracefulRestart.State.PeerRestarting,
@@ -740,6 +753,7 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			LocalPort:     uint32(pconf.Transport.Config.LocalPort),
 			LocalAddress:  localAddress.String(),
 			PassiveMode:   pconf.Transport.Config.PassiveMode,
+			MtuDiscovery:  pconf.Transport.Config.MtuDiscovery,
 			BindInterface: pconf.Transport.Config.BindInterface,
 			TcpMss:        uint32(pconf.Transport.Config.TcpMss),
 			IpTos:         uint32(pconf.Transport.Config.IpTos),
@@ -848,6 +862,7 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			AuthPassword:         pconf.Config.AuthPassword,
 			RouteFlapDamping:     pconf.Config.RouteFlapDamping,
 			SendCommunity:        SendCommunityToAPI(pconf.Config.SendCommunity),
+			RemovePrivate:        removePrivateToAPI(pconf.Config.RemovePrivateAs),
 			Description:          pconf.Config.Description,
 			PeerGroupName:        pconf.Config.PeerGroupName,
 			SendSoftwareVersion:  pconf.Config.SendSoftwareVersion,
@@ -876,6 +891,8 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 				HoldTime:               uint64(timer.Config.HoldTime),
 				KeepaliveInterval:      uint64(timer.Config.KeepaliveInterval),
 				IdleHoldTimeAfterReset: uint64(timer.Config.IdleHoldTimeAfterReset),
+				// Accepted by both converters and reported by neither until now.
+				MinimumAdvertisementInterval: uint64(timer.Config.MinimumAdvertisementInterval),
 			},
 			State: &api.TimersState{
 				KeepaliveInterval:  uint64(timer.State.KeepaliveInterval),
@@ -899,12 +916,14 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			DeferralTime:        uint32(pconf.GracefulRestart.Config.DeferralTime),
 			NotificationEnabled: pconf.GracefulRestart.Config.NotificationEnabled,
 			LonglivedEnabled:    pconf.GracefulRestart.Config.LongLivedEnabled,
+			StaleRoutesTime:     uint32(pconf.GracefulRestart.Config.StaleRoutesTime),
 			LocalRestarting:     pconf.GracefulRestart.State.LocalRestarting,
 		},
 		Transport: &api.Transport{
 			RemotePort:    uint32(pconf.Transport.Config.RemotePort),
 			LocalAddress:  pconf.Transport.Config.LocalAddress.String(),
 			PassiveMode:   pconf.Transport.Config.PassiveMode,
+			MtuDiscovery:  pconf.Transport.Config.MtuDiscovery,
 			BindInterface: pconf.Transport.Config.BindInterface,
 			TcpMss:        uint32(pconf.Transport.Config.TcpMss),
 			IpTos:         uint32(pconf.Transport.Config.IpTos),

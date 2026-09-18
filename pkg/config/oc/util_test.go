@@ -599,3 +599,35 @@ func TestNeedsResendOpenMessageSendCommunityCarveOut(t *testing.T) {
 		assert.True(t, base().NeedsResendOpenMessage(n))
 	})
 }
+
+// remove-private-as was stored and applied for peer groups but never reported
+// by ListPeerGroup, while the peer path reported it correctly. A controller
+// diffing desired against observed therefore saw a permanent mismatch and
+// re-issued UpdatePeerGroup forever - which loops updateNeighbor over every
+// member of the group.
+//
+// The assertion is symmetry: whatever the peer path reports for a given
+// setting, the peer-group path must report too.
+func TestRemovePrivateIsReportedSymmetrically(t *testing.T) {
+	for _, tt := range []struct {
+		in   RemovePrivateAsOption
+		want api.RemovePrivate
+	}{
+		{"", api.RemovePrivate_REMOVE_PRIVATE_UNSPECIFIED},
+		{REMOVE_PRIVATE_AS_OPTION_ALL, api.RemovePrivate_REMOVE_PRIVATE_ALL},
+		{REMOVE_PRIVATE_AS_OPTION_REPLACE, api.RemovePrivate_REMOVE_PRIVATE_REPLACE},
+	} {
+		pg := &PeerGroup{}
+		pg.Config.PeerGroupName = "g"
+		pg.Config.PeerAs = 65001
+		pg.Config.RemovePrivateAs = tt.in
+
+		got := NewPeerGroupFromConfigStruct(pg)
+		require.NotNil(t, got)
+		require.NotNil(t, got.Conf)
+		assert.Equal(t, tt.want, got.Conf.RemovePrivate, "peer group reports %q", tt.in)
+
+		// And the shared helper is what the peer path uses, so they cannot drift.
+		assert.Equal(t, tt.want, removePrivateToAPI(tt.in), "helper for %q", tt.in)
+	}
+}
