@@ -59,6 +59,23 @@ var knownAsymmetries = map[string]string{
 	"Global.graceful_restart.peer_restart_time": "per-session state from the peer's GR capability, not config",
 	"Global.graceful_restart.peer_restarting":   "per-session state, not config",
 	"Global.graceful_restart.local_restarting":  "per-session state, not config",
+	"Peer.graceful_restart.peer_restart_time":   "per-session state, as above",
+	"Peer.graceful_restart.peer_restarting":     "per-session state, as above",
+
+	// Accepted by the API and implemented nowhere. These are not gaps in a read
+	// path: there is nothing to report, because nothing stores or acts on them.
+	// Recorded rather than quietly skipped, so the gap stays visible to whoever
+	// reads this next.
+	//
+	// stale_routes_time is wired at the global level - newGlobalFromAPIStruct
+	// stores it and NewGlobalFromConfigStruct reports it - but not per peer,
+	// although OpenConfig defines it at both levels.
+	//
+	// mtu_discovery exists in api.Transport and in the generated config struct
+	// and is referenced nowhere else in the tree: no converter stores it, and no
+	// socket option is set from it.
+	"Peer.graceful_restart.stale_routes_time": "accepted per-peer but never stored; only the global form is implemented",
+	"Peer.transport.mtu_discovery":            "declared in the proto and the config model, implemented nowhere",
 }
 
 // fieldValues overrides the generic filler for fields whose valid domain is
@@ -71,8 +88,18 @@ var knownAsymmetries = map[string]string{
 var fieldValues = map[string]uint64{
 	"PeerConf.send_community":      2, // COMMUNITY_TYPE_BOTH; valid range is 0-3
 	"PeerGroupConf.send_community": 2,
+	"Peer.conf.send_community":     2, // the whole-peer test reaches it by this path
 	"PeerConf.allow_own_asn":       3, // uint8 in the internal model
 	"PeerGroupConf.allow_own_asn":  3,
+
+	// BFD intervals are in MICROSECONDS with a 300ms floor, and the port must
+	// be a real one. The daemon validates all three, so the generic 7 is
+	// rejected - correctly, which is why these are overridden rather than
+	// skipped: the round trip is still worth asserting.
+	"Peer.bfd.desired_minimum_tx_interval": 300000,
+	"Peer.bfd.required_minimum_receive":    300000,
+	"Peer.bfd.port":                        3784,
+	"Peer.bfd.detection_multiplier":        3,
 }
 
 // fillMessage sets every field of a message to a distinctive non-zero value, so
@@ -105,6 +132,10 @@ func fillMessage(path string, m protoreflect.Message, skip map[string]bool) {
 			switch fd.Kind() {
 			case protoreflect.Uint32Kind:
 				l.Append(protoreflect.ValueOfUint32(uint32(v)))
+			case protoreflect.MessageKind:
+				e := l.NewElement()
+				fillMessage(name, e.Message(), skip)
+				l.Append(e)
 			case protoreflect.StringKind:
 				// Left alone: string lists are addresses, interfaces and policy
 				// names, none of which accept an arbitrary value.
@@ -254,4 +285,143 @@ func TestConformanceGlobalRoundTrip(t *testing.T) {
 	require.NotNil(t, rsp.Global)
 
 	compareRoundTrip(t, "Global", g.ProtoReflect(), rsp.Global.ProtoReflect())
+}
+
+// peerSubMessages are the configuration-bearing parts of api.Peer. Listed
+// explicitly so that TestEveryPeerSubMessageIsCovered can fail when a new one
+// is added to the proto and nobody extends the round-trip below.
+var peerSubMessages = map[string]string{
+	"apply_policy":     "covered by TestConformanceWholePeerRoundTrip",
+	"conf":             "covered by TestConformancePeerConfRoundTrip and the whole-peer test",
+	"ebgp_multihop":    "covered by TestConformanceWholePeerRoundTrip",
+	"route_reflector":  "covered by TestConformanceWholePeerRoundTrip",
+	"timers":           "covered by TestConformanceWholePeerRoundTrip",
+	"transport":        "covered by TestConformanceWholePeerRoundTrip",
+	"route_server":     "covered by TestConformanceWholePeerRoundTrip",
+	"graceful_restart": "covered by TestConformanceWholePeerRoundTrip",
+	"afi_safis":        "covered by TestConformanceWholePeerRoundTrip",
+	"ttl_security":     "covered by TestConformanceTtlSecurityRoundTrip; excluded from the whole-peer test because it is mutually exclusive with ebgp_multihop",
+	"bfd":              "covered by TestConformanceWholePeerRoundTrip",
+	"state":            "read-only operational state, not configuration",
+}
+
+func TestEveryPeerSubMessageIsCovered(t *testing.T) {
+	fields := (&api.Peer{}).ProtoReflect().Descriptor().Fields()
+	for i := range fields.Len() {
+		name := string(fields.Get(i).Name())
+		_, ok := peerSubMessages[name]
+		assert.True(t, ok,
+			"api.Peer.%s is not listed in peerSubMessages. Every configuration-bearing "+
+				"part of a peer must be round-tripped, or recorded as read-only with a reason.", name)
+	}
+}
+
+// The whole peer, not just its Conf. Per-peer configuration spans eleven nested
+// messages - transport, timers, graceful restart, TTL security, BFD and the
+// rest - and each is a read path that can be forgotten independently.
+func TestConformanceWholePeerRoundTrip(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	peer := &api.Peer{Conf: &api.PeerConf{NeighborAddress: "10.90.0.1", PeerAsn: 65001}}
+	fillMessage("Peer", peer.ProtoReflect(), wholePeerSkip)
+
+	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{
+		Peer: proto.Clone(peer).(*api.Peer),
+	}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(context.Background(), &api.ListPeerRequest{Address: "10.90.0.1"},
+		func(p *api.Peer) { got = p }))
+	require.NotNil(t, got, "ListPeer returned no peer")
+
+	compareRoundTrip(t, "Peer", peer.ProtoReflect(), got.ProtoReflect())
+}
+
+// wholePeerSkip covers fields that cannot take an arbitrary value on this path,
+// and the read-only state block.
+var wholePeerSkip = map[string]bool{
+	"Peer.state":                    true, // operational state, not config
+	"Peer.timers.state":             true, // operational state, not config
+	"Peer.conf.peer_asn":            true, // identifies the peer
+	"Peer.conf.local_asn":           true, // flips eBGP/iBGP
+	"Peer.conf.admin_down":          true, // changes session handling
+	"Peer.conf.vrf":                 true, // must name an existing VRF
+	"Peer.conf.peer_group":          true, // must name an existing group
+	"Peer.conf.neighbor_interface":  true, // mutually exclusive with the address
+	"Peer.conf.type":                true, // derived from the ASNs
+	"Peer.apply_policy":             true, // policy names must exist
+	"Peer.transport.local_address":  true, // must parse as an address
+	"Peer.transport.bind_interface": true, // must name a real interface
+	// Mutually exclusive settings, each with its own test. The whole-peer test
+	// sets everything at once, so these have to be excluded from it - and the
+	// exclusions are a useful record of which settings conflict.
+	"Peer.ttl_security":                       true, // conflicts with ebgp_multihop
+	"Peer.route_server":                       true, // conflicts with route_reflector
+	"Peer.afi_safis":                          true, // built by hand above; it needs a real family
+	"Peer.afi_safis.config.family":            true, // family identity, not a scalar knob
+	"Peer.afi_safis.state":                    true, // operational state
+	"Peer.afi_safis.add_paths.config.receive": true, // negotiated, reported from state
+}
+
+// ttl-security has its own test because the daemon rejects it alongside
+// ebgp-multihop, and the whole-peer test sets everything at once.
+func TestConformanceTtlSecurityRoundTrip(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	peer := &api.Peer{
+		Conf:        &api.PeerConf{NeighborAddress: "10.93.0.1", PeerAsn: 65001},
+		TtlSecurity: &api.TtlSecurity{},
+	}
+	fillMessage("Peer.ttl_security", peer.TtlSecurity.ProtoReflect(), nil)
+
+	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{
+		Peer: proto.Clone(peer).(*api.Peer),
+	}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(context.Background(), &api.ListPeerRequest{Address: "10.93.0.1"},
+		func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	require.NotNil(t, got.TtlSecurity, "ttl_security was accepted but is not reported back")
+
+	compareRoundTrip(t, "Peer.ttl_security", peer.TtlSecurity.ProtoReflect(), got.TtlSecurity.ProtoReflect())
+}
+
+// route-server-client conflicts with route-reflector-client, so like
+// ttl-security it cannot be set in the whole-peer test.
+func TestConformanceRouteServerRoundTrip(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	peer := &api.Peer{
+		Conf:        &api.PeerConf{NeighborAddress: "10.94.0.1", PeerAsn: 65001},
+		RouteServer: &api.RouteServer{},
+	}
+	fillMessage("Peer.route_server", peer.RouteServer.ProtoReflect(), nil)
+
+	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{
+		Peer: proto.Clone(peer).(*api.Peer),
+	}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(context.Background(), &api.ListPeerRequest{Address: "10.94.0.1"},
+		func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	require.NotNil(t, got.RouteServer, "route_server was accepted but is not reported back")
+
+	compareRoundTrip(t, "Peer.route_server", peer.RouteServer.ProtoReflect(), got.RouteServer.ProtoReflect())
 }
