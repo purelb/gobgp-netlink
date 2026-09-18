@@ -589,6 +589,9 @@ func api2Path(resource api.TableType, path *api.Path, isWithdraw bool) (*table.P
 	if !path.IsWithdraw && !nexthop.IsValid() {
 		return nil, fmt.Errorf("nexthop not found")
 	}
+	if path.Family == nil {
+		return nil, fmt.Errorf("family is required")
+	}
 	rf := bgp.NewFamily(uint16(path.Family.Afi), uint8(path.Family.Safi))
 	if resource != api.TableType_TABLE_TYPE_VRF && rf == bgp.RF_IPv4_UC && nexthop.Is4() {
 		pa, _ := bgp.NewPathAttributeNextHop(nexthop)
@@ -605,6 +608,9 @@ func api2Path(resource api.TableType, path *api.Path, isWithdraw bool) (*table.P
 }
 
 func api2apiutilPath(path *api.Path) (*apiutil.Path, error) {
+	if path.Family == nil {
+		return nil, fmt.Errorf("family is required")
+	}
 	nlri, err := apiutil.GetNativeNlri(path)
 	if err != nil {
 		return nil, fmt.Errorf("invalid nlri: %w", err)
@@ -919,7 +925,11 @@ func readMpGracefulRestartFromAPIStruct(c *oc.MpGracefulRestart, a *api.MpGracef
 }
 
 func readAfiSafiConfigFromAPIStruct(c *oc.AfiSafiConfig, a *api.AfiSafiConfig) {
-	if c == nil || a == nil {
+	// a.Family is checked as well as a. An AfiSafi carrying a config but no
+	// family is four lines of gRPC, and dereferencing it here panicked on the
+	// Serve goroutine inside handleMGMTOp - so any API client could stop the
+	// daemon. Nothing recovers there; the process dies.
+	if c == nil || a == nil || a.Family == nil {
 		return
 	}
 	rf := bgp.NewFamily(uint16(a.Family.Afi), uint8(a.Family.Safi))
@@ -928,7 +938,7 @@ func readAfiSafiConfigFromAPIStruct(c *oc.AfiSafiConfig, a *api.AfiSafiConfig) {
 }
 
 func readAfiSafiStateFromAPIStruct(s *oc.AfiSafiState, a *api.AfiSafiConfig) {
-	if s == nil || a == nil {
+	if s == nil || a == nil || a.Family == nil {
 		return
 	}
 	// Store only address family value for the convenience

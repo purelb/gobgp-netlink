@@ -16,6 +16,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -757,4 +758,52 @@ func TestNewGlobalFromAPIStructRejectsUnknownFamilies(t *testing.T) {
 		})
 		assert.NoError(t, err, "index %d is in IntToAfiSafiTypeMap and must be accepted", i)
 	}
+}
+
+// A nil Family inside an otherwise valid request used to panic on the Serve
+// goroutine, inside handleMGMTOp, where nothing recovers - so four lines of
+// gRPC from any client stopped the daemon.
+//
+// readAfiSafiConfigFromAPIStruct nil-checked its two arguments and then
+// dereferenced a.Family regardless. api2apiutilPath and api2Path had the same
+// shape for path.Family.
+//
+// Found by the conformance suite filling every field of api.Peer, which is the
+// argument for generating these requests rather than writing them by hand:
+// nobody writes an AfiSafi with a config and no family on purpose.
+func TestNilFamilyIsRejectedNotFatal(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+
+	t.Run("AddPeer with an afi-safi that has no family", func(t *testing.T) {
+		// The assertion is that we get here at all: before the guard this
+		// panicked and took the process with it.
+		err := s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+			Conf:     &api.PeerConf{NeighborAddress: "10.91.0.1", PeerAsn: 65001},
+			AfiSafis: []*api.AfiSafi{{Config: &api.AfiSafiConfig{Enabled: true}}},
+		}})
+		t.Logf("AddPeer returned %v (the point is that it returned)", err)
+	})
+
+	t.Run("daemon still serves afterwards", func(t *testing.T) {
+		_, err := s.GetBgp(context.Background(), &api.GetBgpRequest{})
+		require.NoError(t, err, "the management loop must still be alive")
+	})
+
+	// The path converters had the same shape. These are the functions the gRPC
+	// layer calls before anything reaches BgpServer, so they are where a nil
+	// family has to be turned into an error.
+	t.Run("api2apiutilPath with no family", func(t *testing.T) {
+		_, err := api2apiutilPath(&api.Path{
+			Nlri: &api.NLRI{Nlri: &api.NLRI_Prefix{Prefix: &api.IPAddressPrefix{
+				Prefix: "10.92.0.0", PrefixLen: 24,
+			}}},
+		})
+		require.Error(t, err, "a path with no family must be rejected, not dereferenced")
+		assert.Contains(t, err.Error(), "family")
+	})
 }
