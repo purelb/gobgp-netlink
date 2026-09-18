@@ -1198,6 +1198,11 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 			}
 		}
 		pconf.Transport.Config.PassiveMode = a.Transport.PassiveMode
+		// Stored and reported even though nothing acts on it, so that the value
+		// is visible in ListPeer and "gobgp config running" and addNeighbor can
+		// warn that it does nothing. Dropping it silently was the worse option:
+		// the operator could not tell it had been ignored.
+		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
 		pconf.Transport.Config.RemotePort = uint16(a.Transport.RemotePort)
 		pconf.Transport.Config.LocalPort = uint16(a.Transport.LocalPort)
 		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
@@ -1356,6 +1361,11 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 			}
 		}
 		pconf.Transport.Config.PassiveMode = a.Transport.PassiveMode
+		// Stored and reported even though nothing acts on it, so that the value
+		// is visible in ListPeer and "gobgp config running" and addNeighbor can
+		// warn that it does nothing. Dropping it silently was the worse option:
+		// the operator could not tell it had been ignored.
+		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
 		pconf.Transport.Config.RemotePort = uint16(a.Transport.RemotePort)
 		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
 		pconf.Transport.Config.TcpMss = uint16(a.Transport.TcpMss)

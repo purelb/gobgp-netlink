@@ -4087,6 +4087,20 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 		}
 	}
 
+	// transport.mtu-discovery is declared in the proto and in the generated
+	// config model and is referenced nowhere else in the tree: no converter
+	// stores it, and no socket option is set from it. Accepting it silently
+	// leaves an operator believing path MTU discovery is on.
+	//
+	// Warned rather than rejected, because rejecting would break any config
+	// that already sets it - and those configs have been getting nothing all
+	// along, so an error now would be a new failure for no new benefit.
+	if c.Transport.Config.MtuDiscovery {
+		s.logger.Warn("transport mtu-discovery is accepted but not implemented; it has no effect. Use transport tcp-mss to constrain the segment size",
+			slog.String("Topic", "config"),
+			slog.String("Key", addr))
+	}
+
 	if vrf := c.Config.Vrf; vrf != "" {
 		if c.RouteServer.Config.RouteServerClient {
 			return fmt.Errorf("route server client can't be enslaved to VRF")
