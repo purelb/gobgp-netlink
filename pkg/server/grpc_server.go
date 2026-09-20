@@ -589,6 +589,9 @@ func api2Path(resource api.TableType, path *api.Path, isWithdraw bool) (*table.P
 	if !path.IsWithdraw && !nexthop.IsValid() {
 		return nil, fmt.Errorf("nexthop not found")
 	}
+	if path.Family == nil {
+		return nil, fmt.Errorf("family is required")
+	}
 	rf := bgp.NewFamily(uint16(path.Family.Afi), uint8(path.Family.Safi))
 	if resource != api.TableType_TABLE_TYPE_VRF && rf == bgp.RF_IPv4_UC && nexthop.Is4() {
 		pa, _ := bgp.NewPathAttributeNextHop(nexthop)
@@ -605,6 +608,9 @@ func api2Path(resource api.TableType, path *api.Path, isWithdraw bool) (*table.P
 }
 
 func api2apiutilPath(path *api.Path) (*apiutil.Path, error) {
+	if path.Family == nil {
+		return nil, fmt.Errorf("family is required")
+	}
 	nlri, err := apiutil.GetNativeNlri(path)
 	if err != nil {
 		return nil, fmt.Errorf("invalid nlri: %w", err)
@@ -919,7 +925,11 @@ func readMpGracefulRestartFromAPIStruct(c *oc.MpGracefulRestart, a *api.MpGracef
 }
 
 func readAfiSafiConfigFromAPIStruct(c *oc.AfiSafiConfig, a *api.AfiSafiConfig) {
-	if c == nil || a == nil {
+	// a.Family is checked as well as a. An AfiSafi carrying a config but no
+	// family is four lines of gRPC, and dereferencing it here panicked on the
+	// Serve goroutine inside handleMGMTOp - so any API client could stop the
+	// daemon. Nothing recovers there; the process dies.
+	if c == nil || a == nil || a.Family == nil {
 		return
 	}
 	rf := bgp.NewFamily(uint16(a.Family.Afi), uint8(a.Family.Safi))
@@ -928,7 +938,7 @@ func readAfiSafiConfigFromAPIStruct(c *oc.AfiSafiConfig, a *api.AfiSafiConfig) {
 }
 
 func readAfiSafiStateFromAPIStruct(s *oc.AfiSafiState, a *api.AfiSafiConfig) {
-	if s == nil || a == nil {
+	if s == nil || a == nil || a.Family == nil {
 		return
 	}
 	// Store only address family value for the convenience
@@ -1094,6 +1104,14 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.Config.AdminDown = a.Conf.AdminDown
 		pconf.Config.NeighborInterface = a.Conf.NeighborInterface
 		pconf.Config.Vrf = a.Conf.Vrf
+		// The same guard the peer-group path has always had. Without it the
+		// conversion truncates: allow_own_asn=256 became 0, and 0 means "do not
+		// allow our own ASN at all" - the operator asks for the loosest setting
+		// and silently gets the strictest. It fails closed, so it leaks nothing,
+		// but the peer then rejects paths it was meant to accept.
+		if a.Conf.AllowOwnAsn > math.MaxUint8 {
+			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.AllowOwnAsn)
+		}
 		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.AllowOwnAsn)
 		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.ReplacePeerAsn
 		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.AllowAspathLoopLocal
@@ -1167,6 +1185,7 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.GracefulRestart.Config.RestartTime = uint16(a.GracefulRestart.RestartTime)
 		pconf.GracefulRestart.Config.HelperOnly = a.GracefulRestart.HelperOnly
 		pconf.GracefulRestart.Config.DeferralTime = uint16(a.GracefulRestart.DeferralTime)
+		pconf.GracefulRestart.Config.StaleRoutesTime = float64(a.GracefulRestart.StaleRoutesTime)
 		pconf.GracefulRestart.Config.NotificationEnabled = a.GracefulRestart.NotificationEnabled
 		pconf.GracefulRestart.Config.LongLivedEnabled = a.GracefulRestart.LonglivedEnabled
 		pconf.GracefulRestart.State.LocalRestarting = a.GracefulRestart.LocalRestarting
@@ -1179,6 +1198,11 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 			}
 		}
 		pconf.Transport.Config.PassiveMode = a.Transport.PassiveMode
+		// Stored and reported even though nothing acts on it, so that the value
+		// is visible in ListPeer and "gobgp config running" and addNeighbor can
+		// warn that it does nothing. Dropping it silently was the worse option:
+		// the operator could not tell it had been ignored.
+		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
 		pconf.Transport.Config.RemotePort = uint16(a.Transport.RemotePort)
 		pconf.Transport.Config.LocalPort = uint16(a.Transport.LocalPort)
 		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
@@ -1324,6 +1348,7 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		pconf.GracefulRestart.Config.RestartTime = uint16(a.GracefulRestart.RestartTime)
 		pconf.GracefulRestart.Config.HelperOnly = a.GracefulRestart.HelperOnly
 		pconf.GracefulRestart.Config.DeferralTime = uint16(a.GracefulRestart.DeferralTime)
+		pconf.GracefulRestart.Config.StaleRoutesTime = float64(a.GracefulRestart.StaleRoutesTime)
 		pconf.GracefulRestart.Config.NotificationEnabled = a.GracefulRestart.NotificationEnabled
 		pconf.GracefulRestart.Config.LongLivedEnabled = a.GracefulRestart.LonglivedEnabled
 		pconf.GracefulRestart.State.LocalRestarting = a.GracefulRestart.LocalRestarting
@@ -1336,6 +1361,11 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 			}
 		}
 		pconf.Transport.Config.PassiveMode = a.Transport.PassiveMode
+		// Stored and reported even though nothing acts on it, so that the value
+		// is visible in ListPeer and "gobgp config running" and addNeighbor can
+		// warn that it does nothing. Dropping it silently was the worse option:
+		// the operator could not tell it had been ignored.
+		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
 		pconf.Transport.Config.RemotePort = uint16(a.Transport.RemotePort)
 		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
 		pconf.Transport.Config.TcpMss = uint16(a.Transport.TcpMss)
@@ -2518,6 +2548,10 @@ func (s *server) GetBgp(ctx context.Context, r *api.GetBgpRequest) (*api.GetBgpR
 	return s.bgpServer.GetBgp(ctx, r)
 }
 
+func (s *server) GetRunningConfig(ctx context.Context, r *api.GetRunningConfigRequest) (*api.GetRunningConfigResponse, error) {
+	return s.bgpServer.GetRunningConfig(ctx, r)
+}
+
 // GetBfdServerState exposes the BFD server's receive-path counters.
 //
 // These were previously computed and discarded: GetBfdServerStats had no caller
@@ -2530,11 +2564,23 @@ func (s *server) GetBfdServerState(ctx context.Context, r *api.GetBfdServerState
 	return &api.GetBfdServerStateResponse{State: s.bgpServer.GetBfdServerStats()}, nil
 }
 
-func newGlobalFromAPIStruct(a *api.Global) *oc.Global {
+func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 	families := make([]oc.AfiSafi, 0, len(a.Families))
 	for _, f := range a.Families {
-		name := oc.IntToAfiSafiTypeMap[int(f)]
-		rf, _ := bgp.GetFamily(string(name))
+		// These are indexes into oc.IntToAfiSafiTypeMap, not afi<<16|safi. An
+		// unknown ordinal used to yield the empty AfiSafiType, whose GetFamily
+		// error was discarded, so the entry was appended with no name and no
+		// family: the daemon started, enabled nothing, and said nothing. Sending
+		// gobgp's own RouteFamily constant for ipv4-unicast (65537) - the obvious
+		// value to reach for - lands exactly there.
+		name, ok := oc.IntToAfiSafiTypeMap[int(f)]
+		if !ok {
+			return nil, fmt.Errorf("unknown address family %d: Global.families are indexes into the AfiSafiType list, not afi<<16|safi values", f)
+		}
+		rf, err := bgp.GetFamily(string(name))
+		if err != nil {
+			return nil, fmt.Errorf("address family %q (index %d) is not supported: %w", name, f, err)
+		}
 		families = append(families, oc.AfiSafi{
 			Config: oc.AfiSafiConfig{
 				AfiSafiName: name,
@@ -2611,7 +2657,7 @@ func newGlobalFromAPIStruct(a *api.Global) *oc.Global {
 			},
 		}
 	}
-	return global
+	return global, nil
 }
 
 func (s *server) StartBgp(ctx context.Context, r *api.StartBgpRequest) (*api.StartBgpResponse, error) {

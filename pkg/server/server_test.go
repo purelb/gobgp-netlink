@@ -16,7 +16,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -5351,4 +5353,456 @@ func TestFilteredAdjOutShowsAdvertisedAttributes(t *testing.T) {
 	assert.Equal([]uint32{65000}, readASPath(false), "unfiltered adj-out")
 	assert.Equal([]uint32{65000}, readASPath(true),
 		"filtered adj-out must show the same advertised attributes, not the raw local-RIB path")
+}
+
+// ListPeerGroup's Info block reported zeros for every field: peer_asn 0, and
+// PEER_TYPE_INTERNAL for an eBGP group, which is worse than absent because it
+// reads as a real answer. PeerGroup.State was never populated by anything -
+// SetPeerGroupStateValues existed, with a comment saying what it was for, and
+// had no callers anywhere in the tree.
+func TestListPeerGroupReportsState(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	both := uint32(2)
+	assert.NoError(s.AddPeerGroup(context.Background(), &api.AddPeerGroupRequest{
+		PeerGroup: &api.PeerGroup{Conf: &api.PeerGroupConf{
+			PeerGroupName: "ebgp-group",
+			PeerAsn:       65001, // differs from the local AS, so eBGP
+			SendCommunity: &both,
+			RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL,
+		}},
+	}))
+
+	var seen int
+	assert.NoError(s.ListPeerGroup(context.Background(), &api.ListPeerGroupRequest{}, func(g *api.PeerGroup) {
+		seen++
+		if assert.NotNil(g.Info) {
+			assert.Equal(uint32(65001), g.Info.PeerAsn, "Info.peer_asn")
+			assert.Equal(api.PeerType_PEER_TYPE_EXTERNAL, g.Info.Type,
+				"Info.type - it reported INTERNAL for an eBGP group")
+			if assert.NotNil(g.Info.SendCommunity, "Info.send_community") {
+				assert.Equal(both, *g.Info.SendCommunity)
+			}
+		}
+		// And the Conf side, including the field that was write-only.
+		if assert.NotNil(g.Conf) {
+			assert.Equal(api.RemovePrivate_REMOVE_PRIVATE_ALL, g.Conf.RemovePrivate, "Conf.remove_private")
+		}
+	}))
+	assert.Equal(1, seen)
+}
+
+// StopBgp reads as the counterpart to StartBgp, but it is terminal for the
+// BgpServer: it cancels the running context, Serve() returns and closes the
+// channel every management operation selects on, so StartBgp afterwards fails
+// with "server stopped" for the life of the process.
+//
+// That is the documented contract as of the proto comment on StopBgp. Pinned
+// here so it stays deliberate - it has already cost one test rewrite.
+func TestStopBgpIsTerminalForTheServer(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	require.NoError(t, s.StopBgp(context.Background(), &api.StopBgpRequest{}))
+
+	err := s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	})
+	require.Error(t, err, "StartBgp after StopBgp must fail rather than silently doing nothing")
+	assert.Contains(t, err.Error(), "server stopped")
+}
+
+// Five Global fields were accepted by StartBgp, applied, and never reported by
+// GetBgp: families, route_selection_options, default_route_distance,
+// confederation and graceful_restart. A controller could not confirm what it
+// sent took effect, nor detect drift afterwards.
+//
+// The assertion is a round trip: what goes in through StartBgp must come back
+// out of GetBgp.
+func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	sent := &api.Global{
+		Asn:              65000,
+		RouterId:         "1.1.1.1",
+		ListenPort:       -1,
+		UseMultiplePaths: true,
+		Families:         []uint32{0, 1}, // ipv4-unicast, ipv6-unicast
+		RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
+			AlwaysCompareMed:        true,
+			IgnoreAsPathLength:      true,
+			ExternalCompareRouterId: true,
+			EnableAigp:              true,
+		},
+		DefaultRouteDistance: &api.DefaultRouteDistance{
+			ExternalRouteDistance: 20,
+			InternalRouteDistance: 200,
+		},
+		Confederation: &api.Confederation{
+			Enabled:      true,
+			Identifier:   65100,
+			MemberAsList: []uint32{65001, 65002},
+		},
+		GracefulRestart: &api.GracefulRestart{
+			Enabled:             true,
+			RestartTime:         120,
+			DeferralTime:        360,
+			NotificationEnabled: true,
+			LonglivedEnabled:    true,
+		},
+	}
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{Global: sent}))
+
+	rsp, err := s.GetBgp(context.Background(), &api.GetBgpRequest{})
+	require.NoError(t, err)
+	got := rsp.Global
+	require.NotNil(t, got)
+
+	assert.Equal(sent.Asn, got.Asn)
+	assert.Equal(sent.RouterId, got.RouterId)
+	assert.Equal(sent.UseMultiplePaths, got.UseMultiplePaths)
+	assert.ElementsMatch(sent.Families, got.Families, "families")
+
+	if assert.NotNil(got.RouteSelectionOptions, "route_selection_options") {
+		assert.True(got.RouteSelectionOptions.AlwaysCompareMed)
+		assert.True(got.RouteSelectionOptions.IgnoreAsPathLength)
+		assert.True(got.RouteSelectionOptions.ExternalCompareRouterId)
+		assert.True(got.RouteSelectionOptions.EnableAigp)
+	}
+	if assert.NotNil(got.DefaultRouteDistance, "default_route_distance") {
+		assert.Equal(uint32(20), got.DefaultRouteDistance.ExternalRouteDistance)
+		assert.Equal(uint32(200), got.DefaultRouteDistance.InternalRouteDistance)
+	}
+	if assert.NotNil(got.Confederation, "confederation") {
+		assert.True(got.Confederation.Enabled)
+		assert.Equal(uint32(65100), got.Confederation.Identifier)
+		assert.ElementsMatch([]uint32{65001, 65002}, got.Confederation.MemberAsList)
+	}
+	if assert.NotNil(got.GracefulRestart, "graceful_restart") {
+		assert.True(got.GracefulRestart.Enabled)
+		assert.Equal(uint32(120), got.GracefulRestart.RestartTime)
+		assert.Equal(uint32(360), got.GracefulRestart.DeferralTime)
+		assert.True(got.GracefulRestart.NotificationEnabled)
+		assert.True(got.GracefulRestart.LonglivedEnabled)
+	}
+}
+
+// GetRunningConfig composes the running configuration. The trap it exists to
+// avoid: s.bgpConfig alone is NOT the running config - nothing appends
+// API-added peers or peer groups to it, so dumping it directly silently omits
+// every peer configured over gRPC, which is worse than no dump because it looks
+// complete.
+func TestGetRunningConfigComposesLivePeersAndGroups(t *testing.T) {
+	assert := assert.New(t)
+
+	s := NewBgpServer()
+	go s.Serve()
+	assert.NoError(s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	both := uint32(2)
+	assert.NoError(s.AddPeerGroup(context.Background(), &api.AddPeerGroupRequest{
+		PeerGroup: &api.PeerGroup{Conf: &api.PeerGroupConf{
+			PeerGroupName: "upstreams", PeerAsn: 65100, SendCommunity: &both,
+			AuthPassword: "GROUPSECRET",
+		}},
+	}))
+	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "10.9.0.1", PeerAsn: 65001, AuthPassword: "PEERSECRET"},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	rsp, err := s.GetRunningConfig(context.Background(), &api.GetRunningConfigRequest{})
+	require.NoError(t, err)
+
+	var cfg map[string]any
+	require.NoError(t, json.Unmarshal([]byte(rsp.Config), &cfg), "output must be valid JSON")
+
+	neighbors, _ := cfg["neighbors"].([]any)
+	require.Len(t, neighbors, 1, "the API-added peer must be in the dump")
+	groups, _ := cfg["peer-groups"].([]any)
+	require.Len(t, groups, 1, "the API-added peer group must be in the dump")
+
+	// Secrets must not appear, and a set password must still be visible as set -
+	// reporting "" would make an authenticated session look unauthenticated,
+	// which is the more dangerous way to be wrong.
+	assert.NotContains(rsp.Config, "PEERSECRET")
+	assert.NotContains(rsp.Config, "GROUPSECRET")
+	assert.Contains(rsp.Config, redactedMarker)
+	// And not HTML-escaped: encoding/json escapes "<" by default, which would
+	// render the marker as a \u003c... sequence. People read this output.
+	assert.NotContains(rsp.Config, "u003c", "redaction marker must not be HTML-escaped")
+}
+
+// TOML has to come out with the config-file key names. The oc types carry
+// mapstructure and json tags but no toml tags, so encoding the struct directly
+// emits Go field names ("RouterId", "PeerGroups") and the result is not
+// loadable - which is the only reason to offer TOML.
+func TestGetRunningConfigTOMLUsesConfigFileKeys(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	rsp, err := s.GetRunningConfig(context.Background(), &api.GetRunningConfigRequest{
+		Format: api.ConfigFormat_CONFIG_FORMAT_TOML,
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, rsp.Config, "[global]", "kebab-case config-file keys")
+	assert.Contains(t, rsp.Config, "router-id", "kebab-case config-file keys")
+	assert.NotContains(t, rsp.Config, "RouterId", "Go field names mean the TOML is not loadable")
+	assert.NotContains(t, rsp.Config, "[Global]", "Go field names mean the TOML is not loadable")
+}
+
+// RFC 4724 4.2 / OpenConfig stale-routes-time: an upper bound on how long stale
+// routes are retained after the session comes back.
+//
+// The existing handling covered the other half - if the session does not
+// re-establish within Restart Time, the stale routes go. Nothing bounded the
+// case where it does re-establish and the restarting speaker then never sends
+// End-of-RIB: the stale routes stayed indefinitely. The field was accepted by
+// the TOML loader and both gRPC converters and read by nothing.
+func TestStaleRoutesTimePurgesRetainedRoutes(t *testing.T) {
+	assert := assert.New(t)
+
+	afiSafis := []*api.AfiSafi{{
+		Config: &api.AfiSafiConfig{
+			Family:  apiutil.ToApiFamily(bgp.AFI_IP, bgp.SAFI_UNICAST),
+			Enabled: true,
+		},
+		MpGracefulRestart: &api.MpGracefulRestart{
+			Config: &api.MpGracefulRestartConfig{Enabled: true},
+		},
+	}}
+
+	s1 := NewBgpServer()
+	go s1.Serve()
+	assert.NoError(s1.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10779},
+	}))
+	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.NoError(s1.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport:       &api.Transport{PassiveMode: true},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120, StaleRoutesTime: 1},
+		AfiSafis:        afiSafis,
+	}}))
+
+	s2 := NewBgpServer()
+	go s2.Serve()
+	assert.NoError(s2.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(s1, api.PeerState_SESSION_STATE_ESTABLISHED)
+	assert.NoError(s2.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 1},
+		Transport:       &api.Transport{RemotePort: 10779},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120},
+		AfiSafis:        afiSafis,
+		Timers:          &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.77.0.0/24"))
+	assert.NoError(err)
+	nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr("0.0.0.0"))
+	assert.NoError(err)
+	_, err = s2.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{{
+		Family: bgp.RF_IPv4_UC,
+		Nlri:   nlri,
+		Attrs:  []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0), nh},
+	}}})
+	assert.NoError(err)
+
+	adjInCount := func() int {
+		n := 0
+		_ = s1.ListPath(apiutil.ListPathRequest{
+			TableType: api.TableType_TABLE_TYPE_ADJ_IN,
+			Family:    bgp.RF_IPv4_UC,
+			Name:      "127.0.0.1",
+		}, func(_ bgp.NLRI, _ []*apiutil.Path) { n++ })
+		return n
+	}
+	assert.Eventually(func() bool { return adjInCount() > 0 }, 15*time.Second, 200*time.Millisecond,
+		"the route must reach s1's adj-rib-in before it can go stale")
+
+	// Put the peer into the state a graceful restart leaves it in: restarting,
+	// the family still running, and no End-of-RIB received. This is the case
+	// nothing bounded - the session is back but the refresh never completes.
+	var peer *peer
+	assert.NoError(s1.mgmtOperation(func() error {
+		for _, p := range s1.neighborMap {
+			peer = p
+		}
+		conf := peer.fsm.pConf.ReadCopy()
+		conf.GracefulRestart.State.PeerRestarting = true
+		for i := range conf.AfiSafis {
+			conf.AfiSafis[i].MpGracefulRestart.State.Running = true
+			conf.AfiSafis[i].MpGracefulRestart.State.EndOfRibReceived = false
+		}
+		peer.fsm.pConf.Update(&conf)
+		return nil
+	}, false))
+	require.NotNil(t, peer)
+
+	assert.Positive(adjInCount(), "precondition: routes are still retained")
+
+	// Fire the timer the way time.AfterFunc would.
+	s1.staleRoutesExpiredFunc(peer, time.Second)()
+
+	assert.Equal(0, adjInCount(), "stale-routes-time expired, so the retained routes must be purged")
+}
+
+// The converse: a family that has completed its refresh has no stale routes, so
+// the timer must leave its adj-rib-in alone. Dropping it would discard live
+// routes, which is worse than retaining stale ones.
+//
+// This needs a real session with real routes. An earlier version asserted only
+// that the peer's state was untouched, which dropAdjRIBIn never modifies - so it
+// passed whether or not the EOR check existed, and proved nothing.
+func TestStaleRoutesTimeLeavesCompletedFamiliesAlone(t *testing.T) {
+	assert := assert.New(t)
+
+	afiSafis := []*api.AfiSafi{{
+		Config: &api.AfiSafiConfig{
+			Family:  apiutil.ToApiFamily(bgp.AFI_IP, bgp.SAFI_UNICAST),
+			Enabled: true,
+		},
+		MpGracefulRestart: &api.MpGracefulRestart{
+			Config: &api.MpGracefulRestartConfig{Enabled: true},
+		},
+	}}
+
+	s1 := NewBgpServer()
+	go s1.Serve()
+	assert.NoError(s1.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: 10789},
+	}))
+	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.NoError(s1.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		Transport:       &api.Transport{PassiveMode: true},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120, StaleRoutesTime: 1},
+		AfiSafis:        afiSafis,
+	}}))
+
+	s2 := NewBgpServer()
+	go s2.Serve()
+	assert.NoError(s2.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 2, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(s1, api.PeerState_SESSION_STATE_ESTABLISHED)
+	assert.NoError(s2.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:            &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 1},
+		Transport:       &api.Transport{RemotePort: 10789},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120},
+		AfiSafis:        afiSafis,
+		Timers:          &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.79.0.0/24"))
+	assert.NoError(err)
+	nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr("0.0.0.0"))
+	assert.NoError(err)
+	_, err = s2.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{{
+		Family: bgp.RF_IPv4_UC,
+		Nlri:   nlri,
+		Attrs:  []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0), nh},
+	}}})
+	assert.NoError(err)
+
+	adjInCount := func() int {
+		n := 0
+		_ = s1.ListPath(apiutil.ListPathRequest{
+			TableType: api.TableType_TABLE_TYPE_ADJ_IN,
+			Family:    bgp.RF_IPv4_UC,
+			Name:      "127.0.0.1",
+		}, func(_ bgp.NLRI, _ []*apiutil.Path) { n++ })
+		return n
+	}
+	assert.Eventually(func() bool { return adjInCount() > 0 }, 15*time.Second, 200*time.Millisecond)
+
+	// Restarting, but the refresh for this family HAS completed.
+	var peer *peer
+	assert.NoError(s1.mgmtOperation(func() error {
+		for _, p := range s1.neighborMap {
+			peer = p
+		}
+		conf := peer.fsm.pConf.ReadCopy()
+		conf.GracefulRestart.State.PeerRestarting = true
+		for i := range conf.AfiSafis {
+			conf.AfiSafis[i].MpGracefulRestart.State.Running = true
+			conf.AfiSafis[i].MpGracefulRestart.State.EndOfRibReceived = true
+		}
+		peer.fsm.pConf.Update(&conf)
+		return nil
+	}, false))
+	require.NotNil(t, peer)
+
+	before := adjInCount()
+	assert.Positive(before, "precondition: there are routes that must survive")
+
+	s1.staleRoutesExpiredFunc(peer, time.Second)()
+
+	assert.Equal(before, adjInCount(),
+		"End-of-RIB was received, so these are live routes and must not be purged")
+}
+
+// mtu-discovery is declared in api.Transport and in the generated config model
+// and referenced nowhere else: no converter stores it and no socket option is
+// set from it. Accepting it silently leaves an operator believing path MTU
+// discovery is enabled.
+//
+// Warned rather than rejected: configs that already set it have been getting
+// nothing all along, so an error now would be a new failure for no new benefit.
+func TestMtuDiscoveryIsWarnedAsUnimplemented(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	s := NewBgpServer(LoggerOption(logger, new(slog.LevelVar)))
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "10.96.0.1", PeerAsn: 65001},
+		Transport: &api.Transport{PassiveMode: true, MtuDiscovery: true},
+	}}))
+	assert.Contains(t, buf.String(), "mtu-discovery is accepted but not implemented",
+		"setting it must say so rather than being silently ignored")
+
+	// And a peer that does not set it gets no warning.
+	buf.Reset()
+	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "10.96.0.2", PeerAsn: 65001},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+	assert.NotContains(t, buf.String(), "mtu-discovery")
 }

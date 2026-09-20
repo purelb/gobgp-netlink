@@ -36,8 +36,28 @@ option go_package = "github.com/osrg/gobgp/v4/api;api";
 // Interface exported by the server.
 service GoBgpService {
   rpc StartBgp(StartBgpRequest) returns (StartBgpResponse);
+  // StopBgp is terminal for the BgpServer, not a counterpart to StartBgp that
+  // can be paired with it repeatedly.
+  //
+  // It cancels the server's running context, so Serve() returns and closes the
+  // channel every management operation selects on. From then on StartBgp - and
+  // every other management call - fails with "server stopped" for the life of
+  // the process. Construct a new BgpServer to start BGP again.
   rpc StopBgp(StopBgpRequest) returns (StopBgpResponse);
   rpc GetBgp(GetBgpRequest) returns (GetBgpResponse);
+  // GetRunningConfig returns the daemon's complete running configuration as
+  // text, composed from the global config plus every live peer and peer group.
+  //
+  // This is a debugging and verification surface, not a control API: the shape
+  // is gobgpd's internal configuration model, which is generated from YANG and
+  // can change without a proto version bump. Read it, diff it, attach it to a
+  // bug report - do not build control logic against its field layout.
+  //
+  // Secrets are redacted. An auth-password is reported as "<redacted>" when one
+  // is set and empty when none is, so the dump shows whether MD5 is configured
+  // without disclosing the key. That also means the output is not directly
+  // loadable as a config file when authentication is in use.
+  rpc GetRunningConfig(GetRunningConfigRequest) returns (GetRunningConfigResponse);
   rpc GetBfdServerState(GetBfdServerStateRequest) returns (GetBfdServerStateResponse);
 
   rpc WatchEvent(WatchEventRequest) returns (stream WatchEventResponse);
@@ -142,6 +162,25 @@ message GetNetlinkResponse {
   string vrf = 3;
   repeated string interfaces = 4;
   repeated NetlinkVrfImport vrf_imports = 5;
+  // Export settings, echoed back so a controller can detect drift. These are
+  // accepted by EnableNetlinkExport and applied, but were not reported by
+  // anything, so a caller could set them and never confirm them.
+  uint32 dampening_interval = 6; // Update dampening interval in milliseconds
+  int32 route_protocol = 7; // RTPROT_* value (default: 186 for BGP)
+}
+
+enum ConfigFormat {
+  CONFIG_FORMAT_UNSPECIFIED = 0; // defaults to JSON
+  CONFIG_FORMAT_JSON = 1;
+  CONFIG_FORMAT_TOML = 2;
+}
+
+message GetRunningConfigRequest {
+  ConfigFormat format = 1;
+}
+
+message GetRunningConfigResponse {
+  string config = 1;
 }
 
 message StartBgpRequest {
@@ -1575,6 +1614,17 @@ message Global {
   string router_id = 2;
   int32 listen_port = 3;
   repeated string listen_addresses = 4;
+  // Address families to enable, as *indexes* into gobgpd's AfiSafiType list
+  // (oc.IntToAfiSafiTypeMap): 0=ipv4-unicast, 1=ipv6-unicast,
+  // 2=ipv4-labelled-unicast, 3=ipv6-labelled-unicast, 4=l3vpn-ipv4-unicast,
+  // 5=l3vpn-ipv6-unicast, 8=l2vpn-vpls, 9=l2vpn-evpn, 10=ipv4-multicast,
+  // 11=ipv6-multicast, 12=rtc, 15=ipv4-flowspec, and so on.
+  //
+  // These are NOT afi<<16|safi, and they are not the RouteFamily constants the
+  // Go packet library exports. Passing 65537 - the RouteFamily value for
+  // ipv4-unicast, and the obvious thing to reach for - is not ipv4-unicast
+  // here. Unknown indexes are rejected rather than silently enabling nothing,
+  // which is what happened before.
   repeated uint32 families = 5;
   bool use_multiple_paths = 6;
   RouteSelectionOptionsConfig route_selection_options = 7;
