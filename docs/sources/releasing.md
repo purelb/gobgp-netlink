@@ -55,8 +55,47 @@ The patch component increments once per fork release:
 
 | fork release | Go module tag |
 |--------------|---------------|
-| v1.3.1 | v4.900.1 |
-| next | v4.900.2 |
+| v1.3.1 | v4.900.1 (withdrawn, see below) |
+| v1.3.2 | v4.900.2 |
+| next | v4.900.3 |
+
+Never reuse a number. `v4.900.1` was tagged, withdrawn, and is permanently
+spent: `sum.golang.org` had already notarised it against the v1.3.1 commit, and
+that log is append-only, so deleting the git tag did not un-publish the
+version. Re-tagging it on different content gives consumers a checksum
+mismatch, which Go reports as possible tampering. Check before choosing a
+number:
+
+```sh
+curl -s https://sum.golang.org/lookup/github.com/purelb/gobgp-netlink/v4@v4.900.N
+```
+
+An `h1:` line means the number is taken. Note the `/v4` suffix - it is part of
+the module path, and querying without it returns a confident 404 for a module
+that has never existed.
+
+## Which tag builds binaries
+
+Only the `v1.x.y` tag. The `release` workflow excludes `v4.*` deliberately, so
+the Go module tag produces no GitHub release and no artifacts - it exists purely
+for the module proxy.
+
+Both tags sit on the same commit, and GoReleaser does not use the tag that
+triggered the run to decide the version. It resolves it with
+
+```sh
+git tag --points-at HEAD --sort=-version:refname | head -1
+```
+
+which ranks `v4.900.N` above `v1.x.y` and yields the module version. The
+workflow therefore pins `GORELEASER_CURRENT_TAG` to the triggering tag. Both
+guards are needed: the trigger exclusion alone still leaves a lone `v1.x.y` run
+building `v4.900.N` artifacts.
+
+This is not hypothetical. v1.3.2 was released by pushing both tags in one
+command, which fired the workflow twice; both runs built `4.900.2`, one created
+a `v4.900.2` release and the other failed uploading assets that already
+existed, and the `v1.3.2` release shipped with no binaries at all.
 
 ## Steps
 
@@ -69,11 +108,31 @@ git tag -a v1.3.2 -F <notes-file> <commit>
 # 2. the Go module tag, same commit
 git tag -a v4.900.2 -F <explanation> <commit>
 
-# 3. push both
-git push origin v1.3.2 v4.900.2
+# 3. push the release tag first, on its own, and let the build finish.
+#    This is the only tag that triggers GoReleaser.
+git push origin v1.3.2
+gh run watch "$(gh run list --workflow=release --limit 1 --json databaseId --jq '.[0].databaseId')"
 
-# 4. the GitHub release is cut from the v1.x.y tag
+# 4. then the module tag, which triggers nothing
+git push origin v4.900.2
+
+# 5. the GitHub release is cut from the v1.x.y tag
 gh release create v1.3.2 --notes-file <notes-file> --verify-tag
+```
+
+If a release needs rebuilding - a failed run, or artifacts attached to the wrong
+release - re-run the workflow by hand rather than retagging. It checks out the
+tag you name and pins the version to it:
+
+```sh
+gh workflow run release.yml --ref main -f tag=v1.3.2
+```
+
+Confirm the artifacts are named for the fork release, not the module version:
+
+```sh
+gh release view v1.3.2 --json assets --jq '.assets[].name'
+# gobgp-netlink_1.3.2_linux_amd64.tar.gz, not gobgp-netlink_4.900.2_...
 ```
 
 Verify the Go tag resolves before telling anyone to use it:
@@ -90,7 +149,7 @@ go mod tidy   # must not rewrite the replace into a pseudo-version
 ```
 require github.com/osrg/gobgp/v4 v4.0.0
 
-replace github.com/osrg/gobgp/v4 => github.com/purelb/gobgp-netlink/v4 v4.900.1
+replace github.com/osrg/gobgp/v4 => github.com/purelb/gobgp-netlink/v4 v4.900.2
 ```
 
 The `replace` is not optional: the module declares itself as

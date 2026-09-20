@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - v[0-9]+.*
+      # v4.x is the Go module namespace, not a fork release. Those tags exist
+      # only so consumers can pin the module; they carry no binaries and get no
+      # GitHub release. Excluding them also covers upstream's own v4.y.z tags,
+      # which reach this remote through catch-up merges.
+      - '!v4.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and publish (e.g. v1.3.2)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -16,6 +27,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -31,3 +43,9 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A release commit carries two tags. GoReleaser otherwise resolves the
+          # version with "git tag --points-at HEAD --sort=-version:refname" and
+          # takes the first, which ranks v4.900.N above v1.x.y and produces a
+          # release built under the module version. Pin it to the tag that
+          # actually triggered this run.
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}
