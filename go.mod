@@ -1,6 +1,6 @@
 module github.com/osrg/gobgp/v4
 
-go 1.25.13
+go 1.26.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
@@ -29,7 +29,7 @@ require (
 	github.com/vishvananda/netlink v1.3.1
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.47.0
-	golang.org/x/text v0.41.0
+	golang.org/x/text v0.42.0
 	golang.org/x/time v0.15.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
