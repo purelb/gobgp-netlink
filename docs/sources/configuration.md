@@ -441,10 +441,10 @@ whole point, because most of these blocks carry their enable flag as a boolean:
 ```toml
 [[neighbors]]
   [neighbors.config]
-    neighbor-address = "192.0.2.4"
-    peer-group = "edge"          # the group enables graceful restart
+    neighbor-address = "127.0.0.3"
+    peer-group = "my-peer-group"   # suppose the group enables graceful restart
   [neighbors.graceful-restart.config]
-    enabled = false              # and this peer turns it off
+    enabled = false                # this peer turns it off, and stays off
 ```
 
 The same applies over the gRPC API, where presence is per *message*: a request
@@ -463,11 +463,11 @@ set and one that was inherited identically.
 
 ## Global graceful restart
 
-`[global.graceful-restart]` does not reach peers unless you ask for it:
+`[global.graceful-restart]` does not reach peers unless you ask for it. Add to
+the `[global.config]` block above:
 
-```toml
-[global.config]
-  graceful-restart-inherit-to-neighbors = true
+```text
+graceful-restart-inherit-to-neighbors = true
 ```
 
 Without it the global block is accepted and reported and does nothing, which is
