@@ -273,6 +273,75 @@ func TestEveryPeerConfFieldIsClassified(t *testing.T) {
 	}
 }
 
+// PeerConf is only part of a peer. Everything else a peer carries lives in a
+// sub-message of api.Peer - graceful_restart, transport, timers, ttl_security
+// and the rest - and none of it was classified at all, so a setting there could
+// be accepted, reported, and do nothing with no test objecting.
+//
+// That is not hypothetical. graceful_restart is a sub-message, and a peer in a
+// peer group came up with it silently off for the whole life of the feature.
+// The per-field classification above could never have caught it, twice over:
+// the field is not in PeerConf, and the defect needs two objects to exist.
+//
+// This classifies the sub-messages themselves rather than their fields.
+// Per-field would be better, but it would be a registry of several hundred
+// entries written in one sitting, which is how a registry becomes a rubber
+// stamp. Block-level makes the question "has anyone checked this part of a peer
+// does anything, and at this scope" answerable, and a new sub-message cannot
+// appear without someone answering it.
+var peerBlockEffects = map[string]string{
+	"conf":             "classified field by field above",
+	"state":            "read-only operational state",
+	"timers":           "hold time and keepalive reach the OPEN; covered by the scenario tests",
+	"transport":        "local address, passive mode and TCP options reach the socket; mtu_discovery is recorded as inert in knownAsymmetries",
+	"route_reflector":  "cluster id and client status change reflection; covered by the rr scenario test",
+	"route_server":     "decides which RIB the peer's routes enter, and whether they reach the kernel FIB",
+	"graceful_restart": "reaches the GR capability in the OPEN, per family; TestGracefulRestartSurvivesPeerGroupMembership and the oc inheritance matrix",
+	"apply_policy":     "import and export policy; covered by the policy scenario tests",
+	"ebgp_multihop":    "sets the TTL on the socket",
+	"ttl_security":     "sets IP_MINTTL on the socket (GTSM)",
+	"afi_safis":        "decides which families are negotiated at all",
+	"bfd":              "drives the BFD session; covered by bfd_server_test.go",
+}
+
+func TestEveryPeerBlockIsClassified(t *testing.T) {
+	fields := (&api.Peer{}).ProtoReflect().Descriptor().Fields()
+	for i := range fields.Len() {
+		name := string(fields.Get(i).Name())
+		_, ok := peerBlockEffects[name]
+		assert.True(t, ok,
+			"api.Peer.%s is not classified. Say what it changes on the wire and which test proves it, "+
+				"or say it changes nothing and why. A setting that round-trips and does nothing passes "+
+				"every other layer of this suite - that is how graceful_restart stayed broken.", name)
+	}
+}
+
+// Scope is the other half. A setting can work at one level and be inert at
+// another, which no per-field check sees because the field itself round-trips
+// perfectly at the level where it works.
+//
+// stale_routes_time is the example: implemented and acted on per peer and per
+// peer group, and for the whole of v1.3.2 accepted, echoed and inert at the
+// global level. The conformance suite's own comment described it backwards.
+var settingsWithScope = map[string][]string{
+	"graceful_restart.enabled":            {"peer", "peer-group", "global-opt-in"},
+	"graceful_restart.stale_routes_time":  {"peer", "peer-group"},
+	"graceful_restart.long_lived_enabled": {"peer", "peer-group"},
+}
+
+func TestScopedSettingsAreRecorded(t *testing.T) {
+	// A registry, not a behavioural check: the point is that the levels a
+	// setting works at are written down where the next person will look,
+	// because "it works" is not a property of a setting on its own.
+	for name, scopes := range settingsWithScope {
+		assert.NotEmpty(t, scopes, "%s must name the scopes it is implemented at", name)
+	}
+	assert.Contains(t, settingsWithScope["graceful_restart.stale_routes_time"], "peer",
+		"stale_routes_time is implemented per peer; it is the global level that needs the opt-in")
+	assert.NotContains(t, settingsWithScope["graceful_restart.stale_routes_time"], "global",
+		"the global block only reaches peers via graceful-restart-inherit-to-neighbors")
+}
+
 // And the registered effect tests actually run here too, so the registry cannot
 // drift into naming tests that are skipped or never invoked.
 func TestRegisteredWireEffectsAllRun(t *testing.T) {
