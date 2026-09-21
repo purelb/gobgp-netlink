@@ -24,6 +24,8 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -83,14 +85,79 @@ func newAPIserver(b *BgpServer, shared *sharedData, g *grpc.Server, hosts string
 	return s
 }
 
+// apiSocketMode is what the API socket is set to. The gRPC API is a write
+// interface - it adds peers and paths, and in this fork it installs routes into
+// the host FIB - so it is owner-only.
+//
+// This is right for the deployment this fork targets, where gobgpd and its
+// controller run in the same pod sharing an emptyDir and both run as root. If
+// the two ever run as different users, this needs to become a group-readable
+// mode plus an fsGroup on the shared volume, not a looser default here.
+const apiSocketMode = 0o600
+
+// checkUnixSocketPath refuses a socket path that cannot be protected, before
+// anything binds to it.
+func checkUnixSocketPath(address string, logger *slog.Logger) error {
+	// An address starting with @ (or NUL) is Linux's abstract namespace. Those
+	// sockets have no filesystem presence and therefore no permissions at all:
+	// any process in the network namespace can connect. Under a hostNetwork
+	// DaemonSet that is every process on the node, reaching an API that is
+	// unauthenticated unless a client CA is configured. os.Chmod on one returns
+	// ENOENT, so a mode cannot be applied either.
+	if strings.HasPrefix(address, "@") || strings.HasPrefix(address, "\x00") {
+		return fmt.Errorf("refusing to serve the API on the abstract unix socket %q: "+
+			"abstract sockets have no filesystem permissions, so any process in the network namespace "+
+			"can reach a write API that installs routes; use a filesystem path", address)
+	}
+	return nil
+}
+
+// hardenUnixSocket sets the socket's mode explicitly instead of leaving it to
+// whatever umask the process happens to have, and warns when the directory
+// holding it is writable by anyone else.
+//
+// Note the window: Go's net.Listen creates the socket with 0777 &^ umask and
+// there is no exported way to fchmod the listener, so between bind and chmod
+// the mode is the umask's. Under the usual umask of 022 that is 0755, and
+// AF_UNIX connect() needs write permission, so it is not connectable by others
+// in that window - but at umask 000 it is. Tightening the parent directory is
+// what actually closes this, which is why a permissive one is worth a warning.
+func hardenUnixSocket(address string, logger *slog.Logger) error {
+	if err := os.Chmod(address, apiSocketMode); err != nil {
+		return fmt.Errorf("failed to set mode on API socket %s: %w", address, err)
+	}
+	dir := filepath.Dir(address)
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return nil // the socket bound, so the directory exists; nothing to say
+	}
+	if mode := fi.Mode().Perm(); mode&0o022 != 0 {
+		logger.Warn("the directory holding the API socket is writable by group or others, "+
+			"so another process there can replace the socket between bind and chmod; "+
+			"prefer a directory owned by this process with mode 0700",
+			slog.String("Topic", "grpc"),
+			slog.String("Directory", dir),
+			slog.String("Mode", fmt.Sprintf("%04o", mode)))
+	}
+	return nil
+}
+
 func (s *server) serve() error {
 	var wg sync.WaitGroup
 	l := []net.Listener{}
 	var err error
 	for _, host := range strings.Split(s.hosts, ",") {
 		network, address := parseHost(host)
+		if network == "unix" {
+			if err := checkUnixSocketPath(address, s.bgpServer.logger); err != nil {
+				return err
+			}
+		}
 		var lis net.Listener
 		lis, err = net.Listen(network, address)
+		if err == nil && network == "unix" {
+			err = hardenUnixSocket(address, s.bgpServer.logger)
+		}
 		if err != nil {
 			s.bgpServer.logger.Warn("listen failed",
 				slog.String("Topic", "grpc"),

@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -136,6 +137,7 @@ func main() {
 		// than as "localhost" so the bind does not depend on how that name
 		// resolves. Set the flag to expose it deliberately.
 		GrpcHosts       string `long:"api-hosts" description:"specify the hosts that gobgpd listens on; loopback by default, set explicitly to expose the API off-host" default:"127.0.0.1:50051,[::1]:50051"`
+		GrpcAllowRemote bool   `long:"api-insecure-allow-remote" description:"permit --api-hosts off-loopback without client-certificate authentication; the API is a write interface, so this exposes route injection"`
 		GracefulRestart bool   `short:"r" long:"graceful-restart" description:"flag restart-state in graceful-restart capability"`
 		Dry             bool   `short:"d" long:"dry-run" description:"check configuration"`
 		PProfHost       string `long:"pprof-host" description:"specify the host that gobgpd listens on for pprof and metrics" default:"localhost:6060"`
@@ -283,22 +285,6 @@ func main() {
 		}
 	}
 
-	// The metrics endpoint is unauthenticated and the default is loopback.
-	// Binding it anywhere else publishes the node's full peer table, its BGP
-	// authentication posture and its build identity to anything that can route
-	// to that address - which under hostNetwork includes the BGP fabric itself.
-	// Kubernetes NetworkPolicy does not cover host-namespace ports, so it is
-	// not a mitigation. Exposing it can be the right call; doing it by accident
-	// is not, so this is loud rather than fatal.
-	if metricsAddr := opts.MetricsHost; metricsAddr != "" && opts.MetricsPath != "" && !isLoopbackHostPort(metricsAddr) {
-		logger.Error("metrics are bound off-loopback and the endpoint is unauthenticated; it exposes the peer table and BGP auth posture to anything that can reach this address",
-			slog.String("Address", metricsAddr))
-	}
-	if pprofEnabled && !isLoopbackHostPort(opts.PProfHost) {
-		logger.Error("pprof is bound off-loopback; /debug/pprof/cmdline exposes the command line, including --sentry-dsn and TLS key paths",
-			slog.String("Address", opts.PProfHost))
-	}
-
 	httpMux := http.NewServeMux()
 	if pprofEnabled {
 		httpMux.HandleFunc("/debug/pprof/", pprof.Index)
@@ -334,6 +320,53 @@ func main() {
 		logger = slog.New(slog.NewTextHandler(output, lopts))
 	} else {
 		logger = slog.New(slog.NewJSONHandler(output, lopts))
+	}
+
+	// These three run here, after the handler above is installed, rather than
+	// where the flags are read. Before it, logger is still slog.Default() -
+	// plain text on stderr - so they bypassed --log-plain and --disable-stdlog
+	// and did not appear in the JSON stream anything is actually parsing.
+	// The metrics endpoint is unauthenticated and the default is loopback.
+	// Binding it anywhere else publishes the node's full peer table, its BGP
+	// authentication posture and its build identity to anything that can route
+	// to that address - which under hostNetwork includes the BGP fabric itself.
+	// Kubernetes NetworkPolicy does not cover host-namespace ports, so it is
+	// not a mitigation. Exposing it can be the right call; doing it by accident
+	// is not, so this is loud rather than fatal.
+	if metricsAddr := opts.MetricsHost; metricsAddr != "" && opts.MetricsPath != "" && !isLoopbackHostPort(metricsAddr) {
+		logger.Error("metrics are bound off-loopback and the endpoint is unauthenticated; it exposes the peer table and BGP auth posture to anything that can reach this address",
+			slog.String("Address", metricsAddr))
+	}
+	// The gRPC API is the one that matters most and had no check at all. Unlike
+	// metrics and pprof, which are read interfaces that leak, this one writes:
+	// AddPeer, AddPath, and in this fork routes into the host FIB. So it is
+	// fatal rather than loud.
+	//
+	// Client authentication means --tls *and* --tls-client-ca-file. --tls alone
+	// is the dangerous middle state: it encrypts, it looks authenticated, and it
+	// authenticates nobody, so it has to fail here too.
+	clientAuth := opts.TLS && len(opts.TLSClientCAFile) != 0
+	for _, host := range strings.Split(opts.GrpcHosts, ",") {
+		host = strings.TrimSpace(host)
+		if host == "" || strings.HasPrefix(host, "unix://") {
+			continue
+		}
+		if isLoopbackHostPort(host) || clientAuth || opts.GrpcAllowRemote {
+			continue
+		}
+		logger.Error("refusing to start: --api-hosts is bound off-loopback with no client-certificate authentication. "+
+			"The API is a write interface - it adds peers and paths and installs routes into the host routing table - "+
+			"and it is unauthenticated unless --tls-client-ca-file is set. "+
+			"Pass --tls with --tls-client-ca-file, or --api-insecure-allow-remote to accept the exposure deliberately.",
+			slog.String("Address", host),
+			slog.Bool("TLS", opts.TLS),
+			slog.Bool("ClientCA", len(opts.TLSClientCAFile) != 0))
+		os.Exit(1)
+	}
+
+	if pprofEnabled && !isLoopbackHostPort(opts.PProfHost) {
+		logger.Error("pprof is bound off-loopback; /debug/pprof/cmdline exposes the command line, including --sentry-dsn and TLS key paths",
+			slog.String("Address", opts.PProfHost))
 	}
 
 	if opts.Dry {
