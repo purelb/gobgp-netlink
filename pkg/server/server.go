@@ -6501,9 +6501,15 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 					Vrf:                ruleProto.Vrf,
 					TableId:            ruleProto.TableId,
 					Metric:             ruleProto.Metric,
-					// The rule proto still says validate-; the config model says
+					// The rule proto says validate-; the config model says
 					// skip-, so it inverts here.
-					SkipNexthopValidation: !ruleProto.ValidateNexthop,
+					//
+					// Absent means validate, which is the documented default
+					// and what the config file already does. It was a plain
+					// bool, so absent was indistinguishable from false and a
+					// client that omitted the field silently got nexthop
+					// validation turned off - the opposite of both.
+					SkipNexthopValidation: ruleProto.ValidateNexthop != nil && !*ruleProto.ValidateNexthop,
 				}
 				rules = append(rules, rule)
 			}

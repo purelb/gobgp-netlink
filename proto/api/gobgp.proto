@@ -668,7 +668,15 @@ message NetlinkExportRuleConfig {
   string vrf = 4; // Target Linux VRF name
   int32 table_id = 5; // Target Linux routing table ID
   uint32 metric = 6; // Route metric
-  bool validate_nexthop = 7; // Whether to validate nexthop reachability
+  // Whether to validate nexthop reachability. Absent means true.
+  //
+  // Explicit presence because the default is true and this is a plain bool:
+  // without it, a client that omitted the field got validation *off*, which is
+  // the opposite of both the documented default and what the config file does.
+  // The config model spells this skip-nexthop-validation and inverts it, so a
+  // TOML user who says nothing gets validation on; the API said nothing and
+  // got it off.
+  optional bool validate_nexthop = 7;
 }
 
 // EnableNetlinkExport configures netlink route export (BGP -> Linux kernel)

@@ -6638,9 +6638,17 @@ type NetlinkExportRuleConfig struct {
 	Vrf                string                 `protobuf:"bytes,4,opt,name=vrf,proto3" json:"vrf,omitempty"`                                                           // Target Linux VRF name
 	TableId            int32                  `protobuf:"varint,5,opt,name=table_id,json=tableId,proto3" json:"table_id,omitempty"`                                   // Target Linux routing table ID
 	Metric             uint32                 `protobuf:"varint,6,opt,name=metric,proto3" json:"metric,omitempty"`                                                    // Route metric
-	ValidateNexthop    bool                   `protobuf:"varint,7,opt,name=validate_nexthop,json=validateNexthop,proto3" json:"validate_nexthop,omitempty"`           // Whether to validate nexthop reachability
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Whether to validate nexthop reachability. Absent means true.
+	//
+	// Explicit presence because the default is true and this is a plain bool:
+	// without it, a client that omitted the field got validation *off*, which is
+	// the opposite of both the documented default and what the config file does.
+	// The config model spells this skip-nexthop-validation and inverts it, so a
+	// TOML user who says nothing gets validation on; the API said nothing and
+	// got it off.
+	ValidateNexthop *bool `protobuf:"varint,7,opt,name=validate_nexthop,json=validateNexthop,proto3,oneof" json:"validate_nexthop,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *NetlinkExportRuleConfig) Reset() {
@@ -6716,8 +6724,8 @@ func (x *NetlinkExportRuleConfig) GetMetric() uint32 {
 }
 
 func (x *NetlinkExportRuleConfig) GetValidateNexthop() bool {
-	if x != nil {
-		return x.ValidateNexthop
+	if x != nil && x.ValidateNexthop != nil {
+		return *x.ValidateNexthop
 	}
 	return false
 }
@@ -16461,15 +16469,16 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\n" +
 	"interfaces\x18\x02 \x03(\tR\n" +
 	"interfaces\"\x1d\n" +
-	"\x1bEnableNetlinkImportResponse\"\xf6\x01\n" +
+	"\x1bEnableNetlinkImportResponse\"\x90\x02\n" +
 	"\x17NetlinkExportRuleConfig\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12%\n" +
 	"\x0ecommunity_list\x18\x02 \x03(\tR\rcommunityList\x120\n" +
 	"\x14large_community_list\x18\x03 \x03(\tR\x12largeCommunityList\x12\x10\n" +
 	"\x03vrf\x18\x04 \x01(\tR\x03vrf\x12\x19\n" +
 	"\btable_id\x18\x05 \x01(\x05R\atableId\x12\x16\n" +
-	"\x06metric\x18\x06 \x01(\rR\x06metric\x12)\n" +
-	"\x10validate_nexthop\x18\a \x01(\bR\x0fvalidateNexthop\"\xa6\x01\n" +
+	"\x06metric\x18\x06 \x01(\rR\x06metric\x12.\n" +
+	"\x10validate_nexthop\x18\a \x01(\bH\x00R\x0fvalidateNexthop\x88\x01\x01B\x13\n" +
+	"\x11_validate_nexthop\"\xa6\x01\n" +
 	"\x1aEnableNetlinkExportRequest\x12-\n" +
 	"\x12dampening_interval\x18\x01 \x01(\rR\x11dampeningInterval\x12%\n" +
 	"\x0eroute_protocol\x18\x02 \x01(\x05R\rrouteProtocol\x122\n" +
@@ -18148,6 +18157,7 @@ func file_api_gobgp_proto_init() {
 		(*WatchEventResponse_Peer)(nil),
 		(*WatchEventResponse_Table)(nil),
 	}
+	file_api_gobgp_proto_msgTypes[106].OneofWrappers = []any{}
 	file_api_gobgp_proto_msgTypes[151].OneofWrappers = []any{}
 	file_api_gobgp_proto_msgTypes[152].OneofWrappers = []any{}
 	file_api_gobgp_proto_msgTypes[153].OneofWrappers = []any{}
