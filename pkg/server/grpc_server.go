@@ -47,6 +47,21 @@ import (
 // Unlimited batch size by default
 const defaultListPathBatchSize = math.MaxUint64
 
+// maxWatchEventBatchSize caps what WatchEvent will preallocate. ListPath can
+// leave its batch size unbounded because it only ever compares against it;
+// WatchEvent used it as a make() capacity, so a client asking for the uint32
+// maximum requested a 4.29e9-element slice of pointers - around 34GB - from a
+// single RPC. Batching above a few thousand paths per message buys nothing, so
+// clamping costs no throughput.
+const maxWatchEventBatchSize = 4096
+
+// clampWatchBatchSize bounds a client-supplied batch size to something safe to
+// preallocate. Split out from watchEvent so it can be tested directly: driving
+// the full watch machinery from a test does not reliably reach the allocation,
+// which made an end-to-end test of this pass whether or not the cap was there.
+func clampWatchBatchSize(requested uint64) int {
+	return int(min(requested, maxWatchEventBatchSize))
+}
 
 type server struct {
 	bgpServer  *BgpServer
@@ -405,28 +420,39 @@ func (s *server) watchEvent(ctx context.Context, r *api.WatchEventRequest, fn fu
 	if len(opts) == 0 {
 		return status.Errorf(codes.InvalidArgument, "no events to watch")
 	}
+	// batch_size arrives from the client as an unbounded uint64 and was handed
+	// straight to make() as a capacity, so a single request could ask for a
+	// slice bigger than the runtime permits - "makeslice: cap out of range",
+	// which is a panic, not an error - or merely big enough to exhaust the
+	// node's memory. It is a batching hint, not an allocation instruction.
+	//
+	// This runs on the watcher goroutine, and WatchBestPath replays immediately
+	// at registration, so the panic landed before the RPC even returned and
+	// nowhere near a handler a recovery interceptor could see.
+	batchSize := clampWatchBatchSize(uint64(r.BatchSize))
+
 	simpleSend := func(paths []*api.Path, when time.Time) {
 		fn(&api.WatchEventResponse{Event: &api.WatchEventResponse_Table{Table: &api.WatchEventResponse_TableEvent{Paths: paths}}}, when)
 	}
 	err := s.bgpServer.WatchEvent(ctx, WatchEventMessageCallbacks{
 		OnPathUpdate: func(pathList []*apiutil.Path, timestamp time.Time) {
-			paths := make([]*api.Path, 0, r.BatchSize)
+			paths := make([]*api.Path, 0, batchSize)
 			for _, path := range pathList {
 				paths = append(paths, toPathApi(path, false, false, false))
-				if r.BatchSize > 0 && len(paths) > int(r.BatchSize) {
+				if batchSize > 0 && len(paths) > batchSize {
 					simpleSend(paths, timestamp)
-					paths = make([]*api.Path, 0, r.BatchSize)
+					paths = make([]*api.Path, 0, batchSize)
 				}
 			}
 			simpleSend(paths, timestamp)
 		},
 		OnBestPath: func(pathList []*apiutil.Path, timestamp time.Time) {
-			pl := make([]*api.Path, 0, r.BatchSize)
+			pl := make([]*api.Path, 0, batchSize)
 			for _, path := range pathList {
 				pl = append(pl, toPathApi(path, false, false, false))
-				if r.BatchSize > 0 && len(pl) > int(r.BatchSize) {
+				if batchSize > 0 && len(pl) > batchSize {
 					simpleSend(pl, timestamp)
-					pl = make([]*api.Path, 0, r.BatchSize)
+					pl = make([]*api.Path, 0, batchSize)
 				}
 			}
 			simpleSend(pl, timestamp)
@@ -1219,10 +1245,23 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
 	}
 	if a.EbgpMultihop != nil {
+		if a.EbgpMultihop.MultihopTtl > math.MaxUint8 {
+			return nil, fmt.Errorf("ebgp-multihop multihop-ttl must be 0-255, got %d", a.EbgpMultihop.MultihopTtl)
+		}
 		pconf.EbgpMultihop.Config.Enabled = a.EbgpMultihop.Enabled
 		pconf.EbgpMultihop.Config.MultihopTtl = uint8(a.EbgpMultihop.MultihopTtl)
 	}
 	if a.TtlSecurity != nil {
+		// Reject rather than truncate. These arrive as uint32 and the internal
+		// model is uint8, so 257 silently became 1 - which for GTSM means
+		// "accept from any hop count", i.e. the control is reported as enabled
+		// and does nothing. It is also non-monotonic: 256 became 0, which the
+		// defaulting then rescued to 255. A value out of range is a mistake
+		// worth telling the caller about, not one to round into a weaker
+		// security posture.
+		if a.TtlSecurity.TtlMin > math.MaxUint8 {
+			return nil, fmt.Errorf("ttl-security ttl-min must be 0-255, got %d", a.TtlSecurity.TtlMin)
+		}
 		pconf.TtlSecurity.Config.Enabled = a.TtlSecurity.Enabled
 		pconf.TtlSecurity.Config.TtlMin = uint8(a.TtlSecurity.TtlMin)
 	}
@@ -1381,10 +1420,23 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
 	}
 	if a.EbgpMultihop != nil {
+		if a.EbgpMultihop.MultihopTtl > math.MaxUint8 {
+			return nil, fmt.Errorf("ebgp-multihop multihop-ttl must be 0-255, got %d", a.EbgpMultihop.MultihopTtl)
+		}
 		pconf.EbgpMultihop.Config.Enabled = a.EbgpMultihop.Enabled
 		pconf.EbgpMultihop.Config.MultihopTtl = uint8(a.EbgpMultihop.MultihopTtl)
 	}
 	if a.TtlSecurity != nil {
+		// Reject rather than truncate. These arrive as uint32 and the internal
+		// model is uint8, so 257 silently became 1 - which for GTSM means
+		// "accept from any hop count", i.e. the control is reported as enabled
+		// and does nothing. It is also non-monotonic: 256 became 0, which the
+		// defaulting then rescued to 255. A value out of range is a mistake
+		// worth telling the caller about, not one to round into a weaker
+		// security posture.
+		if a.TtlSecurity.TtlMin > math.MaxUint8 {
+			return nil, fmt.Errorf("ttl-security ttl-min must be 0-255, got %d", a.TtlSecurity.TtlMin)
+		}
 		pconf.TtlSecurity.Config.Enabled = a.TtlSecurity.Enabled
 		pconf.TtlSecurity.Config.TtlMin = uint8(a.TtlSecurity.TtlMin)
 	}

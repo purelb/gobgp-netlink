@@ -17,7 +17,9 @@ package server
 
 import (
 	"context"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,4 +108,81 @@ func TestBmpWithMalformedAddressReturnsError(t *testing.T) {
 	err = s.DeleteBmp(context.Background(), &api.DeleteBmpRequest{Address: "not-an-address", Port: 11019})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid bmp server address")
+}
+
+// ttl-security ttl-min and ebgp-multihop multihop-ttl arrive as uint32 and are
+// stored as uint8. Truncating 257 to 1 means "accept from any hop count", so
+// GTSM reported itself enabled while doing nothing.
+func TestTtlValuesOutOfRangeAreRejectedNotTruncated(t *testing.T) {
+	s := newPanicTestServer(t)
+
+	err := s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:        &api.PeerConf{NeighborAddress: "198.51.100.30", PeerAsn: 65001},
+		TtlSecurity: &api.TtlSecurity{Enabled: true, TtlMin: 257},
+	}})
+	require.Error(t, err, "257 truncates to 1, which disables the protection it claims to enable")
+	assert.Contains(t, err.Error(), "ttl-min")
+
+	err = s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:         &api.PeerConf{NeighborAddress: "198.51.100.31", PeerAsn: 65001},
+		EbgpMultihop: &api.EbgpMultihop{Enabled: true, MultihopTtl: 300},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multihop-ttl")
+}
+
+// WatchEvent's batch_size was handed straight to make() as a capacity, so a
+// client asking for the uint32 maximum requested ~34GB of pointers from one
+// RPC. It fires on the watcher goroutine, and the initial replay happens at
+// registration, so it landed before the call returned and nowhere a gRPC
+// interceptor could have caught it.
+//
+// This is ListPathRequest's sibling field, not the same one: ListPath takes a
+// uint64 but only ever compares against it, which is why that one is harmless
+// and this one was not.
+//
+// Tested on the clamp directly. An end-to-end watch test was written first and
+// discarded: it passed with the cap reverted, because driving the watch
+// machinery from a test does not reliably reach the allocation. A test that
+// cannot fail is worse than no test.
+func TestClampWatchBatchSize(t *testing.T) {
+	assert.Equal(t, maxWatchEventBatchSize, clampWatchBatchSize(math.MaxUint32),
+		"the uint32 maximum must be capped, not preallocated")
+	assert.Equal(t, maxWatchEventBatchSize, clampWatchBatchSize(math.MaxUint64))
+	assert.Equal(t, maxWatchEventBatchSize, clampWatchBatchSize(maxWatchEventBatchSize+1))
+
+	// Values at or below the cap pass through, so batching still behaves.
+	assert.Equal(t, maxWatchEventBatchSize, clampWatchBatchSize(maxWatchEventBatchSize))
+	assert.Equal(t, 10, clampWatchBatchSize(10))
+	assert.Equal(t, 0, clampWatchBatchSize(0), "0 means unbatched and must stay 0")
+}
+
+// A filter peer address that cannot be parsed used to panic on the watcher
+// goroutine at the next update. It must be refused where the client can see it.
+func TestWatchEventMalformedFilterAddressReturnsError(t *testing.T) {
+	s := newPanicTestServer(t)
+
+	srv := &server{bgpServer: s}
+	err := srv.watchEvent(context.Background(), &api.WatchEventRequest{
+		Table: &api.WatchEventRequest_Table{
+			Filters: []*api.WatchEventRequest_Table_Filter{
+				{Type: api.WatchEventRequest_Table_Filter_TYPE_ADJIN, PeerAddress: "not-an-address"},
+			},
+		},
+	}, func(*api.WatchEventResponse, time.Time) {})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid filter peer address")
+}
+
+// AddRpki stored the address without parsing it, so the panic surfaced later on
+// any ListRpki - a read call, unrelated to the one that planted it.
+func TestRpkiMalformedAddressRejectedAtWriteTime(t *testing.T) {
+	s := newPanicTestServer(t)
+
+	err := s.AddRpki(context.Background(), &api.AddRpkiRequest{Address: "not-an-address", Port: 323})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid rpki server address")
+
+	// And the read path stays walkable.
+	require.NoError(t, s.ListRpki(context.Background(), &api.ListRpkiRequest{}, func(*api.Rpki) {}))
 }
