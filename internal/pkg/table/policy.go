@@ -833,10 +833,55 @@ func NewSingleAsPathMatch(arg string) *singleAsPathMatch {
 }
 
 type AsPathSet struct {
-	typ        DefinedType
-	name       string
+	typ  DefinedType
+	name string
+	// entries is the source of truth: the strings as configured, in the order
+	// they were given. list and singleList are derived from it for matching.
+	//
+	// A parallel []string would not work here, unlike regExpSet. An as-path set
+	// splits its input across two lists - the four single-AS shapes match
+	// against the AS_SEQ list, everything else against the AS_PATH string - so
+	// the interleaving is already lost, and Remove splices the two
+	// independently. There is no index to hang an original off.
+	//
+	// It also fixes the ordering: List() emitted every singleList entry before
+	// every list entry, so a set mixing the two came back reordered as well as
+	// rewritten.
+	entries    []asPathEntry
 	list       []*regexp.Regexp
 	singleList []*singleAsPathMatch
+}
+
+// asPathEntry pairs one configured string with whichever matcher it compiled
+// to. Exactly one of single and re is non-nil.
+type asPathEntry struct {
+	original string
+	single   *singleAsPathMatch
+	re       *regexp.Regexp
+}
+
+// rebuild derives the matching lists from entries. Every mutator calls it, so
+// the two representations cannot drift - the same shape CommunitySet already
+// uses for its matchers.
+func (s *AsPathSet) rebuild() {
+	s.list = make([]*regexp.Regexp, 0, len(s.entries))
+	s.singleList = make([]*singleAsPathMatch, 0, len(s.entries))
+	for _, e := range s.entries {
+		if e.single != nil {
+			s.singleList = append(s.singleList, e.single)
+			continue
+		}
+		s.list = append(s.list, e.re)
+	}
+}
+
+// compiledString is how an entry is compared for removal: the compiled form, so
+// that removing an entry works whichever equivalent spelling is used.
+func (e asPathEntry) compiledString() string {
+	if e.single != nil {
+		return e.single.String()
+	}
+	return e.re.String()
 }
 
 func (s *AsPathSet) Name() string {
@@ -851,8 +896,8 @@ func (lhs *AsPathSet) Append(arg DefinedSet) error {
 	if lhs.Type() != arg.Type() {
 		return fmt.Errorf("can't append to different type of defined-set")
 	}
-	lhs.list = append(lhs.list, arg.(*AsPathSet).list...)
-	lhs.singleList = append(lhs.singleList, arg.(*AsPathSet).singleList...)
+	lhs.entries = append(lhs.entries, arg.(*AsPathSet).entries...)
+	lhs.rebuild()
 	return nil
 }
 
@@ -860,28 +905,33 @@ func (lhs *AsPathSet) Remove(arg DefinedSet) error {
 	if lhs.Type() != arg.Type() {
 		return fmt.Errorf("can't append to different type of defined-set")
 	}
-	newList := make([]*regexp.Regexp, 0, len(lhs.list))
-	for _, x := range lhs.list {
+	// Compare on the compiled form, as before, so an entry can be removed by
+	// any spelling that compiles to the same matcher. Filtering the single
+	// ordered entry list keeps the two derived lists consistent by
+	// construction - they used to be spliced independently.
+	rhs := arg.(*AsPathSet)
+	kept := make([]asPathEntry, 0, len(lhs.entries))
+	for _, x := range lhs.entries {
 		found := false
-		for _, y := range arg.(*AsPathSet).list {
-			if x.String() == y.String() {
+		for _, y := range rhs.entries {
+			if x.single != nil && y.single != nil {
+				if x.single.Equal(y.single) {
+					found = true
+					break
+				}
+				continue
+			}
+			if x.single == nil && y.single == nil && x.compiledString() == y.compiledString() {
 				found = true
 				break
 			}
 		}
 		if !found {
-			newList = append(newList, x)
+			kept = append(kept, x)
 		}
 	}
-	lhs.list = newList
-	newSingleList := make([]*singleAsPathMatch, 0, len(lhs.singleList))
-	for _, x := range lhs.singleList {
-		found := slices.ContainsFunc(arg.(*AsPathSet).singleList, x.Equal)
-		if !found {
-			newSingleList = append(newSingleList, x)
-		}
-	}
-	lhs.singleList = newSingleList
+	lhs.entries = kept
+	lhs.rebuild()
 	return nil
 }
 
@@ -890,18 +940,15 @@ func (lhs *AsPathSet) Replace(arg DefinedSet) error {
 	if !ok {
 		return fmt.Errorf("type cast failed")
 	}
-	lhs.list = rhs.list
-	lhs.singleList = rhs.singleList
+	lhs.entries = rhs.entries
+	lhs.rebuild()
 	return nil
 }
 
 func (s *AsPathSet) List() []string {
-	list := make([]string, 0, len(s.list)+len(s.singleList))
-	for _, exp := range s.singleList {
-		list = append(list, exp.String())
-	}
-	for _, exp := range s.list {
-		list = append(list, exp.String())
+	list := make([]string, 0, len(s.entries))
+	for _, e := range s.entries {
+		list = append(list, e.original)
 	}
 	return list
 }
@@ -929,25 +976,28 @@ func NewAsPathSet(c oc.AsPathSet) (*AsPathSet, error) {
 		}
 		return nil, fmt.Errorf("empty as-path set name")
 	}
-	list := make([]*regexp.Regexp, 0, len(c.AsPathList))
-	singleList := make([]*singleAsPathMatch, 0, len(c.AsPathList))
+	entries := make([]asPathEntry, 0, len(c.AsPathList))
 	for _, x := range c.AsPathList {
-		if s := NewSingleAsPathMatch(x); s != nil {
-			singleList = append(singleList, s)
-		} else {
-			exp, err := regexp.Compile(strings.ReplaceAll(x, "_", ASPATH_REGEXP_MAGIC))
-			if err != nil {
-				return nil, fmt.Errorf("invalid regular expression: %s", x)
-			}
-			list = append(list, exp)
+		if m := NewSingleAsPathMatch(x); m != nil {
+			entries = append(entries, asPathEntry{original: x, single: m})
+			continue
 		}
+		// The magic substitution is why the configured string has to be kept:
+		// "_65000_" compiles to a regex containing (^|[,{}() ]|$) twice, and
+		// that is what used to be reported back.
+		exp, err := regexp.Compile(strings.ReplaceAll(x, "_", ASPATH_REGEXP_MAGIC))
+		if err != nil {
+			return nil, fmt.Errorf("invalid regular expression: %s", x)
+		}
+		entries = append(entries, asPathEntry{original: x, re: exp})
 	}
-	return &AsPathSet{
-		typ:        DEFINED_TYPE_AS_PATH,
-		name:       name,
-		list:       list,
-		singleList: singleList,
-	}, nil
+	set := &AsPathSet{
+		typ:     DEFINED_TYPE_AS_PATH,
+		name:    name,
+		entries: entries,
+	}
+	set.rebuild()
+	return set, nil
 }
 
 type regExpSet struct {

@@ -108,3 +108,68 @@ func TestCommunitySetStillMatchesAfterRecordingOriginals(t *testing.T) {
 	assert.True(t, s.list[0].MatchString("65535:65281"),
 		"the well-known name must still compile to a regex that matches the numeric form")
 }
+
+// As-path sets are the worst of the group. A general regex is compiled after
+// substituting ASPATH_REGEXP_MAGIC for every underscore, so "_65000_65001_"
+// came back as "(^|[,{}() ]|$)65000(^|[,{}() ]|$)65001(^|[,{}() ]|$)".
+//
+// They were also reordered: List() emitted every single-AS match before every
+// general regex, so a set mixing the two came back in a different order than it
+// went in - a second reason a diffing consumer could never converge.
+func TestAsPathSetRoundTripsWhatWasConfigured(t *testing.T) {
+	// Deliberately interleaved: general, single, general, single. The four
+	// single-AS shapes are ^N_, _N$, _N_ and ^N$.
+	in := []string{"_65000_65001_", "^65100_", "65200$|65201$", "_65300$"}
+	s, err := NewAsPathSet(oc.AsPathSet{AsPathSetName: "a1", AsPathList: in})
+	require.NoError(t, err)
+
+	assert.Equal(t, in, s.List(),
+		"as-path sets must report the configured text, in the configured order")
+	assert.Equal(t, in, s.ToConfig().AsPathList)
+}
+
+// The split into two matching lists must still happen - they match against
+// different things (AS_SEQ list vs AS_PATH string), so this is not cosmetic.
+func TestAsPathSetStillSplitsMatchersAfterRestructure(t *testing.T) {
+	s, err := NewAsPathSet(oc.AsPathSet{
+		AsPathSetName: "a1",
+		AsPathList:    []string{"_65000_65001_", "^65100_"},
+	})
+	require.NoError(t, err)
+
+	assert.Len(t, s.singleList, 1, "^65100_ is a single-AS shape")
+	assert.Len(t, s.list, 1, "_65000_65001_ is a general regex")
+	assert.Contains(t, s.list[0].String(), ASPATH_REGEXP_MAGIC,
+		"the compiled form must still carry the magic substitution; only the reported text changed")
+}
+
+func TestAsPathSetRemoveKeepsOrderAndOriginals(t *testing.T) {
+	s, err := NewAsPathSet(oc.AsPathSet{
+		AsPathSetName: "a1",
+		AsPathList:    []string{"_65000_65001_", "^65100_", "_65300$"},
+	})
+	require.NoError(t, err)
+
+	rm, err := NewAsPathSet(oc.AsPathSet{AsPathSetName: "a1", AsPathList: []string{"^65100_"}})
+	require.NoError(t, err)
+	require.NoError(t, s.Remove(rm))
+
+	assert.Equal(t, []string{"_65000_65001_", "_65300$"}, s.List())
+	assert.Len(t, s.singleList, 1, "the derived lists must be rebuilt, not left stale")
+	assert.Len(t, s.list, 1)
+}
+
+func TestAsPathSetAppendKeepsOrderAndOriginals(t *testing.T) {
+	// "_65000_65001_" is a general regex; "^65100$" is one of the four
+	// single-AS shapes. Appending one of each proves both derived lists are
+	// rebuilt. ("_65000_" alone would NOT do - it is a single-AS shape too.)
+	s, err := NewAsPathSet(oc.AsPathSet{AsPathSetName: "a1", AsPathList: []string{"_65000_65001_"}})
+	require.NoError(t, err)
+	add, err := NewAsPathSet(oc.AsPathSet{AsPathSetName: "a1", AsPathList: []string{"^65100$"}})
+	require.NoError(t, err)
+
+	require.NoError(t, s.Append(add))
+	assert.Equal(t, []string{"_65000_65001_", "^65100$"}, s.List())
+	assert.Len(t, s.list, 1, "the general regex")
+	assert.Len(t, s.singleList, 1, "the single-AS shape")
+}
