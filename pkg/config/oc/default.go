@@ -73,8 +73,9 @@ func RegisterConfiguredFields(addr string, n any) {
 // inherit its field-presence.
 func UnregisterConfiguredFields(addr string) {
 	configuredFieldsMu.Lock()
-	defer configuredFieldsMu.Unlock()
 	delete(configuredFields, addr)
+	configuredFieldsMu.Unlock()
+	forgetProvenance(addr)
 }
 
 func lookupConfiguredFields(addr string) (any, bool) {
@@ -104,6 +105,55 @@ func MarkBlockConfigured(block any) map[string]any {
 		}
 	}
 	return map[string]any{"config": fields}
+}
+
+// BlockSource says where a neighbor's configuration block ended up coming
+// from. GetRunningConfig and ListPeer both report the config as *resolved* -
+// defaults applied, peer-group and global inheritance already folded in - so
+// without this an operator cannot tell a value they set from one they got, and
+// after an inheritance change that is exactly the question they need answered.
+type BlockSource string
+
+const (
+	SourceNeighbor  BlockSource = "neighbor"
+	SourcePeerGroup BlockSource = "peer-group"
+	SourceGlobal    BlockSource = "global"
+)
+
+var (
+	provenanceMu sync.RWMutex
+	provenance   = map[string]map[string]BlockSource{}
+)
+
+func recordProvenance(key, block string, src BlockSource) {
+	if key == "" {
+		return
+	}
+	provenanceMu.Lock()
+	defer provenanceMu.Unlock()
+	if provenance[key] == nil {
+		provenance[key] = map[string]BlockSource{}
+	}
+	provenance[key][block] = src
+}
+
+// NeighborProvenance returns where each block of a neighbor's config came from.
+// Blocks that were left at their defaults are absent rather than listed, so the
+// output names only what was actually inherited or set.
+func NeighborProvenance(key string) map[string]BlockSource {
+	provenanceMu.RLock()
+	defer provenanceMu.RUnlock()
+	out := make(map[string]BlockSource, len(provenance[key]))
+	for k, v := range provenance[key] {
+		out[k] = v
+	}
+	return out
+}
+
+func forgetProvenance(key string) {
+	provenanceMu.Lock()
+	defer provenanceMu.Unlock()
+	delete(provenance, key)
 }
 
 // NeighborPresenceKey is the key configuredFields is written and read under.
@@ -173,6 +223,7 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 		var none GracefulRestartConfig
 		if n.GracefulRestart.Config == none {
 			n.GracefulRestart.Config = g.GracefulRestart.Config
+			recordProvenance(NeighborPresenceKey(&n.Config), "graceful-restart", SourceGlobal)
 			// long-lived is not propagated. The per-family LLGR flag is never
 			// derived from the neighbor-level one, so switching it on here
 			// would advertise a long-lived capability carrying no families -
@@ -682,6 +733,22 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 		v.Set("neighbor", val)
 	} else {
 		v.Set("neighbor.config.peer-group", c.Config.PeerGroup)
+	}
+
+	// Record where each block ends up coming from, at the one point that knows.
+	// A block the neighbor declared is the neighbor's; anything else that the
+	// group actually carries is the group's.
+	key := NeighborPresenceKey(&c.Config)
+	for _, b := range []string{
+		"timers", "transport", "error-handling", "logging-options", "ebgp-multihop",
+		"route-reflector", "as-path-options", "add-paths", "graceful-restart",
+		"apply-policy", "use-multiple-paths", "route-server", "ttl-security", "bfd",
+	} {
+		if v.IsSet("neighbor." + b + ".config") {
+			recordProvenance(key, b, SourceNeighbor)
+			continue
+		}
+		recordProvenance(key, b, SourcePeerGroup)
 	}
 
 	overwriteConfig(&c.Config, &pg.Config, "neighbor.config", v)

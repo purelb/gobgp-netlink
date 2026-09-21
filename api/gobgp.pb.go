@@ -1818,10 +1818,21 @@ func (x *GetNetlinkResponse) GetRouteProtocol() int32 {
 }
 
 type GetRunningConfigRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Format        ConfigFormat           `protobuf:"varint,1,opt,name=format,proto3,enum=api.ConfigFormat" json:"format,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Format ConfigFormat           `protobuf:"varint,1,opt,name=format,proto3,enum=api.ConfigFormat" json:"format,omitempty"`
+	// Also report where each peer's configuration blocks came from - the peer
+	// itself, its peer group, or the global block.
+	//
+	// The running config is the *resolved* configuration: defaults applied and
+	// inheritance already folded in, which is what makes it useful and also
+	// means a value you set and a value you inherited look identical. This
+	// answers that.
+	//
+	// Off by default, and appended rather than mixed in, so the TOML output
+	// stays loadable as a gobgpd config file.
+	IncludeProvenance bool `protobuf:"varint,2,opt,name=include_provenance,json=includeProvenance,proto3" json:"include_provenance,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *GetRunningConfigRequest) Reset() {
@@ -1859,6 +1870,13 @@ func (x *GetRunningConfigRequest) GetFormat() ConfigFormat {
 		return x.Format
 	}
 	return ConfigFormat_CONFIG_FORMAT_UNSPECIFIED
+}
+
+func (x *GetRunningConfigRequest) GetIncludeProvenance() bool {
+	if x != nil {
+		return x.IncludeProvenance
+	}
+	return false
 }
 
 type GetRunningConfigResponse struct {
@@ -16076,9 +16094,10 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\vvrf_imports\x18\x05 \x03(\v2\x15.api.NetlinkVrfImportR\n" +
 	"vrfImports\x12-\n" +
 	"\x12dampening_interval\x18\x06 \x01(\rR\x11dampeningInterval\x12%\n" +
-	"\x0eroute_protocol\x18\a \x01(\x05R\rrouteProtocol\"D\n" +
+	"\x0eroute_protocol\x18\a \x01(\x05R\rrouteProtocol\"s\n" +
 	"\x17GetRunningConfigRequest\x12)\n" +
-	"\x06format\x18\x01 \x01(\x0e2\x11.api.ConfigFormatR\x06format\"2\n" +
+	"\x06format\x18\x01 \x01(\x0e2\x11.api.ConfigFormatR\x06format\x12-\n" +
+	"\x12include_provenance\x18\x02 \x01(\bR\x11includeProvenance\"2\n" +
 	"\x18GetRunningConfigResponse\x12\x16\n" +
 	"\x06config\x18\x01 \x01(\tR\x06config\"6\n" +
 	"\x0fStartBgpRequest\x12#\n" +

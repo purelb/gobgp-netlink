@@ -24,7 +24,7 @@ import (
 	"github.com/osrg/gobgp/v4/api"
 )
 
-func showRunningConfig(format string) error {
+func showRunningConfig(format string, provenance bool) error {
 	var f api.ConfigFormat
 	switch format {
 	case "", "json":
@@ -35,7 +35,10 @@ func showRunningConfig(format string) error {
 		return fmt.Errorf("invalid format %q: json or toml", format)
 	}
 
-	rsp, err := client.GetRunningConfig(context.Background(), &api.GetRunningConfigRequest{Format: f})
+	rsp, err := client.GetRunningConfig(context.Background(), &api.GetRunningConfigRequest{
+		Format:            f,
+		IncludeProvenance: provenance,
+	})
 	if err != nil {
 		return err
 	}
@@ -45,6 +48,7 @@ func showRunningConfig(format string) error {
 
 func newConfigCmd() *cobra.Command {
 	var format string
+	var provenance bool
 
 	runningCmd := &cobra.Command{
 		Use:   "running",
@@ -57,15 +61,24 @@ peer-group inheritance are already resolved - and it includes settings that no
 other RPC reports. Auth passwords are shown as "<redacted>" when set, so the
 output is not directly loadable as a config file when authentication is in use.
 
+--provenance additionally reports which of each peer's configuration blocks
+were inherited rather than set on the peer, and whether they came from its peer
+group or from the global block. Because the output above is the resolved
+configuration, a value that was set and a value that was inherited otherwise
+look identical. The report is appended as comments (TOML) or a trailing object
+(JSON), so it does not affect loading the config back.
+
 It is a debugging and verification surface. The shape is gobgpd's internal
 configuration model, which is generated from YANG and can change without a
 proto version bump, so do not build control logic against its field layout.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return showRunningConfig(format)
+			return showRunningConfig(format, provenance)
 		},
 	}
 	runningCmd.Flags().StringVarP(&format, "format", "f", "json", "output format: json or toml")
+	runningCmd.Flags().BoolVar(&provenance, "provenance", false,
+		"also report which peer configuration blocks were inherited, and from where")
 
 	configCmd := &cobra.Command{
 		Use:   "config",

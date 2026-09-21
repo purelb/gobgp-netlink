@@ -3867,6 +3867,9 @@ func (s *BgpServer) GetRunningConfig(ctx context.Context, r *api.GetRunningConfi
 
 		var err error
 		out, err = marshalRunningConfig(&cfg, r.Format)
+		if err == nil && r.IncludeProvenance {
+			out += provenanceReport(cfg.Neighbors, r.Format)
+		}
 		return err
 	}, false)
 	if err != nil {
@@ -3894,6 +3897,67 @@ func redactRunningConfig(cfg *oc.Bgp) {
 		redact(&cfg.PeerGroups[i].Config.AuthPassword)
 		redact(&cfg.PeerGroups[i].State.AuthPassword)
 	}
+}
+
+// provenanceReport says where each peer's configuration blocks came from.
+//
+// It is appended to the running config rather than folded into it, and only
+// when asked for, because the TOML output's whole point is that it can be
+// loaded back as a config file. So it is emitted as comments for TOML and as a
+// trailing object for JSON: present for a human or a differ, inert for the
+// config loader.
+//
+// Only blocks that were inherited are listed. A block the peer set itself is
+// not interesting here - the config already shows it, and saying "neighbor" for
+// every untouched block would bury the two or three lines that matter.
+func provenanceReport(neighbors []oc.Neighbor, format api.ConfigFormat) string {
+	type peerProv struct {
+		Address string                    `json:"address"`
+		Blocks  map[string]oc.BlockSource `json:"blocks"`
+	}
+	report := make([]peerProv, 0, len(neighbors))
+	for _, n := range neighbors {
+		key := oc.NeighborPresenceKey(&n.Config)
+		if key == "" {
+			key = n.State.NeighborAddress.String()
+		}
+		inherited := map[string]oc.BlockSource{}
+		for block, src := range oc.NeighborProvenance(key) {
+			if src == oc.SourceNeighbor {
+				continue
+			}
+			inherited[block] = src
+		}
+		if len(inherited) == 0 {
+			continue
+		}
+		report = append(report, peerProv{Address: key, Blocks: inherited})
+	}
+	if len(report) == 0 {
+		return ""
+	}
+	slices.SortFunc(report, func(a, b peerProv) int { return strings.Compare(a.Address, b.Address) })
+
+	var sb strings.Builder
+	if format == api.ConfigFormat_CONFIG_FORMAT_TOML {
+		sb.WriteString("\n# inherited configuration blocks, and where each came from\n")
+		for _, p := range report {
+			blocks := make([]string, 0, len(p.Blocks))
+			for b := range p.Blocks {
+				blocks = append(blocks, b)
+			}
+			slices.Sort(blocks)
+			for _, b := range blocks {
+				fmt.Fprintf(&sb, "# %s: %s <- %s\n", p.Address, b, p.Blocks[b])
+			}
+		}
+		return sb.String()
+	}
+	b, err := json.MarshalIndent(map[string]any{"inherited": report}, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return "\n" + string(b) + "\n"
 }
 
 func marshalRunningConfig(cfg *oc.Bgp, format api.ConfigFormat) (string, error) {

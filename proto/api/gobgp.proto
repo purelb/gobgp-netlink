@@ -177,6 +177,17 @@ enum ConfigFormat {
 
 message GetRunningConfigRequest {
   ConfigFormat format = 1;
+  // Also report where each peer's configuration blocks came from - the peer
+  // itself, its peer group, or the global block.
+  //
+  // The running config is the *resolved* configuration: defaults applied and
+  // inheritance already folded in, which is what makes it useful and also
+  // means a value you set and a value you inherited look identical. This
+  // answers that.
+  //
+  // Off by default, and appended rather than mixed in, so the TOML output
+  // stays loadable as a gobgpd config file.
+  bool include_provenance = 2;
 }
 
 message GetRunningConfigResponse {

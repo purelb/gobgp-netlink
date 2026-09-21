@@ -18,6 +18,7 @@ package server
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,4 +279,55 @@ func TestGracefulRestartStillInheritsFromPeerGroup(t *testing.T) {
 	require.NotNil(t, got.GracefulRestart)
 
 	assert.True(t, got.GracefulRestart.Enabled, "a neighbor that sent no block must inherit the group's")
+}
+
+// The running config and ListPeer both report the *resolved* configuration, so
+// a value the operator set and a value the peer inherited look identical. After
+// an inheritance change that is the first question anyone asks, and nothing
+// could answer it.
+func TestRunningConfigReportsInheritance(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:            &api.PeerGroupConf{PeerGroupName: "edge3", PeerAsn: 65001},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 90},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: "198.51.100.50", PeerAsn: 65001, PeerGroup: "edge3"},
+		// Sends no graceful-restart block, so it inherits the group's.
+	}}))
+
+	t.Run("off by default, so existing output is unchanged", func(t *testing.T) {
+		rsp, err := s.GetRunningConfig(ctx, &api.GetRunningConfigRequest{
+			Format: api.ConfigFormat_CONFIG_FORMAT_TOML,
+		})
+		require.NoError(t, err)
+		assert.NotContains(t, rsp.Config, "inherited configuration blocks")
+	})
+
+	t.Run("reports the block and where it came from", func(t *testing.T) {
+		rsp, err := s.GetRunningConfig(ctx, &api.GetRunningConfigRequest{
+			Format:            api.ConfigFormat_CONFIG_FORMAT_TOML,
+			IncludeProvenance: true,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, rsp.Config, "198.51.100.50: graceful-restart <- peer-group",
+			"a block taken from the peer group must say so")
+	})
+
+	t.Run("the report is comments, so TOML stays loadable", func(t *testing.T) {
+		rsp, err := s.GetRunningConfig(ctx, &api.GetRunningConfigRequest{
+			Format:            api.ConfigFormat_CONFIG_FORMAT_TOML,
+			IncludeProvenance: true,
+		})
+		require.NoError(t, err)
+		for line := range strings.SplitSeq(rsp.Config[strings.Index(rsp.Config, "# inherited"):], "\n") {
+			if line == "" {
+				continue
+			}
+			assert.True(t, strings.HasPrefix(line, "#"),
+				"every appended line must be a comment, or the output stops being a config file: %q", line)
+		}
+	})
 }
