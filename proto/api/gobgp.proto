@@ -856,6 +856,13 @@ message ListBmpResponse {
     message Conf {
       string address = 1;
       uint32 port = 2;
+      // The rest of what AddBmp accepts. These were settable and unreadable:
+      // which monitoring policy a station uses decides what is exported to it,
+      // and a client had no way to confirm it.
+      AddBmpRequest.MonitoringPolicy policy = 3;
+      string sys_name = 4;
+      string sys_descr = 5;
+      int32 statistics_timeout = 6;
     }
     Conf conf = 1;
     message State {
@@ -1666,6 +1673,10 @@ message Confederation {
 message RPKIConf {
   string address = 1;
   uint32 remote_port = 2;
+  // Accepted by AddRpki and previously reported nowhere. Reports the effective
+  // value, so a caller that sent 0 sees the 3600 second default that was
+  // applied rather than the 0 it sent.
+  int64 record_lifetime = 3;
 }
 
 message RPKIState {

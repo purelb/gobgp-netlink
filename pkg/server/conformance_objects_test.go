@@ -100,17 +100,16 @@ func TestConformanceVrfRoundTrip(t *testing.T) {
 	assert.True(t, proto.Equal(sent.ExportRt[0], got.ExportRt[0]))
 }
 
-// RPKI and BMP both accept more than they report. That is the same shape as the
-// defects fixed in this release, so it is recorded here rather than left for
-// someone to rediscover: these are the fields a client can set and can never
-// read back.
-var writeOnlyObjectFields = map[string]string{
-	"AddRpkiRequest.lifetime":          "accepted and used for the session, and RPKIState reports uptime/downtime/serial instead - there is no read path for the configured value",
-	"AddBmpRequest.policy":             "chooses pre/post/local monitoring; ListBmp reports only address and port",
-	"AddBmpRequest.sys_name":           "sent in the BMP Initiation message; not reported",
-	"AddBmpRequest.sys_descr":          "as sys_name",
-	"AddBmpRequest.statistics_timeout": "drives the statistics timer; not reported",
-}
+// RPKI and BMP both used to accept more than they reported - the same shape as
+// the defects fixed elsewhere in this release. Writing this suite is what found
+// them, and they are fixed rather than recorded: the read messages carry the
+// remaining fields now, so the tests below assert that the whole of each
+// request survives.
+//
+// The map stays, empty. The classification guard still consults it, so a field
+// that genuinely has no read path has somewhere to be declared, with a reason,
+// rather than being quietly left out.
+var writeOnlyObjectFields = map[string]string{}
 
 func TestConformanceRpkiRoundTrip(t *testing.T) {
 	s := newObjConformanceServer(t)
@@ -128,9 +127,8 @@ func TestConformanceRpkiRoundTrip(t *testing.T) {
 	assert.Equal(t, "203.0.113.10", got.Conf.Address)
 	assert.EqualValues(t, 3323, got.Conf.RemotePort)
 
-	// lifetime is in writeOnlyObjectFields: there is nothing to assert about it
-	// on the read side, which is the point of recording it.
-	assert.Contains(t, writeOnlyObjectFields, "AddRpkiRequest.lifetime")
+	assert.EqualValues(t, 600, got.Conf.RecordLifetime,
+		"the record lifetime was accepted and reported nowhere")
 }
 
 func TestConformanceBmpRoundTrip(t *testing.T) {
@@ -152,6 +150,25 @@ func TestConformanceBmpRoundTrip(t *testing.T) {
 
 	assert.Equal(t, "203.0.113.20", got.Conf.Address)
 	assert.EqualValues(t, 11019, got.Conf.Port)
+	assert.Equal(t, api.AddBmpRequest_MONITORING_POLICY_BOTH, got.Conf.Policy,
+		"the monitoring policy decides what is exported to this station; it must be readable")
+	assert.Equal(t, "conformance", got.Conf.SysName)
+	assert.Equal(t, "conformance run", got.Conf.SysDescr)
+}
+
+// The default the daemon applies has to be visible too, or a caller that sent
+// nothing cannot tell what is in force.
+func TestConformanceRpkiReportsTheDefaultLifetime(t *testing.T) {
+	s := newObjConformanceServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.AddRpki(ctx, &api.AddRpkiRequest{Address: "203.0.113.11", Port: 3323}))
+
+	var got *api.Rpki
+	require.NoError(t, s.ListRpki(ctx, &api.ListRpkiRequest{}, func(r *api.Rpki) { got = r }))
+	require.NotNil(t, got)
+	assert.EqualValues(t, 3600, got.Conf.RecordLifetime,
+		"a caller that sent 0 must see the applied default, not the 0 it sent")
 }
 
 // Every field of these write messages must either be asserted above or recorded
@@ -161,11 +178,16 @@ func TestConformanceBmpRoundTrip(t *testing.T) {
 func TestEveryObjectWriteFieldIsClassified(t *testing.T) {
 	covered := map[string]bool{
 		// asserted in TestConformanceRpkiRoundTrip
-		"AddRpkiRequest.address": true,
-		"AddRpkiRequest.port":    true,
+		"AddRpkiRequest.address":  true,
+		"AddRpkiRequest.port":     true,
+		"AddRpkiRequest.lifetime": true,
 		// asserted in TestConformanceBmpRoundTrip
-		"AddBmpRequest.address": true,
-		"AddBmpRequest.port":    true,
+		"AddBmpRequest.address":            true,
+		"AddBmpRequest.port":               true,
+		"AddBmpRequest.policy":             true,
+		"AddBmpRequest.sys_name":           true,
+		"AddBmpRequest.sys_descr":          true,
+		"AddBmpRequest.statistics_timeout": true,
 	}
 
 	for _, m := range []proto.Message{

@@ -338,6 +338,10 @@ func (m *roaManager) GetServers() []*oc.RpkiServer {
 				// Note: RpkiServerConfig.Port is uint32 type, but the TCP/UDP
 				// port is 16-bit length.
 				Port: func() uint32 { p, _ := strconv.ParseUint(port, 10, 16); return uint32(p) }(),
+				// The effective lifetime, so a caller that sent 0 sees the
+				// default that was applied rather than the 0 it sent. It was
+				// accepted by AddRpki and reported nowhere.
+				RecordLifetime: client.lifetime,
 			},
 			State: client.state,
 		})

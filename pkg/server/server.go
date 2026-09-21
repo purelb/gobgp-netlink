@@ -2407,6 +2407,26 @@ func (s *BgpServer) EnableZebra(ctx context.Context, r *api.EnableZebraRequest) 
 // bmpMonitoringPolicyFromAPI maps gRPC enum values to OpenConfig string policies.
 // Do not use oc.IntToBmpRouteMonitoringPolicyTypeMap[int(policy)]: protobuf assigns
 // MONITORING_POLICY_PRE=1..ALL=5 with UNSPECIFIED=0, while the OC map uses 0..4 only.
+// bmpMonitoringPolicyToAPI is the inverse, for the read path. Without it the
+// policy was write-only: a client could set which monitoring policy a station
+// used and never read it back, although it decides what is exported there.
+func bmpMonitoringPolicyToAPI(p oc.BmpRouteMonitoringPolicyType) api.AddBmpRequest_MonitoringPolicy {
+	switch p {
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_PRE_POLICY:
+		return api.AddBmpRequest_MONITORING_POLICY_PRE
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_POST_POLICY:
+		return api.AddBmpRequest_MONITORING_POLICY_POST
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_BOTH:
+		return api.AddBmpRequest_MONITORING_POLICY_BOTH
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_LOCAL_RIB:
+		return api.AddBmpRequest_MONITORING_POLICY_LOCAL
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_ALL:
+		return api.AddBmpRequest_MONITORING_POLICY_ALL
+	default:
+		return api.AddBmpRequest_MONITORING_POLICY_UNSPECIFIED
+	}
+}
+
 func bmpMonitoringPolicyFromAPI(p api.AddBmpRequest_MonitoringPolicy) oc.BmpRouteMonitoringPolicyType {
 	switch p {
 	case api.AddBmpRequest_MONITORING_POLICY_PRE:
@@ -2494,8 +2514,12 @@ func (s *BgpServer) ListBmp(ctx context.Context, req *api.ListBmpRequest, fn fun
 		for _, s := range s.bmpManager.clientMap {
 			stations = append(stations, &api.ListBmpResponse_BmpStation{
 				Conf: &api.ListBmpResponse_BmpStation_Conf{
-					Address: s.c.Address.String(),
-					Port:    s.c.Port,
+					Address:           s.c.Address.String(),
+					Port:              s.c.Port,
+					Policy:            bmpMonitoringPolicyToAPI(s.c.RouteMonitoringPolicy),
+					SysName:           s.c.SysName,
+					SysDescr:          s.c.SysDescr,
+					StatisticsTimeout: int32(s.c.StatisticsTimeout),
 				},
 				State: &api.ListBmpResponse_BmpStation_State{
 					Uptime:   oc.ProtoTimestamp(atomic.LoadInt64(&s.uptime)),
@@ -5359,8 +5383,9 @@ func (s *BgpServer) ListRpki(ctx context.Context, r *api.ListRpkiRequest, fn fun
 			sent := &r.State.RpkiMessages.RpkiSent
 			rpki := &api.Rpki{
 				Conf: &api.RPKIConf{
-					Address:    r.Config.Address.String(),
-					RemotePort: r.Config.Port,
+					Address:        r.Config.Address.String(),
+					RemotePort:     r.Config.Port,
+					RecordLifetime: r.Config.RecordLifetime,
 				},
 				State: &api.RPKIState{
 					Uptime:        oc.ProtoTimestamp(r.State.Uptime),
