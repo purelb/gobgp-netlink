@@ -749,22 +749,6 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 		v.Set("neighbor.config.peer-group", c.Config.PeerGroup)
 	}
 
-	// Record where each block ends up coming from, at the one point that knows.
-	// A block the neighbor declared is the neighbor's; anything else that the
-	// group actually carries is the group's.
-	key := NeighborPresenceKey(c)
-	for _, b := range []string{
-		"timers", "transport", "error-handling", "logging-options", "ebgp-multihop",
-		"route-reflector", "as-path-options", "add-paths", "graceful-restart",
-		"apply-policy", "use-multiple-paths", "route-server", "ttl-security", "bfd",
-	} {
-		if v.IsSet("neighbor." + b + ".config") {
-			recordProvenance(key, b, SourceNeighbor)
-			continue
-		}
-		recordProvenance(key, b, SourcePeerGroup)
-	}
-
 	overwriteConfig(&c.Config, &pg.Config, "neighbor.config", v)
 	overwriteConfig(&c.Timers.Config, &pg.Timers.Config, "neighbor.timers.config", v)
 	overwriteConfig(&c.Transport.Config, &pg.Transport.Config, "neighbor.transport.config", v)
@@ -799,6 +783,44 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 
 	if !v.IsSet("neighbor.afi-safis") {
 		c.AfiSafis = append([]AfiSafi{}, pg.AfiSafis...)
+	}
+
+	// Record where each block came from, now that the copies have happened.
+	//
+	// Only blocks the group actually contributed something to are recorded. A
+	// block that neither side configured is still at its zero value and saying
+	// "inherited from the peer group" about it is noise - and noise is the
+	// failure mode here, because it buries the one or two lines an operator is
+	// looking for. DeepEqual rather than ==, because ApplyPolicyConfig holds
+	// slices.
+	key := NeighborPresenceKey(c)
+	for _, b := range []struct {
+		name  string
+		block any
+	}{
+		{"timers", c.Timers.Config},
+		{"transport", c.Transport.Config},
+		{"error-handling", c.ErrorHandling.Config},
+		{"logging-options", c.LoggingOptions.Config},
+		{"ebgp-multihop", c.EbgpMultihop.Config},
+		{"route-reflector", c.RouteReflector.Config},
+		{"as-path-options", c.AsPathOptions.Config},
+		{"add-paths", c.AddPaths.Config},
+		{"graceful-restart", c.GracefulRestart.Config},
+		{"apply-policy", c.ApplyPolicy.Config},
+		{"use-multiple-paths", c.UseMultiplePaths.Config},
+		{"route-server", c.RouteServer.Config},
+		{"ttl-security", c.TtlSecurity.Config},
+		{"bfd", c.Bfd.Config},
+	} {
+		if v.IsSet("neighbor." + b.name + ".config") {
+			recordProvenance(key, b.name, SourceNeighbor)
+			continue
+		}
+		zero := reflect.New(reflect.TypeOf(b.block)).Elem().Interface()
+		if !reflect.DeepEqual(b.block, zero) {
+			recordProvenance(key, b.name, SourcePeerGroup)
+		}
 	}
 
 	return nil
