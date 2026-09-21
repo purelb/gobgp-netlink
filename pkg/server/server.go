@@ -3788,7 +3788,9 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 				ListenAddresses:  l,
 				UseMultiplePaths: g.UseMultiplePaths.Config.Enabled,
 				BindToDevice:     g.Config.BindToDevice,
-				Families:         families,
+
+				GracefulRestartInheritToNeighbors: g.Config.GracefulRestartInheritToNeighbors,
+				Families:                          families,
 				RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 					AlwaysCompareMed:         g.RouteSelectionOptions.Config.AlwaysCompareMed,
 					IgnoreAsPathLength:       g.RouteSelectionOptions.Config.IgnoreAsPathLength,

@@ -2807,6 +2807,8 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 			Port:             a.ListenPort,
 			LocalAddressList: l,
 			BindToDevice:     a.BindToDevice,
+
+			GracefulRestartInheritToNeighbors: a.GracefulRestartInheritToNeighbors,
 		},
 		AfiSafis: families,
 		UseMultiplePaths: oc.UseMultiplePaths{

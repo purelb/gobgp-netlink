@@ -160,6 +160,27 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 		}
 	}
 
+	// Global graceful restart, if the operator opted in. Deliberately outside
+	// the block above: most neighbors have no peer group, and putting this
+	// inside it would have skipped exactly those.
+	//
+	// Precedence is neighbor, then peer group, then global - so this only fills
+	// a block that is still untouched after peer-group inheritance has run.
+	// Presence is what decides "untouched": a neighbor that sent its own
+	// graceful-restart block owns it, including an explicitly disabled one, and
+	// must not have the global block put back on top.
+	if g.Config.GracefulRestartInheritToNeighbors && !v.IsSet("neighbor.graceful-restart.config.enabled") {
+		var none GracefulRestartConfig
+		if n.GracefulRestart.Config == none {
+			n.GracefulRestart.Config = g.GracefulRestart.Config
+			// long-lived is not propagated. The per-family LLGR flag is never
+			// derived from the neighbor-level one, so switching it on here
+			// would advertise a long-lived capability carrying no families -
+			// the same empty-capability defect that mp-graceful-restart had.
+			n.GracefulRestart.Config.LongLivedEnabled = false
+		}
+	}
+
 	if n.Config.LocalAs == 0 {
 		n.Config.LocalAs = getLocalAsForPeer(g, n.Config.PeerAs)
 	}

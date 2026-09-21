@@ -199,3 +199,73 @@ func TestPeerGroupInheritancePerBlock(t *testing.T) {
 	}
 }
 
+// The global graceful-restart block was accepted, echoed back by GetBgp, and
+// acted on by nothing: only per-peer and per-peer-group settings ever reached a
+// session. Making it inherit unconditionally would have changed the data plane
+// of every deployment that had set it, so it is opt-in.
+//
+// Precedence is neighbor, then peer group, then global.
+func TestGlobalGracefulRestartInheritance(t *testing.T) {
+	globalGR := func(inherit bool) *Global {
+		g := &Global{Config: GlobalConfig{
+			As:                                65000,
+			RouterId:                          netip.MustParseAddr("10.0.0.1"),
+			GracefulRestartInheritToNeighbors: inherit,
+		}}
+		g.GracefulRestart.Config = GracefulRestartConfig{Enabled: true, RestartTime: 300}
+		return g
+	}
+	neighbor := func(addr string) *Neighbor {
+		n := &Neighbor{}
+		n.Config.NeighborAddress = netip.MustParseAddr(addr)
+		n.Config.PeerAs = 65001
+		return n
+	}
+
+	t.Run("off by default: nothing changes for an existing deployment", func(t *testing.T) {
+		n := neighbor("198.51.100.200")
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, globalGR(false)))
+		assert.False(t, n.GracefulRestart.Config.Enabled,
+			"a global block must not reach peers unless the operator opted in")
+	})
+
+	t.Run("opted in: an ungrouped peer inherits it", func(t *testing.T) {
+		n := neighbor("198.51.100.201")
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, globalGR(true)))
+		assert.True(t, n.GracefulRestart.Config.Enabled)
+		assert.EqualValues(t, 300, n.GracefulRestart.Config.RestartTime,
+			"ungrouped peers are the majority; this must not be scoped to grouped ones")
+	})
+
+	t.Run("the peer's own settings beat the global", func(t *testing.T) {
+		n := neighbor("198.51.100.202")
+		n.GracefulRestart.Config = GracefulRestartConfig{Enabled: true, RestartTime: 60}
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, globalGR(true)))
+		assert.EqualValues(t, 60, n.GracefulRestart.Config.RestartTime)
+	})
+
+	t.Run("the peer group beats the global", func(t *testing.T) {
+		const addr = "198.51.100.203"
+		n := neighbor(addr)
+		n.Config.PeerGroup = "edge"
+		pg := &PeerGroup{}
+		pg.Config.PeerGroupName = "edge"
+		pg.Config.PeerAs = 65001
+		pg.GracefulRestart.Config = GracefulRestartConfig{Enabled: true, RestartTime: 90}
+
+		require.NoError(t, SetDefaultNeighborConfigValues(n, pg, globalGR(true)))
+		assert.EqualValues(t, 90, n.GracefulRestart.Config.RestartTime,
+			"precedence is neighbor, then peer group, then global")
+	})
+
+	t.Run("long-lived is not propagated", func(t *testing.T) {
+		g := globalGR(true)
+		g.GracefulRestart.Config.LongLivedEnabled = true
+		n := neighbor("198.51.100.204")
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, g))
+		assert.True(t, n.GracefulRestart.Config.Enabled)
+		assert.False(t, n.GracefulRestart.Config.LongLivedEnabled,
+			"the per-family long-lived flag is never derived from this one, so propagating it "+
+				"would advertise a long-lived capability carrying no families")
+	})
+}

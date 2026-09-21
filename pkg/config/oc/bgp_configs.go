@@ -5525,6 +5525,29 @@ type GlobalState struct {
 	// original -> gobgp:bind-to-device
 	// Device name for binding the BGP listener socket.
 	BindToDevice string `mapstructure:"bind-to-device" json:"bind-to-device,omitempty"`
+	// original -> gobgp:graceful-restart-inherit-to-neighbors
+	// gobgp:graceful-restart-inherit-to-neighbors's original type is boolean.
+	// Apply the global graceful-restart block to neighbors that configure
+	// none of their own. Off by default.
+	//
+	// Nothing propagated the global block to neighbors, so every field in it
+	// was accepted, echoed back by GetBgp, and acted on by nothing. Turning
+	// that on unconditionally would change the data plane of every existing
+	// deployment that set it: once graceful restart is negotiated the
+	// upstream becomes a helper and holds this speaker's routes for
+	// restart-time rather than withdrawing when the session drops, which for
+	// a host-network daemon announcing service addresses delays failover by
+	// that long - and it is invisible until the restart after the one that
+	// deploys it. So the inheritance is opt-in.
+	//
+	// Precedence is neighbor, then peer group, then global.
+	//
+	// This sits on global config rather than on global graceful-restart
+	// config because the graceful-restart container is one shared type across
+	// global, neighbors and peer groups. A leaf added there would appear on
+	// all three, and it is meaningless on two of them - which is the
+	// accepted-but-does-nothing shape this setting exists to correct.
+	GracefulRestartInheritToNeighbors bool `mapstructure:"graceful-restart-inherit-to-neighbors" json:"graceful-restart-inherit-to-neighbors,omitempty"`
 }
 
 // struct for container bgp:config.
@@ -5548,6 +5571,29 @@ type GlobalConfig struct {
 	// original -> gobgp:bind-to-device
 	// Device name for binding the BGP listener socket.
 	BindToDevice string `mapstructure:"bind-to-device" json:"bind-to-device,omitempty"`
+	// original -> gobgp:graceful-restart-inherit-to-neighbors
+	// gobgp:graceful-restart-inherit-to-neighbors's original type is boolean.
+	// Apply the global graceful-restart block to neighbors that configure
+	// none of their own. Off by default.
+	//
+	// Nothing propagated the global block to neighbors, so every field in it
+	// was accepted, echoed back by GetBgp, and acted on by nothing. Turning
+	// that on unconditionally would change the data plane of every existing
+	// deployment that set it: once graceful restart is negotiated the
+	// upstream becomes a helper and holds this speaker's routes for
+	// restart-time rather than withdrawing when the session drops, which for
+	// a host-network daemon announcing service addresses delays failover by
+	// that long - and it is invisible until the restart after the one that
+	// deploys it. So the inheritance is opt-in.
+	//
+	// Precedence is neighbor, then peer group, then global.
+	//
+	// This sits on global config rather than on global graceful-restart
+	// config because the graceful-restart container is one shared type across
+	// global, neighbors and peer groups. A leaf added there would appear on
+	// all three, and it is meaningless on two of them - which is the
+	// accepted-but-does-nothing shape this setting exists to correct.
+	GracefulRestartInheritToNeighbors bool `mapstructure:"graceful-restart-inherit-to-neighbors" json:"graceful-restart-inherit-to-neighbors,omitempty"`
 }
 
 func (lhs *GlobalConfig) Equal(rhs *GlobalConfig) bool {
@@ -5572,6 +5618,9 @@ func (lhs *GlobalConfig) Equal(rhs *GlobalConfig) bool {
 		}
 	}
 	if lhs.BindToDevice != rhs.BindToDevice {
+		return false
+	}
+	if lhs.GracefulRestartInheritToNeighbors != rhs.GracefulRestartInheritToNeighbors {
 		return false
 	}
 	return true

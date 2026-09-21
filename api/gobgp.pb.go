@@ -13914,8 +13914,20 @@ type Global struct {
 	Confederation         *Confederation               `protobuf:"bytes,9,opt,name=confederation,proto3" json:"confederation,omitempty"`
 	GracefulRestart       *GracefulRestart             `protobuf:"bytes,10,opt,name=graceful_restart,json=gracefulRestart,proto3" json:"graceful_restart,omitempty"`
 	BindToDevice          string                       `protobuf:"bytes,11,opt,name=bind_to_device,json=bindToDevice,proto3" json:"bind_to_device,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Apply graceful_restart above to peers that configure none of their own.
+	// Off by default.
+	//
+	// The global graceful-restart block was accepted, echoed back by GetBgp, and
+	// acted on by nothing: only per-peer and per-peer-group settings ever reached
+	// the session. Enabling the inheritance unconditionally would change the data
+	// plane of every deployment that had set it - once graceful restart is
+	// negotiated the upstream holds this speaker's routes for restart_time rather
+	// than withdrawing when the session drops - so it is opt-in.
+	//
+	// Precedence is peer, then peer group, then this.
+	GracefulRestartInheritToNeighbors bool `protobuf:"varint,12,opt,name=graceful_restart_inherit_to_neighbors,json=gracefulRestartInheritToNeighbors,proto3" json:"graceful_restart_inherit_to_neighbors,omitempty"`
+	unknownFields                     protoimpl.UnknownFields
+	sizeCache                         protoimpl.SizeCache
 }
 
 func (x *Global) Reset() {
@@ -14023,6 +14035,13 @@ func (x *Global) GetBindToDevice() string {
 		return x.BindToDevice
 	}
 	return ""
+}
+
+func (x *Global) GetGracefulRestartInheritToNeighbors() bool {
+	if x != nil {
+		return x.GracefulRestartInheritToNeighbors
+	}
+	return false
 }
 
 type Confederation struct {
@@ -17039,7 +17058,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x11import_interfaces\x18\x02 \x03(\tR\x10importInterfaces\"\x86\x01\n" +
 	"\x14DefaultRouteDistance\x126\n" +
 	"\x17external_route_distance\x18\x01 \x01(\rR\x15externalRouteDistance\x126\n" +
-	"\x17internal_route_distance\x18\x02 \x01(\rR\x15internalRouteDistance\"\x99\x04\n" +
+	"\x17internal_route_distance\x18\x02 \x01(\rR\x15internalRouteDistance\"\xeb\x04\n" +
 	"\x06Global\x12\x10\n" +
 	"\x03asn\x18\x01 \x01(\rR\x03asn\x12\x1b\n" +
 	"\trouter_id\x18\x02 \x01(\tR\brouterId\x12\x1f\n" +
@@ -17053,7 +17072,8 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\rconfederation\x18\t \x01(\v2\x12.api.ConfederationR\rconfederation\x12?\n" +
 	"\x10graceful_restart\x18\n" +
 	" \x01(\v2\x14.api.GracefulRestartR\x0fgracefulRestart\x12$\n" +
-	"\x0ebind_to_device\x18\v \x01(\tR\fbindToDevice\"o\n" +
+	"\x0ebind_to_device\x18\v \x01(\tR\fbindToDevice\x12P\n" +
+	"%graceful_restart_inherit_to_neighbors\x18\f \x01(\bR!gracefulRestartInheritToNeighbors\"o\n" +
 	"\rConfederation\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x1e\n" +
 	"\n" +

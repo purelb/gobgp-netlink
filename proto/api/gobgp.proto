@@ -1632,6 +1632,18 @@ message Global {
   Confederation confederation = 9;
   GracefulRestart graceful_restart = 10;
   string bind_to_device = 11;
+  // Apply graceful_restart above to peers that configure none of their own.
+  // Off by default.
+  //
+  // The global graceful-restart block was accepted, echoed back by GetBgp, and
+  // acted on by nothing: only per-peer and per-peer-group settings ever reached
+  // the session. Enabling the inheritance unconditionally would change the data
+  // plane of every deployment that had set it - once graceful restart is
+  // negotiated the upstream holds this speaker's routes for restart_time rather
+  // than withdrawing when the session drops - so it is opt-in.
+  //
+  // Precedence is peer, then peer group, then this.
+  bool graceful_restart_inherit_to_neighbors = 12;
 }
 
 message Confederation {
