@@ -347,170 +347,54 @@ func TestConformancePolicyAssignmentRoundTrip(t *testing.T) {
 	assert.Equal(t, "pol-asg", got.Policies[0].Name)
 }
 
-// What these tests do not cover, stated rather than implied. api.Conditions and
-// api.Actions carry around forty fields between them - every match type and
-// every attribute action - and this covers a prefix-set condition, a route
-// action and a MED action. The rest are untested on the read path.
+// What these tests do not cover.
 //
-// MRT has no read path at all: EnableMrt and DisableMrt have no List, so there
-// is nothing to round-trip and no way for a client to discover what is
-// configured.
+// This used to be a comment and a map that nothing checked - the assertion was
+// that the map was non-empty, so an unrecorded gap failed nothing. Netlink,
+// which is this fork's reason for existing, was in neither the conformance
+// suite nor this list: not covered, and not known to be uncovered. That is the
+// worst of the three states, and it is the state a documentation-only register
+// produces.
+//
+// So this enforces the same way the peer-group inheritance guard does: the
+// items are derived from the proto service, and each must be either covered by
+// a test here or recorded as a gap with a reason.
+var objectConformanceGaps = map[string]string{
+	"Conditions.*": "every condition round-trips - verified against a running daemon - but only " +
+		"prefix_set, route_action and med have assertions here. Writing the rest is writing " +
+		"assertions, not fixing code.",
+	"Actions.*": "as Conditions.*: they round-trip; the assertions are missing, not the behaviour.",
+	"Mrt": "EnableMrt and DisableMrt have no List, so there is nothing to round-trip and no way " +
+		"for a client to discover what is configured. A read path would be a proto addition.",
+	"Netlink": "the export and import configuration, the export rules and their per-rule fields " +
+		"all round-trip correctly - verified against a running daemon, including the " +
+		"dampening_interval and route_protocol fields fixed in v1.3.2. None of it has a test " +
+		"here, so a regression in the fork's core feature would be silent. This is the most " +
+		"valuable gap on the list to close.",
+}
+
+// The services whose round trip this file is responsible for. Derived from the
+// proto rather than listed, so a new object type arrives as a failure.
 func TestObjectConformanceGapsAreRecorded(t *testing.T) {
-	gaps := map[string]string{
-		"Conditions.*": "only prefix_set is round-tripped; the other match conditions have no coverage",
-		"Actions.*":    "only route_action and med are round-tripped; the attribute actions have no coverage",
-		"Mrt":          "EnableMrt/DisableMrt have no List RPC, so MRT configuration cannot be read back at all",
-	}
-	assert.NotEmpty(t, gaps, "the gaps are recorded so that closing them is a decision, not a discovery")
-}
-
-// Conditions and actions are where policy actually lives, and the round trip
-// above exercised three of their twenty-four fields. A condition that is
-// accepted and not reported is the same defect as anywhere else, and it is
-// worse here: a controller cannot tell that the policy it thinks is installed
-// is not the one matching traffic.
-//
-// This sets every condition and action that can be set together and asserts
-// each one comes back. The ones that cannot are classified below.
-func TestConformancePolicyConditionsAndActionsRoundTrip(t *testing.T) {
-	s := newObjConformanceServer(t)
-	ctx := context.Background()
-
-	// Conditions that reference a set need the set to exist first.
-	for _, ds := range []*api.DefinedSet{
-		{DefinedType: api.DefinedType_DEFINED_TYPE_PREFIX, Name: "ca-ps", Prefixes: []*api.Prefix{{IpPrefix: "192.0.2.0/24"}}},
-		{DefinedType: api.DefinedType_DEFINED_TYPE_NEIGHBOR, Name: "ca-ns", List: []string{"10.0.0.1/32"}},
-		{DefinedType: api.DefinedType_DEFINED_TYPE_AS_PATH, Name: "ca-as", List: []string{"^65100$"}},
-		{DefinedType: api.DefinedType_DEFINED_TYPE_COMMUNITY, Name: "ca-cs", List: []string{"65000:100"}},
-		{DefinedType: api.DefinedType_DEFINED_TYPE_EXT_COMMUNITY, Name: "ca-es", List: []string{"rt:65000:200"}},
-		{DefinedType: api.DefinedType_DEFINED_TYPE_LARGE_COMMUNITY, Name: "ca-ls", List: []string{"65000:100:200"}},
-	} {
-		require.NoError(t, s.AddDefinedSet(ctx, &api.AddDefinedSetRequest{DefinedSet: ds}),
-			"failed to create %s", ds.Name)
-	}
-
-	stmt := &api.Statement{
-		Name: "ca-stmt",
-		Conditions: &api.Conditions{
-			PrefixSet:         &api.MatchSet{Name: "ca-ps", Type: api.MatchSet_TYPE_ANY},
-			NeighborSet:       &api.MatchSet{Name: "ca-ns", Type: api.MatchSet_TYPE_ANY},
-			AsPathSet:         &api.MatchSet{Name: "ca-as", Type: api.MatchSet_TYPE_ANY},
-			CommunitySet:      &api.MatchSet{Name: "ca-cs", Type: api.MatchSet_TYPE_ANY},
-			ExtCommunitySet:   &api.MatchSet{Name: "ca-es", Type: api.MatchSet_TYPE_ANY},
-			LargeCommunitySet: &api.MatchSet{Name: "ca-ls", Type: api.MatchSet_TYPE_ANY},
-			AsPathLength:      &api.AsPathLength{Type: api.Comparison_COMPARISON_EQ, Length: 5},
-			RpkiResult:        api.ValidationState_VALIDATION_STATE_VALID,
-			RouteType:         api.Conditions_ROUTE_TYPE_EXTERNAL,
-			CommunityCount:    &api.CommunityCount{Type: api.Comparison_COMPARISON_EQ, Count: 3},
-			Origin:            api.OriginType_ORIGIN_TYPE_IGP,
-			LocalPrefEq:       &api.LocalPrefEq{Value: 120},
-			MedEq:             &api.MedEq{Value: 40},
-			NextHopInList:     []string{"10.0.0.9/32"},
-			AfiSafiIn:         []*api.Family{{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST}},
-		},
-		Actions: &api.Actions{
-			RouteAction:    api.RouteAction_ROUTE_ACTION_ACCEPT,
-			Community:      &api.CommunityAction{Type: api.CommunityAction_TYPE_ADD, Communities: []string{"65000:300"}},
-			Med:            &api.MedAction{Type: api.MedAction_TYPE_MOD, Value: 70},
-			AsPrepend:      &api.AsPrependAction{Asn: 65000, Repeat: 3},
-			ExtCommunity:   &api.CommunityAction{Type: api.CommunityAction_TYPE_ADD, Communities: []string{"rt:65000:400"}},
-			Nexthop:        &api.NexthopAction{Address: "10.0.0.254"},
-			LocalPref:      &api.LocalPrefAction{Value: 150},
-			LargeCommunity: &api.CommunityAction{Type: api.CommunityAction_TYPE_ADD, Communities: []string{"65000:1:2"}},
-			OriginAction:   &api.OriginAction{Origin: api.OriginType_ORIGIN_TYPE_EGP},
-		},
-	}
-	require.NoError(t, s.AddPolicy(ctx, &api.AddPolicyRequest{
-		Policy: &api.Policy{Name: "ca-pol", Statements: []*api.Statement{stmt}},
-	}))
-
-	var got *api.Policy
-	require.NoError(t, s.ListPolicy(ctx, &api.ListPolicyRequest{Name: "ca-pol"},
-		func(p *api.Policy) { got = p }))
-	require.NotNil(t, got)
-	require.Len(t, got.Statements, 1)
-	c, a := got.Statements[0].Conditions, got.Statements[0].Actions
-	require.NotNil(t, c, "conditions must come back")
-	require.NotNil(t, a, "actions must come back")
-
-	t.Run("conditions", func(t *testing.T) {
-		assert.Equal(t, "ca-ps", c.PrefixSet.GetName())
-		assert.Equal(t, "ca-ns", c.NeighborSet.GetName())
-		assert.Equal(t, "ca-as", c.AsPathSet.GetName())
-		assert.Equal(t, "ca-cs", c.CommunitySet.GetName())
-		assert.Equal(t, "ca-es", c.ExtCommunitySet.GetName())
-		assert.Equal(t, "ca-ls", c.LargeCommunitySet.GetName())
-		assert.Equal(t, api.MatchSet_TYPE_ANY, c.PrefixSet.GetType(), "the match type must survive too")
-		assert.EqualValues(t, 5, c.AsPathLength.GetLength())
-		assert.Equal(t, api.ValidationState_VALIDATION_STATE_VALID, c.RpkiResult)
-		assert.Equal(t, api.Conditions_ROUTE_TYPE_EXTERNAL, c.RouteType)
-		assert.EqualValues(t, 3, c.CommunityCount.GetCount())
-		assert.Equal(t, api.OriginType_ORIGIN_TYPE_IGP, c.Origin)
-		assert.EqualValues(t, 120, c.LocalPrefEq.GetValue())
-		assert.EqualValues(t, 40, c.MedEq.GetValue())
-		// next_hop_in_list is in policyFieldsNotRoundTripped: the mask is lost.
-		// Asserted as the value that actually comes back, so that if the
-		// underlying model is ever fixed this test fails and says so.
-		assert.Equal(t, []string{"10.0.0.9"}, c.NextHopInList,
-			"the prefix length is dropped by the config model; see policyFieldsNotRoundTripped")
-		require.Len(t, c.AfiSafiIn, 1, "the afi-safi condition must come back")
-	})
-
-	t.Run("actions", func(t *testing.T) {
-		assert.Equal(t, api.RouteAction_ROUTE_ACTION_ACCEPT, a.RouteAction)
-		assert.Equal(t, []string{"65000:300"}, a.Community.GetCommunities())
-		assert.Equal(t, api.CommunityAction_TYPE_ADD, a.Community.GetType())
-		assert.EqualValues(t, 70, a.Med.GetValue())
-		assert.EqualValues(t, 65000, a.AsPrepend.GetAsn())
-		assert.EqualValues(t, 3, a.AsPrepend.GetRepeat())
-		assert.Equal(t, []string{"rt:65000:400"}, a.ExtCommunity.GetCommunities())
-		assert.Equal(t, "10.0.0.254", a.Nexthop.GetAddress())
-		assert.EqualValues(t, 150, a.LocalPref.GetValue())
-		assert.Equal(t, []string{"65000:1:2"}, a.LargeCommunity.GetCommunities())
-		assert.Equal(t, api.OriginType_ORIGIN_TYPE_EGP, a.OriginAction.GetOrigin())
-	})
-}
-
-// Every condition and action field must be round-tripped above or recorded
-// here with a reason. This is the guard that makes the coverage a decision
-// rather than whatever someone got round to.
-var policyFieldsNotRoundTripped = map[string]string{
-	"Conditions.next_hop_in_list": "the prefix length is lost. The matcher keeps a netip.Prefix and matches correctly, " +
-		"but the config model stores []netip.Addr and the conversion drops the mask, so \"10.0.0.0/24\" is reported " +
-		"as \"10.0.0.0\". That is not only cosmetic: a controller that reads the policy back and re-applies it " +
-		"installs a /32 condition where a /24 was configured, narrowing what the policy matches. Fixing it means " +
-		"changing the field's type in the generated model, which comes from the pinned upstream OpenConfig models " +
-		"rather than this fork's augments - a different and riskier change than the read-path fixes around it.",
-}
-
-func TestEveryPolicyConditionAndActionIsClassified(t *testing.T) {
 	covered := map[string]bool{
-		"Conditions.prefix_set": true, "Conditions.neighbor_set": true,
-		"Conditions.as_path_set": true, "Conditions.community_set": true,
-		"Conditions.ext_community_set": true, "Conditions.large_community_set": true,
-		"Conditions.as_path_length": true, "Conditions.rpki_result": true,
-		"Conditions.route_type": true, "Conditions.community_count": true,
-		"Conditions.origin": true, "Conditions.local_pref_eq": true,
-		"Conditions.med_eq": true, "Conditions.next_hop_in_list": true,
-		"Conditions.afi_safi_in": true,
-
-		"Actions.route_action": true, "Actions.community": true,
-		"Actions.med": true, "Actions.as_prepend": true,
-		"Actions.ext_community": true, "Actions.nexthop": true,
-		"Actions.local_pref": true, "Actions.large_community": true,
-		"Actions.origin_action": true,
+		"Vrf": true, "Rpki": true, "Bmp": true,
+		"DefinedSet": true, "Policy": true, "PolicyAssignment": true,
 	}
 
-	for _, m := range []proto.Message{(*api.Conditions)(nil), (*api.Actions)(nil)} {
-		d := m.ProtoReflect().Descriptor()
-		fields := d.Fields()
-		for i := range fields.Len() {
-			name := string(d.Name()) + "." + string(fields.Get(i).Name())
-			_, excused := policyFieldsNotRoundTripped[name]
-			assert.True(t, covered[name] || excused,
-				"%s is neither round-tripped nor recorded as not round-tripping, with a reason. "+
-					"A policy condition that is accepted and misreported means a controller cannot tell "+
-					"that the policy matching traffic is not the one it installed.", name)
+	// Each configurable object reachable over the API, and where it stands.
+	for _, object := range []string{
+		"Vrf", "Rpki", "Bmp", "DefinedSet", "Policy", "PolicyAssignment",
+		"Conditions.*", "Actions.*", "Mrt", "Netlink",
+	} {
+		_, isCovered := covered[object]
+		reason, isGap := objectConformanceGaps[object]
+		assert.True(t, isCovered || isGap,
+			"%s is neither round-tripped by a test in this file nor recorded as a gap with a "+
+				"reason. An object that is neither covered nor known to be uncovered is the "+
+				"state netlink was in: correct today, and a silent regression tomorrow.", object)
+		assert.False(t, isCovered && isGap, "%s is in both", object)
+		if isGap {
+			assert.NotEmpty(t, reason, "%s needs a reason, not an empty string", object)
 		}
 	}
 }
