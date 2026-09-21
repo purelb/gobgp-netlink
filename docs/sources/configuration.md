@@ -483,3 +483,42 @@ Precedence is the neighbor, then its peer group, then this.
 
 `long-lived-enabled` is not propagated, because the per-family long-lived flag
 is not derived from it and the capability would go out carrying no families.
+
+## Settings gobgpd fills in for you
+
+gobgpd applies defaults to a peer and then reports the *resolved* values, so
+`ListPeer` and `gobgp config running` show fields the configuration never set.
+A controller that compares what it sent against what is reported will see a
+difference on every poll for each of these unless it expects them.
+
+| field | default |
+|---|---|
+| `timers.config.connect-retry` | 120 |
+| `timers.config.hold-time` | 90 |
+| `timers.config.keepalive-interval` | hold-time / 3 |
+| `timers.config.idle-hold-time-after-reset` | 30 |
+| `config.local-as` | the global AS, or the confederation member AS |
+| `config.peer-type` | derived from peer-as against local-as |
+| `graceful-restart.config.restart-time` | the hold time, when graceful restart is enabled |
+| `graceful-restart.config.deferral-time` | 360, when graceful restart is enabled |
+| `ebgp-multihop.config.multihop-ttl` | 255, when ebgp-multihop is enabled |
+| `ttl-security.config.ttl-min` | 255, when ttl-security is enabled |
+| `bfd.config.port` | 3784, when BFD is enabled |
+| `bfd.config.detection-multiplier` | 3, when BFD is enabled |
+| `bfd.config.desired-minimum-tx-interval` | 1000000 (1s, microseconds), when BFD is enabled |
+| `bfd.config.required-minimum-receive` | 1000000 (1s, microseconds), when BFD is enabled |
+
+Per-family settings are derived from the neighbor's too, which is what makes a
+capability carry families rather than going out empty:
+
+| field | derived from |
+|---|---|
+| `afi-safis.mp-graceful-restart.config.enabled` | `graceful-restart.config.enabled` |
+| `afi-safis.long-lived-graceful-restart.config.enabled` | `graceful-restart.config.long-lived-enabled` |
+| `afi-safis.add-paths.config.receive` / `send-max` | the neighbor's `add-paths` block |
+
+Two ways to avoid the spurious diff: send these fields explicitly with the
+values you want, so the report matches; or exclude them from the comparison.
+`gobgp config running --provenance` distinguishes what was inherited from a
+peer group or the global block, but not what came from a default - a field
+absent from that report and present in the output is a default.
