@@ -4364,6 +4364,12 @@ func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNoti
 	}
 	s.dropAdjRIBIn(n, n.configuredRFlist())
 	s.stopNeighbor(n, -1, nil)
+
+	// Drop the field-presence recorded for this neighbor. Nothing pruned this
+	// map before, so a peer deleted and re-added over the API inherited the
+	// presence of whatever TOML neighbor last held its address, and the peer
+	// group then lost fields it should have supplied.
+	oc.UnregisterConfiguredFields(addr)
 	return nil
 }
 

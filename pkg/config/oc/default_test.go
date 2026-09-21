@@ -235,3 +235,47 @@ func TestSetDefaultNeighborConfigValuesSendCommunity(t *testing.T) {
 		assert.Contains(t, err.Error(), "invalid send-community")
 	})
 }
+
+// N6: an interface peer is registered under its interface name, so it has to be
+// looked up under the same key. It used to be looked up by address - which is
+// "invalid IP" for an interface peer - so the lookup always missed and the peer
+// group won every field, which is D1's failure mode across every block.
+func Test_NeighborPresenceKey_MatchesForAddressAndInterfacePeers(t *testing.T) {
+	addrPeer := &NeighborConfig{NeighborAddress: netip.MustParseAddr("198.51.100.22")}
+	assert.Equal(t, "198.51.100.22", neighborPresenceKey(addrPeer))
+
+	intfPeer := &NeighborConfig{NeighborInterface: "eth0"}
+	assert.Equal(t, "eth0", neighborPresenceKey(intfPeer),
+		"an interface peer must key on the interface, since it has no address")
+
+	neither := &NeighborConfig{}
+	assert.Equal(t, "", neighborPresenceKey(neither),
+		"a neighbor with neither is not registrable; the caller must skip it rather than panic")
+}
+
+// N5: the map is written from the SIGHUP reload path and read on the Serve
+// goroutine. Run under -race, this fails on a plain map.
+func Test_ConfiguredFields_ConcurrentRegisterAndLookup(t *testing.T) {
+	const n = 200
+	done := make(chan struct{}, 2)
+
+	go func() {
+		for i := range n {
+			RegisterConfiguredFields("203.0.113.1", map[string]any{"i": i})
+		}
+		done <- struct{}{}
+	}()
+	go func() {
+		for range n {
+			_, _ = lookupConfiguredFields("203.0.113.1")
+		}
+		done <- struct{}{}
+	}()
+
+	<-done
+	<-done
+
+	UnregisterConfiguredFields("203.0.113.1")
+	_, ok := lookupConfiguredFields("203.0.113.1")
+	assert.False(t, ok, "unregister must remove the entry, or a re-added peer inherits stale presence")
+}

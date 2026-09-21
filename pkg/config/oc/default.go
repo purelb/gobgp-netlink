@@ -23,6 +23,7 @@ import (
 	"net/netip"
 	"reflect"
 	"slices"
+	"sync"
 
 	"github.com/osrg/gobgp/v4/internal/pkg/version"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
@@ -43,13 +44,57 @@ var forcedOverwrittenConfig = []string{
 	"neighbor.timers.config.minimum-advertisement-interval",
 }
 
-var configuredFields map[string]any
+// configuredFields records which fields a TOML neighbor actually set, keyed by
+// the identifier ReadConfigFile registered it under. OverwriteNeighborConfigWithPeerGroup
+// consults it to tell "the neighbor set this field" from "the field is at its
+// zero value", which is what decides whether the peer group's value wins.
+//
+// It is written from the SIGHUP config-reload path and read on the Serve
+// goroutine whenever a peer is added or updated, so it needs the lock: a reload
+// racing an AddPeer is a data race on a plain map. -race does not currently
+// catch it because no test reloads concurrently with an API call.
+//
+// Entries are also removed when a peer goes away. Without that, a peer deleted
+// and re-added over gRPC picks up the presence recorded for whatever TOML
+// neighbor last held its address.
+var (
+	configuredFieldsMu sync.RWMutex
+	configuredFields   = map[string]any{}
+)
 
 func RegisterConfiguredFields(addr string, n any) {
-	if configuredFields == nil {
-		configuredFields = make(map[string]any)
-	}
+	configuredFieldsMu.Lock()
+	defer configuredFieldsMu.Unlock()
 	configuredFields[addr] = n
+}
+
+// UnregisterConfiguredFields drops the presence recorded for a neighbor. Call it
+// when the neighbor is deleted, so a later neighbor reusing the address does not
+// inherit its field-presence.
+func UnregisterConfiguredFields(addr string) {
+	configuredFieldsMu.Lock()
+	defer configuredFieldsMu.Unlock()
+	delete(configuredFields, addr)
+}
+
+func lookupConfiguredFields(addr string) (any, bool) {
+	configuredFieldsMu.RLock()
+	defer configuredFieldsMu.RUnlock()
+	v, ok := configuredFields[addr]
+	return v, ok
+}
+
+// neighborPresenceKey is the key configuredFields is written and read under.
+// Both sides must derive it identically, so they share this one function.
+//
+// An interface peer has no address, so it keys on the interface name. Returns ""
+// for a neighbor that has neither, which is not registrable - the caller skips
+// it rather than storing an entry nothing can look up.
+func neighborPresenceKey(c *NeighborConfig) string {
+	if c.NeighborAddress.IsValid() {
+		return c.NeighborAddress.String()
+	}
+	return c.NeighborInterface
 }
 
 func defaultAfiSafi(typ AfiSafiType, enable bool) AfiSafi {
@@ -527,11 +572,17 @@ func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 		}
 
 		if pg != nil {
-			identifier := vv.Get("neighbor.config.neighbor-address")
-			if identifier == nil {
-				identifier = vv.Get("neighbor.config.neighbor-interface")
+			// Derive the key from the neighbor itself rather than from viper.
+			// The old code asserted the viper lookup to string, which panicked
+			// on a neighbor carrying neither an address nor an interface, and it
+			// registered interface peers under their interface name while
+			// OverwriteNeighborConfigWithPeerGroup looked them up by address -
+			// so interface peers never matched and the peer group won every
+			// field for them. Using one helper in both places makes the two
+			// halves impossible to drift apart.
+			if key := neighborPresenceKey(&n.Config); key != "" {
+				RegisterConfiguredFields(key, list[idx])
 			}
-			RegisterConfiguredFields(identifier.(string), list[idx])
 		}
 
 		if err := setDefaultNeighborConfigValuesWithViper(vv, &n, &b.Global, pg); err != nil {
@@ -574,7 +625,7 @@ func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	v := viper.New()
 
-	val, ok := configuredFields[c.Config.NeighborAddress.String()]
+	val, ok := lookupConfiguredFields(neighborPresenceKey(&c.Config))
 	if ok {
 		v.Set("neighbor", val)
 	} else {
