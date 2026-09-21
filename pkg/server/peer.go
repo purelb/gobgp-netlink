@@ -78,6 +78,19 @@ func newDynamicPeer(g *oc.Global, neighborAddress string, pg *oc.PeerGroup, loc 
 			},
 		},
 	}
+	// A dynamic peer must stay passive - it exists because a connection arrived
+	// from a prefix the group accepts, so it never dials out. The peer group's
+	// transport block would otherwise overwrite that with its zero value and
+	// turn passive mode straight back off, which is the same defect that erased
+	// graceful restart, reached by a different route: this peer has no
+	// configured address at all, only a state one, so nothing had recorded that
+	// it set anything.
+	if key := oc.NeighborPresenceKey(&conf); key != "" {
+		oc.RegisterConfiguredFields(key, map[string]any{
+			"transport": oc.MarkBlockConfigured(oc.TransportConfig{}),
+		})
+	}
+
 	if err := oc.OverwriteNeighborConfigWithPeerGroup(&conf, pg); err != nil {
 		logger.Debug("Can't overwrite neighbor config",
 			slog.String("Topic", "Peer"),

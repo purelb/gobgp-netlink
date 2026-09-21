@@ -3917,7 +3917,7 @@ func provenanceReport(neighbors []oc.Neighbor, format api.ConfigFormat) string {
 	}
 	report := make([]peerProv, 0, len(neighbors))
 	for _, n := range neighbors {
-		key := oc.NeighborPresenceKey(&n.Config)
+		key := oc.NeighborPresenceKey(&n)
 		if key == "" {
 			key = n.State.NeighborAddress.String()
 		}

@@ -1203,7 +1203,7 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 // peer group name itself - so marking it would stop every NeighborConfig field
 // inheriting and would be a much larger change than the defect being fixed.
 func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
-	key := oc.NeighborPresenceKey(&pconf.Config)
+	key := oc.NeighborPresenceKey(pconf)
 	if key == "" || pconf.Config.PeerGroup == "" {
 		// Nothing to inherit from, so nothing to record.
 		return

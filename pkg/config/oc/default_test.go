@@ -314,16 +314,26 @@ func Test_SetDefaultNeighborConfigValues_NoMpGracefulRestartWhenGrDisabled(t *te
 // "invalid IP" for an interface peer - so the lookup always missed and the peer
 // group won every field, which is D1's failure mode across every block.
 func Test_NeighborPresenceKey_MatchesForAddressAndInterfacePeers(t *testing.T) {
-	addrPeer := &NeighborConfig{NeighborAddress: netip.MustParseAddr("198.51.100.22")}
+	addrPeer := &Neighbor{}
+	addrPeer.Config.NeighborAddress = netip.MustParseAddr("198.51.100.22")
 	assert.Equal(t, "198.51.100.22", NeighborPresenceKey(addrPeer))
 
-	intfPeer := &NeighborConfig{NeighborInterface: "eth0"}
+	intfPeer := &Neighbor{}
+	intfPeer.Config.NeighborInterface = "eth0"
 	assert.Equal(t, "eth0", NeighborPresenceKey(intfPeer),
 		"an interface peer must key on the interface, since it has no address")
 
-	neither := &NeighborConfig{}
+	// A dynamic peer is created from an accepted connection, so it has only a
+	// state address. Keying it on nothing meant the peer group erased the
+	// passive mode it had just been given.
+	dynPeer := &Neighbor{}
+	dynPeer.State.NeighborAddress = netip.MustParseAddr("198.51.100.23")
+	assert.Equal(t, "198.51.100.23", NeighborPresenceKey(dynPeer),
+		"a dynamic peer has no configured address, only a state one")
+
+	neither := &Neighbor{}
 	assert.Equal(t, "", NeighborPresenceKey(neither),
-		"a neighbor with neither is not registrable; the caller must skip it rather than panic")
+		"a neighbor with no identity is not registrable; the caller must skip it rather than panic")
 }
 
 // N5: the map is written from the SIGHUP reload path and read on the Serve

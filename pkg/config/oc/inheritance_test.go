@@ -269,3 +269,36 @@ func TestGlobalGracefulRestartInheritance(t *testing.T) {
 				"would advertise a long-lived capability carrying no families")
 	})
 }
+
+// A dynamic peer exists because a connection arrived from a prefix its group
+// accepts, so it must stay passive - it never dials out. It sets passive mode
+// and then runs peer-group inheritance, and because it has no configured
+// address at all (only a state one) nothing recorded that it had set anything,
+// so the group's empty transport block turned passive mode straight back off.
+//
+// Same defect as the graceful-restart one, reached by a different route: the
+// presence key could not identify this peer.
+func TestDynamicPeerKeepsPassiveMode(t *testing.T) {
+	n := &Neighbor{}
+	n.Config.PeerGroup = "edge"
+	n.State.NeighborAddress = netip.MustParseAddr("198.51.100.210")
+	n.Transport.Config.PassiveMode = true
+
+	// Registered under the literal address, not under NeighborPresenceKey(n).
+	// Using the key function on both sides would make this pass even if the
+	// function returned the wrong thing - including "", which would silently
+	// collide every dynamic peer onto one entry.
+	RegisterConfiguredFields("198.51.100.210", map[string]any{
+		"transport": MarkBlockConfigured(TransportConfig{}),
+	})
+	require.Equal(t, "198.51.100.210", NeighborPresenceKey(n),
+		"the lookup key must be the peer's state address")
+
+	pg := &PeerGroup{}
+	pg.Config.PeerGroupName = "edge"
+	// A group that says nothing about transport - the case that used to erase it.
+
+	require.NoError(t, OverwriteNeighborConfigWithPeerGroup(n, pg))
+	assert.True(t, n.Transport.Config.PassiveMode,
+		"a group with no transport block must not take passive mode off a dynamic peer")
+}

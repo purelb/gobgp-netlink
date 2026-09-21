@@ -159,14 +159,28 @@ func forgetProvenance(key string) {
 // NeighborPresenceKey is the key configuredFields is written and read under.
 // Both sides must derive it identically, so they share this one function.
 //
-// An interface peer has no address, so it keys on the interface name. Returns ""
-// for a neighbor that has neither, which is not registrable - the caller skips
-// it rather than storing an entry nothing can look up.
-func NeighborPresenceKey(c *NeighborConfig) string {
-	if c.NeighborAddress.IsValid() {
-		return c.NeighborAddress.String()
+// It has to cover every way a neighbor gets identified, because each of them
+// has been a bug. An interface peer has no configured address, so it keys on
+// the interface name - registering it under one and looking it up under the
+// other meant interface peers never matched and the peer group won every field
+// for them. A dynamic peer has no configured address either, only a state one,
+// with the same consequence: it sets passive mode and the group's empty
+// transport block took it straight back off again.
+//
+// Returns "" only for a neighbor with no identity at all, which is not
+// registrable; the caller skips it rather than storing an entry nothing can
+// look up.
+func NeighborPresenceKey(n *Neighbor) string {
+	if n.Config.NeighborAddress.IsValid() {
+		return n.Config.NeighborAddress.String()
 	}
-	return c.NeighborInterface
+	if n.Config.NeighborInterface != "" {
+		return n.Config.NeighborInterface
+	}
+	if n.State.NeighborAddress.IsValid() {
+		return n.State.NeighborAddress.String()
+	}
+	return ""
 }
 
 func defaultAfiSafi(typ AfiSafiType, enable bool) AfiSafi {
@@ -223,7 +237,7 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 		var none GracefulRestartConfig
 		if n.GracefulRestart.Config == none {
 			n.GracefulRestart.Config = g.GracefulRestart.Config
-			recordProvenance(NeighborPresenceKey(&n.Config), "graceful-restart", SourceGlobal)
+			recordProvenance(NeighborPresenceKey(n), "graceful-restart", SourceGlobal)
 			// long-lived is not propagated. The per-family LLGR flag is never
 			// derived from the neighbor-level one, so switching it on here
 			// would advertise a long-lived capability carrying no families -
@@ -683,7 +697,7 @@ func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 			// so interface peers never matched and the peer group won every
 			// field for them. Using one helper in both places makes the two
 			// halves impossible to drift apart.
-			if key := NeighborPresenceKey(&n.Config); key != "" {
+			if key := NeighborPresenceKey(&n); key != "" {
 				RegisterConfiguredFields(key, list[idx])
 			}
 		}
@@ -728,7 +742,7 @@ func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	v := viper.New()
 
-	val, ok := lookupConfiguredFields(NeighborPresenceKey(&c.Config))
+	val, ok := lookupConfiguredFields(NeighborPresenceKey(c))
 	if ok {
 		v.Set("neighbor", val)
 	} else {
@@ -738,7 +752,7 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	// Record where each block ends up coming from, at the one point that knows.
 	// A block the neighbor declared is the neighbor's; anything else that the
 	// group actually carries is the group's.
-	key := NeighborPresenceKey(&c.Config)
+	key := NeighborPresenceKey(c)
 	for _, b := range []string{
 		"timers", "transport", "error-handling", "logging-options", "ebgp-multihop",
 		"route-reflector", "as-path-options", "add-paths", "graceful-restart",
