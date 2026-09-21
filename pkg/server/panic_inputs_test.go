@@ -186,3 +186,34 @@ func TestRpkiMalformedAddressRejectedAtWriteTime(t *testing.T) {
 	// And the read path stays walkable.
 	require.NoError(t, s.ListRpki(context.Background(), &api.ListRpkiRequest{}, func(*api.Rpki) {}))
 }
+
+// The recover barrier in handleMGMTOp is only safe if it sends on errCh.
+// mgmtOperation parks on "return <-ch" with no timeout, so a recover that
+// returns without sending converts a crash into a caller blocked forever plus
+// a leaked goroutine - quieter than a crash and harder to diagnose. This
+// asserts the error comes back, which is the part that is easy to get wrong.
+//
+// "We catch panics" is unverifiable without injecting one, so this injects one.
+func TestMgmtOperationPanicReturnsErrorAndDoesNotHang(t *testing.T) {
+	s := newPanicTestServer(t)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- s.mgmtOperation(func() error {
+			panic("injected panic for the recovery barrier test")
+		}, false)
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "the panic must surface as an error, not be swallowed")
+		assert.Contains(t, err.Error(), "internal error")
+		assert.Contains(t, err.Error(), "injected panic")
+	case <-time.After(10 * time.Second):
+		t.Fatal("mgmtOperation never returned: the barrier recovered without sending on errCh")
+	}
+
+	// And the server is still usable afterwards - a recovered operation must
+	// not leave the Serve loop wedged or the lock held.
+	assert.NoError(t, s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(*api.Peer) {}))
+}

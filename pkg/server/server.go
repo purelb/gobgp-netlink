@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -265,7 +266,19 @@ func NewBgpServer(opt ...ServerOption) *BgpServer {
 	s.keychainStore = newTcpAoKeychainStore()
 	if len(opts.grpcAddress) != 0 {
 		grpc.EnableTracing = false
-		s.apiServer = newAPIserver(s, shared, grpc.NewServer(opts.grpcOption...), opts.grpcAddress)
+		// Recover panics on the gRPC handler goroutine. Not everything runs
+		// under the BGP lock - NLRI decoding for AddPath, for one - and a panic
+		// in a handler stops the process just as surely as one on the Serve
+		// goroutine, while being invisible to the handleMGMTOp barrier.
+		//
+		// Chained, and prepended here rather than left to the caller, so that
+		// an embedding application gets it too and so it composes with any
+		// interceptors passed through GrpcOption instead of replacing them.
+		grpcOption := append([]grpc.ServerOption{
+			grpc.ChainUnaryInterceptor(s.recoveryUnaryInterceptor),
+			grpc.ChainStreamInterceptor(s.recoveryStreamInterceptor),
+		}, opts.grpcOption...)
+		s.apiServer = newAPIserver(s, shared, grpc.NewServer(grpcOption...), opts.grpcAddress)
 		go func() {
 			if err := s.apiServer.serve(); err != nil {
 				logger.Error("failed to listen grpc port", slog.String("Error", err.Error()))
@@ -331,7 +344,67 @@ type mgmtOp struct {
 	timestamp   time.Time
 }
 
+// recoveryUnaryInterceptor and recoveryStreamInterceptor turn a panic in a gRPC
+// handler into an error for that one call instead of a dead daemon. They are a
+// backstop behind input validation, not a substitute: every panic found so far
+// is fixed where the bad value enters, and anything that reaches here is a bug
+// worth the stack trace it logs.
+func (s *BgpServer) recoveryUnaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("recovered from panic in gRPC handler",
+				slog.String("Topic", "Server"),
+				slog.String("Method", info.FullMethod),
+				slog.Any("Panic", r),
+				slog.String("Stack", string(debug.Stack())))
+			err = status.Errorf(codes.Internal, "internal error handling %s", info.FullMethod)
+		}
+	}()
+	return handler(ctx, req)
+}
+
+func (s *BgpServer) recoveryStreamInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("recovered from panic in gRPC stream handler",
+				slog.String("Topic", "Server"),
+				slog.String("Method", info.FullMethod),
+				slog.Any("Panic", r),
+				slog.String("Stack", string(debug.Stack())))
+			err = status.Errorf(codes.Internal, "internal error handling %s", info.FullMethod)
+		}
+	}()
+	return handler(srv, ss)
+}
+
 func (s *BgpServer) handleMGMTOp(op *mgmtOp) {
+	// A panic in op.f() used to stop the process. This runs on the Serve
+	// goroutine and nothing above it recovers, so one malformed request from
+	// any client took BGP down for the whole node and withdrew everything it
+	// was announcing. A gRPC recovery interceptor cannot help: the handler
+	// goroutine is parked on a channel receive while this runs.
+	//
+	// Recovering has one hard requirement - send on errCh. mgmtOperation waits
+	// on "return <-ch" with no timeout, so a recover that returns without
+	// sending turns a crash into a caller stuck forever plus a leaked
+	// goroutine: quieter than a crash, and worse.
+	//
+	// This is a backstop, not the fix. Every panic found so far is fixed at its
+	// source; this is here so the next one is a failed request rather than a
+	// node-wide outage. It is defensible in this deployment specifically
+	// because the consumer reconciles continuously against List*, so an
+	// operation that returns an error gets retried and any half-applied state
+	// repaired. In a daemon with no such consumer, failing fast would be the
+	// better trade.
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("recovered from panic in management operation",
+				slog.String("Topic", "Server"),
+				slog.Any("Panic", r),
+				slog.String("Stack", string(debug.Stack())))
+			op.errCh <- fmt.Errorf("internal error: %v", r)
+		}
+	}()
 	if op.checkActive {
 		if err := s.active(); err != nil {
 			op.errCh <- err
@@ -5425,6 +5498,20 @@ func (s *BgpServer) WatchEvent(ctx context.Context, callbacks WatchEventMessageC
 
 	go func() {
 		defer w.Stop()
+		// This goroutine dispatches events to client callbacks, and the panics
+		// that reached it - an unbounded allocation from batch_size, an
+		// unparseable filter address - fired here rather than in the RPC
+		// handler, so neither the caller nor a gRPC interceptor ever saw them;
+		// the process simply stopped. Ending this watch is the right blast
+		// radius for a bad watch request.
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("recovered from panic in watch event dispatch",
+					slog.String("Topic", "Server"),
+					slog.Any("Panic", r),
+					slog.String("Stack", string(debug.Stack())))
+			}
+		}()
 
 		for {
 			select {
