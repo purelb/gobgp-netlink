@@ -360,3 +360,29 @@ func TestRunningConfigReportsGlobalInheritance(t *testing.T) {
 	assert.Contains(t, rsp.Config, "198.51.100.60: graceful-restart <- global",
 		"a block taken from the global configuration must say so, not just peer-group ones")
 }
+
+// bmpPeerStats re-parses the peer's addresses out of api.Peer, where they are
+// strings, and used MustParseAddr to do it. The caller filters to ESTABLISHED
+// peers, which is what has kept it from firing - but a statistics message
+// should not be able to stop the daemon, and a peer with an empty router id is
+// not a reason to lose BGP on the node.
+func TestBmpPeerStatsSkipsUnparseableAddresses(t *testing.T) {
+	established := func(addr, routerID string) *api.Peer {
+		return &api.Peer{State: &api.PeerState{
+			NeighborAddress: addr,
+			RouterId:        routerID,
+			PeerAsn:         65001,
+		}}
+	}
+
+	assert.Nil(t, bmpPeerStats(0, 0, 0, established("", "10.0.0.1")),
+		"an empty neighbor address must be skipped, not fatal")
+	assert.Nil(t, bmpPeerStats(0, 0, 0, established("10.0.0.2", "")),
+		"an empty router id must be skipped, not fatal")
+	assert.Nil(t, bmpPeerStats(0, 0, 0, established("not-an-address", "10.0.0.1")))
+
+	// A peer with no message counters at all - the pointer chain this used to
+	// dereference unguarded.
+	assert.NotNil(t, bmpPeerStats(0, 0, 0, established("10.0.0.2", "10.0.0.1")),
+		"a well-formed peer must still produce a message, counters or not")
+}

@@ -290,7 +290,9 @@ func (b *bmpClient) loop() {
 					listErr := b.s.ListPeer(context.Background(), &api.ListPeerRequest{EnableAdvertised: true},
 						func(peer *api.Peer) {
 							if err == nil && peer.State.SessionState == api.PeerState_SESSION_STATE_ESTABLISHED {
-								err = write(bmpPeerStats(bmp.BMP_PEER_TYPE_GLOBAL, 0, time.Now().Unix(), peer))
+								if msg := bmpPeerStats(bmp.BMP_PEER_TYPE_GLOBAL, 0, time.Now().Unix(), peer); msg != nil {
+									err = write(msg)
+								}
 							}
 						})
 					if listErr != nil || err != nil {
@@ -453,22 +455,48 @@ func bmpPeerRoute(t uint8, policy bool, pd uint64, fourBytesAs bool, peeri *tabl
 	return m
 }
 
+// bmpPeerStats returns nil when the peer's addresses cannot be parsed, and the
+// caller skips that peer.
+//
+// These come from api.Peer as strings, so they are re-parsed here, and they
+// were re-parsed with MustParseAddr. The peer is filtered to ESTABLISHED before
+// this is called, which is what has kept it from firing - but "a caller
+// currently filters correctly" is not a reason for a statistics message to be
+// able to stop the daemon. A router id that is empty or malformed costs one
+// peer's statistics, not the process.
 func bmpPeerStats(peerType uint8, peerDist uint64, timestamp int64, peer *api.Peer) *bmp.BMPMessage {
 	var peerFlags uint8 = 0
-	ph := bmp.NewBMPPeerHeader(peerType, peerFlags, peerDist, netip.MustParseAddr(peer.State.NeighborAddress), peer.State.PeerAsn, netip.MustParseAddr(peer.State.RouterId), float64(timestamp))
+	neighborAddr, err := netip.ParseAddr(peer.State.NeighborAddress)
+	if err != nil {
+		return nil
+	}
+	routerID, err := netip.ParseAddr(peer.State.RouterId)
+	if err != nil {
+		return nil
+	}
+	ph := bmp.NewBMPPeerHeader(peerType, peerFlags, peerDist, neighborAddr, peer.State.PeerAsn, routerID, float64(timestamp))
 	received := uint64(0)
 	accepted := uint64(0)
 	for _, a := range peer.AfiSafis {
 		received += a.State.Received
 		accepted += a.State.Accepted
 	}
+	// Messages is populated for an established peer, which is the only kind the
+	// caller passes - but it is a pointer chain off a message built elsewhere,
+	// and dereferencing it unguarded makes a statistics report able to stop the
+	// daemon. Report zeros rather than crash.
+	var withdrawUpdate, withdrawPrefix uint32
+	if r := peer.State.Messages.GetReceived(); r != nil {
+		withdrawUpdate = uint32(r.WithdrawUpdate)
+		withdrawPrefix = uint32(r.WithdrawPrefix)
+	}
 	return bmp.NewBMPStatisticsReport(
 		*ph,
 		[]bmp.BMPStatsTLVInterface{
 			bmp.NewBMPStatsTLV64(bmp.BMP_STAT_TYPE_ADJ_RIB_IN, received),
 			bmp.NewBMPStatsTLV64(bmp.BMP_STAT_TYPE_LOC_RIB, accepted),
-			bmp.NewBMPStatsTLV32(bmp.BMP_STAT_TYPE_WITHDRAW_UPDATE, uint32(peer.State.Messages.Received.WithdrawUpdate)),
-			bmp.NewBMPStatsTLV32(bmp.BMP_STAT_TYPE_WITHDRAW_PREFIX, uint32(peer.State.Messages.Received.WithdrawPrefix)),
+			bmp.NewBMPStatsTLV32(bmp.BMP_STAT_TYPE_WITHDRAW_UPDATE, withdrawUpdate),
+			bmp.NewBMPStatsTLV32(bmp.BMP_STAT_TYPE_WITHDRAW_PREFIX, withdrawPrefix),
 		},
 	)
 }
