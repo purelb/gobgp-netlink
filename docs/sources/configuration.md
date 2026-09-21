@@ -426,3 +426,60 @@
 ```
 
 See [Netlink Integration](netlink.md) for detailed documentation.
+
+## Peer-group inheritance
+
+A neighbor in a peer group keeps every setting it configures and takes the rest
+from the group. That is per field, not per block: setting one field of
+`[neighbors.bfd.config]` does not stop the other BFD fields coming from the
+group.
+
+What decides "configured" is whether the setting was *present* in the
+configuration, not whether its value differs from zero. That distinction is the
+whole point, because most of these blocks carry their enable flag as a boolean:
+
+```toml
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "192.0.2.4"
+    peer-group = "edge"          # the group enables graceful restart
+  [neighbors.graceful-restart.config]
+    enabled = false              # and this peer turns it off
+```
+
+The same applies over the gRPC API, where presence is per *message*: a request
+that includes a block owns all of it, including the fields left at their zero
+values, and a request that omits a block inherits it. Sending an empty block is
+therefore an explicit "none of this".
+
+The practical consequence for an API client is that a partially populated block
+no longer inherits its remaining fields from the group. If a client sends
+`graceful_restart` with only `enabled` and `restart_time` set, the peer's
+`stale_routes_time` is zero rather than the group's.
+
+`gobgp config running --provenance` reports which blocks a peer inherited and
+from where, since the running configuration otherwise shows a value that was
+set and one that was inherited identically.
+
+## Global graceful restart
+
+`[global.graceful-restart]` does not reach peers unless you ask for it:
+
+```toml
+[global.config]
+  graceful-restart-inherit-to-neighbors = true
+```
+
+Without it the global block is accepted and reported and does nothing, which is
+what it has always done. It is opt-in rather than simply fixed because turning
+it on changes forwarding behaviour: once graceful restart is negotiated, the
+upstream router keeps this speaker's routes for `restart-time` - defaulted from
+the hold time, so 90 seconds - instead of withdrawing them when the session
+drops. For a speaker announcing service addresses that delays failover by that
+long, and it only becomes visible on the restart *after* the one that enables
+it.
+
+Precedence is the neighbor, then its peer group, then this.
+
+`long-lived-enabled` is not propagated, because the per-family long-lived flag
+is not derived from it and the capability would go out carrying no families.

@@ -128,7 +128,7 @@ not the group's values.
     neighbor-address = "192.0.2.2"
     peer-group = "edge"
 
-# Overrides it. detection-multiplier is the default 3, not the group's.
+# Overrides two fields. detection-multiplier still comes from the group.
 [[neighbors]]
   [neighbors.config]
     neighbor-address = "192.0.2.3"
@@ -151,18 +151,24 @@ not the group's values.
     detection-multiplier = 3
 ```
 
-This is block-level rather than per-field because `enabled = false` has to work
-as an opt-out, and `false` is the zero value - indistinguishable from a field
-that was never set. Whole-block override is also what makes the behaviour the
-same over the gRPC API, where per-field presence was never available at all: a
-peer group previously overwrote a neighbor's BFD unconditionally there, its
-zero values included.
+Inheritance is per field: a neighbor keeps the fields it set and takes the rest
+from its group. The example above sets `detection-multiplier` nowhere, so it
+comes from the group.
 
-One consequence to be aware of: a `bfd` block in which *every* field is zero or
-absent cannot be told apart from no block at all, so it inherits rather than
-opts out. The opt-out example above sets the other fields explicitly for that
-reason. Configuration generated from a schema with defaults - a Kubernetes CRD,
-for instance - always populates them and is unaffected.
+`enabled = false` works as an opt-out on both config paths. This used to be
+stated with a caveat - that a `bfd` block whose fields are all zero could not be
+told from no block at all, so it inherited rather than opting out - and the
+example above still sets the other fields for that reason. The caveat no longer
+applies: gobgpd now records which blocks a configuration actually contained
+rather than inferring it from their values, so `enabled = false` on its own is
+an opt-out.
+
+For a while this was block-level instead: a neighbor that set any BFD field kept
+its whole block and inherited none of the group's. That was introduced because
+the gRPC API had no field presence at all - a peer group overwrote a neighbor's
+BFD unconditionally there, zero values included - and it has been withdrawn now
+that presence is recorded on both paths, because it cost config-file users the
+ability to override one field without restating the block.
 
 ## Port Behavior
 
