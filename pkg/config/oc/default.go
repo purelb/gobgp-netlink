@@ -84,13 +84,35 @@ func lookupConfiguredFields(addr string) (any, bool) {
 	return v, ok
 }
 
-// neighborPresenceKey is the key configuredFields is written and read under.
+// MarkBlockConfigured builds the presence record for one configuration block,
+// in the shape the TOML loader produces, so that overwriteConfig treats every
+// field of the block as explicitly set and leaves it alone.
+//
+// This is how the gRPC path gets the field presence that only the config file
+// had. proto3 gives presence per message, not per field, so the rule is
+// block-level: sending a block means owning all of it, including the fields
+// left at their zero value. A client that sends a partial block therefore stops
+// inheriting the rest of it from the peer group - that is the deliberate
+// trade, and it is what makes "enabled = false" expressible at all, which a
+// zero-value test could never do.
+func MarkBlockConfigured(block any) map[string]any {
+	fields := map[string]any{}
+	t := reflect.Indirect(reflect.ValueOf(block)).Type()
+	for i := range t.NumField() {
+		if tag := t.Field(i).Tag.Get("mapstructure"); tag != "" && tag != "-" {
+			fields[tag] = true
+		}
+	}
+	return map[string]any{"config": fields}
+}
+
+// NeighborPresenceKey is the key configuredFields is written and read under.
 // Both sides must derive it identically, so they share this one function.
 //
 // An interface peer has no address, so it keys on the interface name. Returns ""
 // for a neighbor that has neither, which is not registrable - the caller skips
 // it rather than storing an entry nothing can look up.
-func neighborPresenceKey(c *NeighborConfig) string {
+func NeighborPresenceKey(c *NeighborConfig) string {
 	if c.NeighborAddress.IsValid() {
 		return c.NeighborAddress.String()
 	}
@@ -589,7 +611,7 @@ func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 			// so interface peers never matched and the peer group won every
 			// field for them. Using one helper in both places makes the two
 			// halves impossible to drift apart.
-			if key := neighborPresenceKey(&n.Config); key != "" {
+			if key := NeighborPresenceKey(&n.Config); key != "" {
 				RegisterConfiguredFields(key, list[idx])
 			}
 		}
@@ -634,7 +656,7 @@ func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	v := viper.New()
 
-	val, ok := lookupConfiguredFields(neighborPresenceKey(&c.Config))
+	val, ok := lookupConfiguredFields(NeighborPresenceKey(&c.Config))
 	if ok {
 		v.Set("neighbor", val)
 	} else {
@@ -650,33 +672,28 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	overwriteConfig(&c.RouteReflector.Config, &pg.RouteReflector.Config, "neighbor.route-reflector.config", v)
 	overwriteConfig(&c.AsPathOptions.Config, &pg.AsPathOptions.Config, "neighbor.as-path-options.config", v)
 	overwriteConfig(&c.AddPaths.Config, &pg.AddPaths.Config, "neighbor.add-paths.config", v)
-	overwriteConfig(&c.GracefulRestart.Config, &pg.GracefulRestart.Config, "neighbor.gradeful-restart.config", v)
+	overwriteConfig(&c.GracefulRestart.Config, &pg.GracefulRestart.Config, "neighbor.graceful-restart.config", v)
 	overwriteConfig(&c.ApplyPolicy.Config, &pg.ApplyPolicy.Config, "neighbor.apply-policy.config", v)
 	overwriteConfig(&c.UseMultiplePaths.Config, &pg.UseMultiplePaths.Config, "neighbor.use-multiple-paths.config", v)
 	overwriteConfig(&c.RouteServer.Config, &pg.RouteServer.Config, "neighbor.route-server.config", v)
 	overwriteConfig(&c.TtlSecurity.Config, &pg.TtlSecurity.Config, "neighbor.ttl-security.config", v)
-	// BFD inherits as a whole block, not field by field like everything above.
+	// BFD is per-field like everything else again. It was gated on the
+	// neighbor's block being the zero value, because on the gRPC path there was
+	// no field presence and a group with no bfd block erased a neighbor's
+	// settings with its zeros.
 	//
-	// overwriteConfig decides per field on v.IsSet, and v is built from
-	// configuredFields, which only the TOML loader populates. On the gRPC path
-	// IsSet is false for every BFD field, so the peer group always won - a group
-	// with no bfd block erased a neighbor's settings with its zero values, and
-	// a grouped neighbor could neither configure BFD of its own nor opt out of
-	// the group's. docs/sources/bfd.md promised the opposite.
+	// That gate could not express what its own comment claimed. BfdConfig{
+	// Enabled: false } *is* the zero value, so a neighbor asking to opt out of
+	// a group's BFD was read as having asked for nothing and inherited it
+	// anyway; the documented opt-out only worked because a CRD happens to send
+	// the port and the intervals too, which is what made the block non-empty.
+	// Transposing it to the other blocks would have been worse - graceful
+	// restart, route-server and ttl-security all carry their enable flag as the
+	// zero-value-false field.
 	//
-	// Testing the neighbor's block instead makes both paths agree, and it is
-	// what lets `enabled = false` work as an opt-out: per-field presence cannot
-	// express that, because false is the zero value and indistinguishable from
-	// unset. The cost is that a TOML neighbor which sets only some BFD fields
-	// no longer inherits the others from its group - see bfd.md.
-	//
-	// This has to run before the BFD defaults further down, which fill port and
-	// the intervals on every neighbor and would make the block non-empty for
-	// all of them.
-	var noBfd BfdConfig
-	if c.Bfd.Config == noBfd {
-		overwriteConfig(&c.Bfd.Config, &pg.Bfd.Config, "neighbor.bfd.config", v)
-	}
+	// The gRPC converters now record which blocks the client actually sent, so
+	// presence is real on both paths and the heuristic is not needed.
+	overwriteConfig(&c.Bfd.Config, &pg.Bfd.Config, "neighbor.bfd.config", v)
 
 	if !v.IsSet("neighbor.afi-safis") {
 		c.AfiSafis = append([]AfiSafi{}, pg.AfiSafis...)

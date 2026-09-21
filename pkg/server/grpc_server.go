@@ -1185,6 +1185,63 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 	}, nil
 }
 
+// recordNeighborPresence tells the peer-group inheritance which blocks this
+// request actually supplied.
+//
+// Only the config file used to carry that information, so on the API path
+// overwriteConfig saw no field as set and the peer group won every one of them
+// - including a group whose block was never configured and is therefore all
+// zeros. A neighbor added with graceful-restart enabled and a peer group named
+// came up with graceful restart off, silently.
+//
+// proto3 gives presence per message rather than per field, so this is
+// block-level: a block that was sent is owned entirely by the sender,
+// including the fields it left at zero. Sending an empty block is therefore a
+// real opt-out, which is the thing a zero-value test cannot express.
+//
+// a.Conf is deliberately not recorded. Clients send it always - it carries the
+// peer group name itself - so marking it would stop every NeighborConfig field
+// inheriting and would be a much larger change than the defect being fixed.
+func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
+	key := oc.NeighborPresenceKey(&pconf.Config)
+	if key == "" || pconf.Config.PeerGroup == "" {
+		// Nothing to inherit from, so nothing to record.
+		return
+	}
+	presence := map[string]any{}
+	if a.Timers != nil {
+		presence["timers"] = oc.MarkBlockConfigured(oc.TimersConfig{})
+	}
+	if a.Transport != nil {
+		presence["transport"] = oc.MarkBlockConfigured(oc.TransportConfig{})
+	}
+	if a.EbgpMultihop != nil {
+		presence["ebgp-multihop"] = oc.MarkBlockConfigured(oc.EbgpMultihopConfig{})
+	}
+	if a.RouteReflector != nil {
+		presence["route-reflector"] = oc.MarkBlockConfigured(oc.RouteReflectorConfig{})
+	}
+	if a.RouteServer != nil {
+		presence["route-server"] = oc.MarkBlockConfigured(oc.RouteServerConfig{})
+	}
+	if a.GracefulRestart != nil {
+		presence["graceful-restart"] = oc.MarkBlockConfigured(oc.GracefulRestartConfig{})
+	}
+	if a.TtlSecurity != nil {
+		presence["ttl-security"] = oc.MarkBlockConfigured(oc.TtlSecurityConfig{})
+	}
+	if a.Bfd != nil {
+		presence["bfd"] = oc.MarkBlockConfigured(oc.BfdConfig{})
+	}
+	if a.ApplyPolicy != nil {
+		presence["apply-policy"] = oc.MarkBlockConfigured(oc.ApplyPolicyConfig{})
+	}
+	if len(presence) == 0 {
+		return
+	}
+	oc.RegisterConfiguredFields(key, presence)
+}
+
 func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	pconf := &oc.Neighbor{}
 	if a.Conf != nil {
@@ -1339,6 +1396,7 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		}
 		pconf.Bfd.Config = bfdConfig
 	}
+	recordNeighborPresence(a, pconf)
 	if a.State != nil {
 		var sessionState oc.SessionState
 		switch a.State.SessionState {

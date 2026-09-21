@@ -217,3 +217,65 @@ func TestMgmtOperationPanicReturnsErrorAndDoesNotHang(t *testing.T) {
 	// not leave the Serve loop wedged or the lock held.
 	assert.NoError(t, s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(*api.Peer) {}))
 }
+
+// D1, the defect this release exists for: a neighbor added over the API with
+// graceful restart enabled and a peer group named came up with graceful restart
+// OFF, silently, because the peer group won every field - including a group
+// that never configured graceful restart, whose block is all zeros.
+//
+// This is the end-to-end proof through AddPeer/ListPeer. The per-block matrix
+// lives in pkg/config/oc, where the function under test is.
+func TestGracefulRestartSurvivesPeerGroupMembership(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+	}}))
+
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "198.51.100.40",
+			PeerAsn:         65001,
+			PeerGroup:       "edge",
+		},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120},
+	}}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	require.NotNil(t, got.GracefulRestart)
+
+	assert.True(t, got.GracefulRestart.Enabled,
+		"the peer group never configured graceful restart; its zero value must not erase the neighbor's")
+	assert.EqualValues(t, 120, got.GracefulRestart.RestartTime)
+}
+
+// The converse: a neighbor that sends no graceful-restart block still inherits
+// the group's. Without this, the fix could have been "never inherit anything".
+func TestGracefulRestartStillInheritsFromPeerGroup(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:            &api.PeerGroupConf{PeerGroupName: "edge2", PeerAsn: 65001},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 90},
+	}}))
+
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "198.51.100.41",
+			PeerAsn:         65001,
+			PeerGroup:       "edge2",
+		},
+		// No GracefulRestart block: inherit.
+	}}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	require.NotNil(t, got.GracefulRestart)
+
+	assert.True(t, got.GracefulRestart.Enabled, "a neighbor that sent no block must inherit the group's")
+}
