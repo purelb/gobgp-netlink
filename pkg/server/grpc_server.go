@@ -47,6 +47,7 @@ import (
 // Unlimited batch size by default
 const defaultListPathBatchSize = math.MaxUint64
 
+
 type server struct {
 	bgpServer  *BgpServer
 	shared     *sharedData
@@ -379,6 +380,14 @@ func (s *server) watchEvent(ctx context.Context, r *api.WatchEventRequest, fn fu
 	}
 	if t := r.GetTable(); t != nil {
 		for _, filter := range t.Filters {
+			// The filter's peer address is used to compare against every event.
+			// Reject a malformed one here, where the client can be told, rather
+			// than letting it silently match nothing for the life of the watch.
+			if filter.PeerAddress != "" {
+				if _, err := netip.ParseAddr(filter.PeerAddress); err != nil {
+					return status.Errorf(codes.InvalidArgument, "invalid filter peer address %q: %v", filter.PeerAddress, err)
+				}
+			}
 			switch filter.Type {
 			case api.WatchEventRequest_Table_Filter_TYPE_BEST:
 				opts = append(opts, WatchBestPath(filter.Init))
@@ -2594,15 +2603,30 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 		})
 	}
 
+	// listen_addresses is client-supplied and was validated nowhere - not here,
+	// not in the gRPC wrapper, not in StartBgp - so MustParseAddr took the whole
+	// process down from a single request.
 	l := make([]netip.Addr, 0, len(a.ListenAddresses))
 	for _, addr := range a.ListenAddresses {
-		l = append(l, netip.MustParseAddr(addr))
+		parsed, err := netip.ParseAddr(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid listen address %q: %w", addr, err)
+		}
+		l = append(l, parsed)
+	}
+
+	// router_id happens to be pre-validated by StartBgp today, so this one was
+	// only ever a latent trap - but that guard is incidental to this function,
+	// and any future caller that skips it would reintroduce the panic.
+	routerID, err := netip.ParseAddr(a.RouterId)
+	if err != nil {
+		return nil, fmt.Errorf("invalid router-id %q: %w", a.RouterId, err)
 	}
 
 	global := &oc.Global{
 		Config: oc.GlobalConfig{
 			As:               a.Asn,
-			RouterId:         netip.MustParseAddr(a.RouterId),
+			RouterId:         routerID,
 			Port:             a.ListenPort,
 			LocalAddressList: l,
 			BindToDevice:     a.BindToDevice,

@@ -638,18 +638,30 @@ func UnmarshalFlowSpecRules(values []*api.FlowSpecRule) ([]bgp.FlowSpecComponent
 				return nil, fmt.Errorf("invalid ip address for %s flow spec component: %s", typ.String(), v.Prefix)
 			}
 			isIPv4 := ip.Is4()
+			// PrefixLen sits next to an address that is validated and was not
+			// validated itself, and MustParsePrefix panics rather than
+			// returning an error. A prefix_len of 33 on an IPv4 address - or a
+			// zoned address, since ParseAddr accepts a zone and ParsePrefix
+			// rejects one - killed the daemon from any AddPath call.
+			//
+			// Parse it once here, the way UnmarshalNLRI already does, which
+			// also retires four copies of the same expression.
+			pfx, err := netip.ParsePrefix(fmt.Sprintf("%s/%d", v.Prefix, v.PrefixLen))
+			if err != nil {
+				return nil, fmt.Errorf("invalid prefix for %s flow spec component: %s/%d", typ.String(), v.Prefix, v.PrefixLen)
+			}
 			switch {
 			case typ == bgp.FLOW_SPEC_TYPE_DST_PREFIX && isIPv4:
-				prefix, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix(fmt.Sprintf("%s/%d", v.Prefix, v.PrefixLen)))
+				prefix, _ := bgp.NewIPAddrPrefix(pfx)
 				rule = bgp.NewFlowSpecDestinationPrefix(prefix)
 			case typ == bgp.FLOW_SPEC_TYPE_SRC_PREFIX && isIPv4:
-				prefix, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix(fmt.Sprintf("%s/%d", v.Prefix, v.PrefixLen)))
+				prefix, _ := bgp.NewIPAddrPrefix(pfx)
 				rule = bgp.NewFlowSpecSourcePrefix(prefix)
 			case typ == bgp.FLOW_SPEC_TYPE_DST_PREFIX && !isIPv4:
-				prefix, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix(fmt.Sprintf("%s/%d", v.Prefix, v.PrefixLen)))
+				prefix, _ := bgp.NewIPAddrPrefix(pfx)
 				rule = bgp.NewFlowSpecDestinationPrefix6(prefix, uint8(v.Offset))
 			case typ == bgp.FLOW_SPEC_TYPE_SRC_PREFIX && !isIPv4:
-				prefix, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix(fmt.Sprintf("%s/%d", v.Prefix, v.PrefixLen)))
+				prefix, _ := bgp.NewIPAddrPrefix(pfx)
 				rule = bgp.NewFlowSpecSourcePrefix6(prefix, uint8(v.Offset))
 			}
 		case *api.FlowSpecRule_Mac:

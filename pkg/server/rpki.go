@@ -325,9 +325,16 @@ func (m *roaManager) GetServers() []*oc.RpkiServer {
 		state.SerialNumber = client.serialNumber
 
 		addr, port, _ := net.SplitHostPort(client.host)
+		// AddRpki validates the address now, so this should not fail. Skip
+		// rather than panic if it somehow does: GetServers has no error return,
+		// and taking the daemon down on a read path is the worse outcome.
+		parsed, err := netip.ParseAddr(addr)
+		if err != nil {
+			continue
+		}
 		l = append(l, &oc.RpkiServer{
 			Config: oc.RpkiServerConfig{
-				Address: netip.MustParseAddr(addr),
+				Address: parsed,
 				// Note: RpkiServerConfig.Port is uint32 type, but the TCP/UDP
 				// port is 16-bit length.
 				Port: func() uint32 { p, _ := strconv.ParseUint(port, 10, 16); return uint32(p) }(),
