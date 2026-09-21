@@ -302,3 +302,29 @@ func TestDynamicPeerKeepsPassiveMode(t *testing.T) {
 	assert.True(t, n.Transport.Config.PassiveMode,
 		"a group with no transport block must not take passive mode off a dynamic peer")
 }
+
+// The setting has to survive the trip a config file actually takes:
+// TOML -> oc.Global -> api.Global -> oc.Global. gobgpd does not hand the
+// parsed config straight to the server; it converts it to the API type and
+// back, so a field wired into only some of those converters is silently
+// dropped at startup while every direct test of it passes.
+//
+// That is exactly what happened here. The first version of this feature was
+// tested by calling SetDefaultNeighborConfigValues with an oc.Global built in
+// the test, which skips the conversion entirely, so the flag looked wired and
+// did nothing on a real daemon. It was caught on hardware, not by the suite.
+func TestGlobalGracefulRestartInheritSurvivesTheApiRoundTrip(t *testing.T) {
+	in := &Global{Config: GlobalConfig{
+		As:                                64599,
+		RouterId:                          netip.MustParseAddr("10.0.0.1"),
+		GracefulRestartInheritToNeighbors: true,
+	}}
+	in.GracefulRestart.Config = GracefulRestartConfig{Enabled: true, RestartTime: 200}
+
+	apiGlobal := NewGlobalFromConfigStruct(in)
+	require.True(t, apiGlobal.GracefulRestartInheritToNeighbors,
+		"the config-to-API conversion is what gobgpd uses at startup")
+	require.NotNil(t, apiGlobal.GracefulRestart)
+	assert.True(t, apiGlobal.GracefulRestart.Enabled)
+	assert.EqualValues(t, 200, apiGlobal.GracefulRestart.RestartTime)
+}

@@ -958,6 +958,9 @@ func NewGlobalFromConfigStruct(c *Global) *api.Global {
 		Families:         families,
 		UseMultiplePaths: c.UseMultiplePaths.Config.Enabled,
 		BindToDevice:     c.Config.BindToDevice,
+
+		GracefulRestartInheritToNeighbors: c.Config.GracefulRestartInheritToNeighbors,
+
 		RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 			AlwaysCompareMed:         c.RouteSelectionOptions.Config.AlwaysCompareMed,
 			IgnoreAsPathLength:       c.RouteSelectionOptions.Config.IgnoreAsPathLength,
