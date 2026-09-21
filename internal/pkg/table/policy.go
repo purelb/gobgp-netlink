@@ -4962,15 +4962,18 @@ func toStatementApi(s *oc.Statement) *api.Statement {
 			Type:  ToComparisonApi(s.Conditions.BgpConditions.CommunityCount.Operator),
 		}
 	}
-	if s.Conditions.BgpConditions.OriginEq.ToInt() != -1 {
-		switch s.Actions.BgpActions.SetRouteOrigin {
-		case oc.BGP_ORIGIN_ATTR_TYPE_IGP:
-			cs.Origin = api.OriginType_ORIGIN_TYPE_IGP
-		case oc.BGP_ORIGIN_ATTR_TYPE_EGP:
-			cs.Origin = api.OriginType_ORIGIN_TYPE_EGP
-		case oc.BGP_ORIGIN_ATTR_TYPE_INCOMPLETE:
-			cs.Origin = api.OriginType_ORIGIN_TYPE_INCOMPLETE
-		}
+	// Reports the origin *condition*. This gated on the condition and then read
+	// s.Actions.BgpActions.SetRouteOrigin - the action - so a statement that
+	// matched on origin IGP and set origin EGP reported its condition as EGP,
+	// and one that matched on origin with no origin action reported no
+	// condition at all. Matching was never affected; only what was reported.
+	switch s.Conditions.BgpConditions.OriginEq {
+	case oc.BGP_ORIGIN_ATTR_TYPE_IGP:
+		cs.Origin = api.OriginType_ORIGIN_TYPE_IGP
+	case oc.BGP_ORIGIN_ATTR_TYPE_EGP:
+		cs.Origin = api.OriginType_ORIGIN_TYPE_EGP
+	case oc.BGP_ORIGIN_ATTR_TYPE_INCOMPLETE:
+		cs.Origin = api.OriginType_ORIGIN_TYPE_INCOMPLETE
 	}
 	if s.Conditions.BgpConditions.AsPathLength.Operator != "" {
 		cs.AsPathLength = &api.AsPathLength{
