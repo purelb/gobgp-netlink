@@ -954,6 +954,46 @@ type regExpSet struct {
 	typ  DefinedType
 	name string
 	list []*regexp.Regexp
+	// originals holds the strings the set was configured with, index-aligned
+	// with list. The compiled form is what matches; this is what is reported.
+	//
+	// ParseCommunityRegexp canonicalises as it compiles - it anchors, expands a
+	// numeric community to AS:VALUE, and resolves a well-known name - so
+	// List() used to return exp.String() and a client got back something it had
+	// never sent: "65000:100" came back as "^65000:100$", and "no_export" came
+	// back as "^65535:65281$" with the name gone. A consumer that diffs desired
+	// against reported could never converge.
+	//
+	// One list, so a parallel slice is safe here as long as every mutator moves
+	// both together. AsPathSet has two and needs a different shape.
+	originals []string
+}
+
+// definedSetContents extracts the compiled forms and the configured strings
+// from a set of the same type, so the three mutators below do not each repeat
+// the type switch.
+func definedSetContents(arg DefinedSet) ([]*regexp.Regexp, []string, error) {
+	switch a := arg.(type) {
+	case *AsPathSet:
+		return a.list, a.List(), nil
+	case *CommunitySet:
+		return a.list, a.originals, nil
+	case *ExtCommunitySet:
+		return a.list, a.originals, nil
+	case *LargeCommunitySet:
+		return a.list, a.originals, nil
+	}
+	return nil, nil, fmt.Errorf("invalid defined-set type: %T", arg)
+}
+
+// originalAt returns the configured string for index i, falling back to the
+// compiled form. A set built before originals were recorded, or one assembled
+// by a path this package does not own, still reports something usable.
+func (s *regExpSet) originalAt(i int) string {
+	if i < len(s.originals) {
+		return s.originals[i]
+	}
+	return s.list[i].String()
 }
 
 func (s *regExpSet) Name() string {
@@ -968,20 +1008,18 @@ func (lhs *regExpSet) Append(arg DefinedSet) error {
 	if lhs.Type() != arg.Type() {
 		return fmt.Errorf("can't append to different type of defined-set")
 	}
-	var list []*regexp.Regexp
-	switch lhs.Type() {
-	case DEFINED_TYPE_AS_PATH:
-		list = arg.(*AsPathSet).list
-	case DEFINED_TYPE_COMMUNITY:
-		list = arg.(*CommunitySet).list
-	case DEFINED_TYPE_EXT_COMMUNITY:
-		list = arg.(*ExtCommunitySet).list
-	case DEFINED_TYPE_LARGE_COMMUNITY:
-		list = arg.(*LargeCommunitySet).list
-	default:
-		return fmt.Errorf("invalid defined-set type: %d", lhs.Type())
+	list, originals, err := definedSetContents(arg)
+	if err != nil {
+		return err
 	}
-	lhs.list = append(lhs.list, list...)
+	for i, exp := range list {
+		lhs.list = append(lhs.list, exp)
+		if i < len(originals) {
+			lhs.originals = append(lhs.originals, originals[i])
+		} else {
+			lhs.originals = append(lhs.originals, exp.String())
+		}
+	}
 	return nil
 }
 
@@ -989,21 +1027,17 @@ func (lhs *regExpSet) Remove(arg DefinedSet) error {
 	if lhs.Type() != arg.Type() {
 		return fmt.Errorf("can't append to different type of defined-set")
 	}
-	var list []*regexp.Regexp
-	switch lhs.Type() {
-	case DEFINED_TYPE_AS_PATH:
-		list = arg.(*AsPathSet).list
-	case DEFINED_TYPE_COMMUNITY:
-		list = arg.(*CommunitySet).list
-	case DEFINED_TYPE_EXT_COMMUNITY:
-		list = arg.(*ExtCommunitySet).list
-	case DEFINED_TYPE_LARGE_COMMUNITY:
-		list = arg.(*LargeCommunitySet).list
-	default:
-		return fmt.Errorf("invalid defined-set type: %d", lhs.Type())
+	list, _, err := definedSetContents(arg)
+	if err != nil {
+		return err
 	}
+	// Match on the compiled form deliberately, not on the configured string.
+	// "no_export", "65535:65281" and "^65535:65281$" all compile to the same
+	// regex, and removing by any of them has always removed the entry however
+	// it was added. Comparing originals would quietly break that.
 	ps := make([]*regexp.Regexp, 0, len(lhs.list))
-	for _, x := range lhs.list {
+	os := make([]string, 0, len(lhs.list))
+	for i, x := range lhs.list {
 		found := false
 		for _, y := range list {
 			if x.String() == y.String() {
@@ -1013,20 +1047,22 @@ func (lhs *regExpSet) Remove(arg DefinedSet) error {
 		}
 		if !found {
 			ps = append(ps, x)
+			os = append(os, lhs.originalAt(i))
 		}
 	}
 	lhs.list = ps
+	lhs.originals = os
 	return nil
 }
 
 func (lhs *regExpSet) Replace(arg DefinedSet) error {
 	switch c := arg.(type) {
 	case *CommunitySet:
-		lhs.list = c.list
+		lhs.list, lhs.originals = c.list, c.originals
 	case *ExtCommunitySet:
-		lhs.list = c.list
+		lhs.list, lhs.originals = c.list, c.originals
 	case *LargeCommunitySet:
-		lhs.list = c.list
+		lhs.list, lhs.originals = c.list, c.originals
 	default:
 		return fmt.Errorf("type cast failed")
 	}
@@ -1361,8 +1397,8 @@ func orBitmapSliceGet(entries *[]asBitmapEntry, asn uint16) *localAdminBitmap {
 
 func (s *CommunitySet) List() []string {
 	list := make([]string, 0, len(s.list))
-	for _, exp := range s.list {
-		list = append(list, exp.String())
+	for i := range s.list {
+		list = append(list, s.originalAt(i))
 	}
 	return list
 }
@@ -1501,9 +1537,10 @@ func NewCommunitySet(c oc.CommunitySet) (*CommunitySet, error) {
 	ms, anyIdx := buildCommunityMatchers(list)
 	return &CommunitySet{
 		regExpSet: regExpSet{
-			typ:  DEFINED_TYPE_COMMUNITY,
-			name: name,
-			list: list,
+			typ:       DEFINED_TYPE_COMMUNITY,
+			name:      name,
+			list:      list,
+			originals: slices.Clone(c.CommunityList),
 		},
 		matchers: ms,
 		anyIdx:   anyIdx,
@@ -1752,8 +1789,15 @@ func (s *ExtCommunitySet) List() []string {
 			return fmt.Sprintf("%d:%s", s.subtypeList[idx], arg)
 		}
 	}
-	for idx, exp := range s.list {
-		list = append(list, f(idx, exp.String()))
+	for idx := range s.list {
+		// A recorded original already carries the configured prefix
+		// ("rt:65000:100"); only a set built without one needs it rebuilt from
+		// the subtype.
+		if idx < len(s.originals) {
+			list = append(list, s.originals[idx])
+			continue
+		}
+		list = append(list, f(idx, s.list[idx].String()))
 	}
 	return list
 }
@@ -1798,9 +1842,10 @@ func NewExtCommunitySet(c oc.ExtCommunitySet) (*ExtCommunitySet, error) {
 	}
 	s := &ExtCommunitySet{
 		regExpSet: regExpSet{
-			typ:  DEFINED_TYPE_EXT_COMMUNITY,
-			name: name,
-			list: list,
+			typ:       DEFINED_TYPE_EXT_COMMUNITY,
+			name:      name,
+			list:      list,
+			originals: slices.Clone(c.ExtCommunityList),
 		},
 		subtypeList: subtypeList,
 	}
@@ -1860,8 +1905,8 @@ type LargeCommunitySet struct {
 
 func (s *LargeCommunitySet) List() []string {
 	list := make([]string, 0, len(s.list))
-	for _, exp := range s.list {
-		list = append(list, exp.String())
+	for i := range s.list {
+		list = append(list, s.originalAt(i))
 	}
 	return list
 }
@@ -1913,9 +1958,10 @@ func NewLargeCommunitySet(c oc.LargeCommunitySet) (*LargeCommunitySet, error) {
 	}
 	return &LargeCommunitySet{
 		regExpSet: regExpSet{
-			typ:  DEFINED_TYPE_LARGE_COMMUNITY,
-			name: name,
-			list: list,
+			typ:       DEFINED_TYPE_LARGE_COMMUNITY,
+			name:      name,
+			list:      list,
+			originals: slices.Clone(c.LargeCommunityList),
 		},
 	}, nil
 }
