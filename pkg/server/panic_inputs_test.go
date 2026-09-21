@@ -331,3 +331,32 @@ func TestRunningConfigReportsInheritance(t *testing.T) {
 		}
 	})
 }
+
+// The global source was recorded and never tested, so nothing proved it was
+// ever reported. A peer-group case passing says nothing about the global one:
+// they are recorded at different points in the resolution.
+func TestRunningConfigReportsGlobalInheritance(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{
+			Asn: 65000, RouterId: "10.0.0.1", ListenPort: -1,
+			GracefulRestart:                   &api.GracefulRestart{Enabled: true, RestartTime: 300},
+			GracefulRestartInheritToNeighbors: true,
+		},
+	}))
+	t.Cleanup(func() { _ = s.StopBgp(context.Background(), &api.StopBgpRequest{}) })
+
+	ctx := context.Background()
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: "198.51.100.60", PeerAsn: 65001},
+		// No peer group and no graceful-restart block: the global one applies.
+	}}))
+
+	rsp, err := s.GetRunningConfig(ctx, &api.GetRunningConfigRequest{
+		Format: api.ConfigFormat_CONFIG_FORMAT_TOML, IncludeProvenance: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, rsp.Config, "198.51.100.60: graceful-restart <- global",
+		"a block taken from the global configuration must say so, not just peer-group ones")
+}

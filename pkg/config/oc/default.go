@@ -309,7 +309,16 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 			return err
 		}
 		if addr != "" {
-			n.State.NeighborAddress = netip.MustParseAddr(addr)
+			// Kernel-derived, so this has not been seen to fail - but it is the
+			// last Must on the AddPeer path and its input, the interface name,
+			// comes from the API. Two lines to make it an error rather than a
+			// process exit.
+			parsed, err := netip.ParseAddr(addr)
+			if err != nil {
+				return fmt.Errorf("interface %s yielded an unparseable link-local address %q: %w",
+					n.Config.NeighborInterface, addr, err)
+			}
+			n.State.NeighborAddress = parsed
 		}
 	}
 
