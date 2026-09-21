@@ -48,6 +48,7 @@ import (
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"google.golang.org/protobuf/proto"
 )
 
 // wireEffectFields maps a per-peer setting that changes what is advertised to
@@ -233,7 +234,7 @@ func TestEffectRemovePrivateAs(t *testing.T) {
 
 func TestEffectReplacePeerAsn(t *testing.T) {
 	const prefix = "10.63.0.0/24"
-	a, b := effectPeers(t, 10631, &api.PeerConf{ReplacePeerAsn: true})
+	a, b := effectPeers(t, 10631, &api.PeerConf{ReplacePeerAsn: proto.Bool(true)})
 
 	// replace-peer-as is loop prevention: when advertising toward peer 65002,
 	// any 65002 already in the AS_PATH is replaced with our own ASN so the peer

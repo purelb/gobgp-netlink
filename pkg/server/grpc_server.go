@@ -1185,6 +1185,52 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 	}, nil
 }
 
+// neighborPresenceBlocks maps each configuration block that peer-group
+// inheritance can overwrite to the test for whether this request carried it.
+//
+// A table rather than a run of if-statements so that it can be checked against
+// the set of blocks OverwriteNeighborConfigWithPeerGroup actually touches. That
+// check is the point: as-path options were missing from this list for a
+// release, and a grouped neighbor's allow-own-as, replace-peer-as and
+// allow-aspath-loop-local were silently replaced by the group's zeros - the
+// graceful-restart defect again, in a block nobody had thought to look at.
+var neighborPresenceBlocks = map[string]func(*api.Peer) bool{
+	"timers":           func(a *api.Peer) bool { return a.Timers != nil },
+	"transport":        func(a *api.Peer) bool { return a.Transport != nil },
+	"ebgp-multihop":    func(a *api.Peer) bool { return a.EbgpMultihop != nil },
+	"route-reflector":  func(a *api.Peer) bool { return a.RouteReflector != nil },
+	"route-server":     func(a *api.Peer) bool { return a.RouteServer != nil },
+	"graceful-restart": func(a *api.Peer) bool { return a.GracefulRestart != nil },
+	"ttl-security":     func(a *api.Peer) bool { return a.TtlSecurity != nil },
+	"bfd":              func(a *api.Peer) bool { return a.Bfd != nil },
+	"apply-policy":     func(a *api.Peer) bool { return a.ApplyPolicy != nil },
+
+	// The one block that is not a sub-message. Its three fields live on
+	// api.PeerConf, which clients send on every request, so "the block was
+	// sent" is meaningless here and the fields carry explicit presence
+	// individually instead. Any one of them being present means the client is
+	// stating its as-path options, and the peer group does not override them.
+	"as-path-options": func(a *api.Peer) bool {
+		return a.Conf != nil && (a.Conf.AllowOwnAsn != nil ||
+			a.Conf.ReplacePeerAsn != nil ||
+			a.Conf.AllowAspathLoopLocal != nil)
+	},
+}
+
+// neighborBlocksWithNothingToRecord are the blocks inheritance touches that
+// have no presence signal to take, with the reason. Each is here because the
+// API cannot express the block, not because nobody got to it.
+var neighborBlocksWithNothingToRecord = map[string]string{
+	"config": "api.PeerConf is sent on every request - it carries the peer group name - so treating it as " +
+		"'the client owns this block' would stop every NeighborConfig field inheriting. The config file path " +
+		"still has real per-field presence for it; the API path does not.",
+	"add-paths": "add_paths exists only on api.AfiSafi, not on api.Peer, and readAddPathsFromAPIStruct is only " +
+		"called per family. Nothing can set the neighbor-level block over the API, so there is nothing to record.",
+	"error-handling":     "no field on api.Peer; nothing can set it over the API",
+	"logging-options":    "no field on api.Peer; nothing can set it over the API",
+	"use-multiple-paths": "no field on api.Peer; nothing can set it over the API",
+}
+
 // recordNeighborPresence tells the peer-group inheritance which blocks this
 // request actually supplied.
 //
@@ -1198,10 +1244,6 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 // block-level: a block that was sent is owned entirely by the sender,
 // including the fields it left at zero. Sending an empty block is therefore a
 // real opt-out, which is the thing a zero-value test cannot express.
-//
-// a.Conf is deliberately not recorded. Clients send it always - it carries the
-// peer group name itself - so marking it would stop every NeighborConfig field
-// inheriting and would be a much larger change than the defect being fixed.
 func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 	key := oc.NeighborPresenceKey(pconf)
 	if key == "" || pconf.Config.PeerGroup == "" {
@@ -1209,37 +1251,43 @@ func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 		return
 	}
 	presence := map[string]any{}
-	if a.Timers != nil {
-		presence["timers"] = oc.MarkBlockConfigured(oc.TimersConfig{})
-	}
-	if a.Transport != nil {
-		presence["transport"] = oc.MarkBlockConfigured(oc.TransportConfig{})
-	}
-	if a.EbgpMultihop != nil {
-		presence["ebgp-multihop"] = oc.MarkBlockConfigured(oc.EbgpMultihopConfig{})
-	}
-	if a.RouteReflector != nil {
-		presence["route-reflector"] = oc.MarkBlockConfigured(oc.RouteReflectorConfig{})
-	}
-	if a.RouteServer != nil {
-		presence["route-server"] = oc.MarkBlockConfigured(oc.RouteServerConfig{})
-	}
-	if a.GracefulRestart != nil {
-		presence["graceful-restart"] = oc.MarkBlockConfigured(oc.GracefulRestartConfig{})
-	}
-	if a.TtlSecurity != nil {
-		presence["ttl-security"] = oc.MarkBlockConfigured(oc.TtlSecurityConfig{})
-	}
-	if a.Bfd != nil {
-		presence["bfd"] = oc.MarkBlockConfigured(oc.BfdConfig{})
-	}
-	if a.ApplyPolicy != nil {
-		presence["apply-policy"] = oc.MarkBlockConfigured(oc.ApplyPolicyConfig{})
+	for block, sent := range neighborPresenceBlocks {
+		if sent(a) {
+			presence[block] = oc.MarkBlockConfigured(blockConfigZero(block))
+		}
 	}
 	if len(presence) == 0 {
 		return
 	}
 	oc.RegisterConfiguredFields(key, presence)
+}
+
+// blockConfigZero returns a zero value of the oc config struct for a block, so
+// MarkBlockConfigured can read its mapstructure tags.
+func blockConfigZero(block string) any {
+	switch block {
+	case "timers":
+		return oc.TimersConfig{}
+	case "transport":
+		return oc.TransportConfig{}
+	case "ebgp-multihop":
+		return oc.EbgpMultihopConfig{}
+	case "route-reflector":
+		return oc.RouteReflectorConfig{}
+	case "route-server":
+		return oc.RouteServerConfig{}
+	case "graceful-restart":
+		return oc.GracefulRestartConfig{}
+	case "ttl-security":
+		return oc.TtlSecurityConfig{}
+	case "bfd":
+		return oc.BfdConfig{}
+	case "apply-policy":
+		return oc.ApplyPolicyConfig{}
+	case "as-path-options":
+		return oc.AsPathOptionsConfig{}
+	}
+	return nil
 }
 
 func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
@@ -1268,12 +1316,12 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		// allow our own ASN at all" - the operator asks for the loosest setting
 		// and silently gets the strictest. It fails closed, so it leaks nothing,
 		// but the peer then rejects paths it was meant to accept.
-		if a.Conf.AllowOwnAsn > math.MaxUint8 {
-			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.AllowOwnAsn)
+		if a.Conf.GetAllowOwnAsn() > math.MaxUint8 {
+			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.GetAllowOwnAsn())
 		}
-		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.AllowOwnAsn)
-		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.ReplacePeerAsn
-		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.AllowAspathLoopLocal
+		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.GetAllowOwnAsn())
+		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.GetReplacePeerAsn()
+		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.GetAllowAspathLoopLocal()
 		pconf.Config.SendSoftwareVersion = a.Conf.SendSoftwareVersion
 
 		switch a.Conf.RemovePrivate {
@@ -1463,12 +1511,12 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		pconf.Config.Description = a.Conf.Description
 		pconf.Config.PeerGroupName = a.Conf.PeerGroupName
 		pconf.Config.SendSoftwareVersion = a.Conf.SendSoftwareVersion
-		if a.Conf.AllowOwnAsn > math.MaxUint8 {
-			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.AllowOwnAsn)
+		if a.Conf.GetAllowOwnAsn() > math.MaxUint8 {
+			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.GetAllowOwnAsn())
 		}
-		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.AllowOwnAsn)
-		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.ReplacePeerAsn
-		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.AllowAspathLoopLocal
+		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.GetAllowOwnAsn())
+		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.GetReplacePeerAsn()
+		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.GetAllowAspathLoopLocal()
 
 		switch a.Conf.RemovePrivate {
 		case api.RemovePrivate_REMOVE_PRIVATE_ALL:

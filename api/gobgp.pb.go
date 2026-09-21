@@ -9270,14 +9270,31 @@ type PeerConf struct {
 	// route targets included, from every existing session on upgrade. Absent
 	// means "not configured": send whatever the path carries, as gobgpd always
 	// has.
-	SendCommunity        *uint32 `protobuf:"varint,10,opt,name=send_community,json=sendCommunity,proto3,oneof" json:"send_community,omitempty"`
-	NeighborInterface    string  `protobuf:"bytes,11,opt,name=neighbor_interface,json=neighborInterface,proto3" json:"neighbor_interface,omitempty"`
-	Vrf                  string  `protobuf:"bytes,12,opt,name=vrf,proto3" json:"vrf,omitempty"`
-	AllowOwnAsn          uint32  `protobuf:"varint,13,opt,name=allow_own_asn,json=allowOwnAsn,proto3" json:"allow_own_asn,omitempty"`
-	ReplacePeerAsn       bool    `protobuf:"varint,14,opt,name=replace_peer_asn,json=replacePeerAsn,proto3" json:"replace_peer_asn,omitempty"`
+	SendCommunity     *uint32 `protobuf:"varint,10,opt,name=send_community,json=sendCommunity,proto3,oneof" json:"send_community,omitempty"`
+	NeighborInterface string  `protobuf:"bytes,11,opt,name=neighbor_interface,json=neighborInterface,proto3" json:"neighbor_interface,omitempty"`
+	Vrf               string  `protobuf:"bytes,12,opt,name=vrf,proto3" json:"vrf,omitempty"`
+	// Explicit presence, for the same reason send_community above has it, and
+	// with a sharper consequence.
+	//
+	// These three are the as-path-options block, and peer-group inheritance
+	// decides what a neighbor keeps by asking which blocks it actually sent.
+	// Every other block is a sub-message, so proto3 message presence answers
+	// that. These are bare scalars on a message clients always send, so there
+	// was no signal at all - and a grouped neighbor's as-path options were
+	// silently replaced by the peer group's zero values.
+	//
+	// Presence also makes "replace-peer-as = false" expressible against a group
+	// that sets it true. false is the zero value, so nothing else can say it.
+	//
+	// PeerGroupConf below deliberately does not match. A peer group is only ever
+	// a source of values for its members and never inherits from anything, so
+	// presence buys it nothing and would cost consumers a recompile for no
+	// behaviour.
+	AllowOwnAsn          *uint32 `protobuf:"varint,13,opt,name=allow_own_asn,json=allowOwnAsn,proto3,oneof" json:"allow_own_asn,omitempty"`
+	ReplacePeerAsn       *bool   `protobuf:"varint,14,opt,name=replace_peer_asn,json=replacePeerAsn,proto3,oneof" json:"replace_peer_asn,omitempty"`
 	AdminDown            bool    `protobuf:"varint,15,opt,name=admin_down,json=adminDown,proto3" json:"admin_down,omitempty"`
 	SendSoftwareVersion  bool    `protobuf:"varint,16,opt,name=send_software_version,json=sendSoftwareVersion,proto3" json:"send_software_version,omitempty"`
-	AllowAspathLoopLocal bool    `protobuf:"varint,17,opt,name=allow_aspath_loop_local,json=allowAspathLoopLocal,proto3" json:"allow_aspath_loop_local,omitempty"`
+	AllowAspathLoopLocal *bool   `protobuf:"varint,17,opt,name=allow_aspath_loop_local,json=allowAspathLoopLocal,proto3,oneof" json:"allow_aspath_loop_local,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -9397,15 +9414,15 @@ func (x *PeerConf) GetVrf() string {
 }
 
 func (x *PeerConf) GetAllowOwnAsn() uint32 {
-	if x != nil {
-		return x.AllowOwnAsn
+	if x != nil && x.AllowOwnAsn != nil {
+		return *x.AllowOwnAsn
 	}
 	return 0
 }
 
 func (x *PeerConf) GetReplacePeerAsn() bool {
-	if x != nil {
-		return x.ReplacePeerAsn
+	if x != nil && x.ReplacePeerAsn != nil {
+		return *x.ReplacePeerAsn
 	}
 	return false
 }
@@ -9425,8 +9442,8 @@ func (x *PeerConf) GetSendSoftwareVersion() bool {
 }
 
 func (x *PeerConf) GetAllowAspathLoopLocal() bool {
-	if x != nil {
-		return x.AllowAspathLoopLocal
+	if x != nil && x.AllowAspathLoopLocal != nil {
+		return *x.AllowAspathLoopLocal
 	}
 	return false
 }
@@ -16690,7 +16707,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\vPrefixLimit\x12#\n" +
 	"\x06family\x18\x01 \x01(\v2\v.api.FamilyR\x06family\x12!\n" +
 	"\fmax_prefixes\x18\x02 \x01(\rR\vmaxPrefixes\x124\n" +
-	"\x16shutdown_threshold_pct\x18\x03 \x01(\rR\x14shutdownThresholdPct\"\xb7\x05\n" +
+	"\x16shutdown_threshold_pct\x18\x03 \x01(\rR\x14shutdownThresholdPct\"\x89\x06\n" +
 	"\bPeerConf\x12#\n" +
 	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1b\n" +
@@ -16705,14 +16722,17 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x0esend_community\x18\n" +
 	" \x01(\rH\x00R\rsendCommunity\x88\x01\x01\x12-\n" +
 	"\x12neighbor_interface\x18\v \x01(\tR\x11neighborInterface\x12\x10\n" +
-	"\x03vrf\x18\f \x01(\tR\x03vrf\x12\"\n" +
-	"\rallow_own_asn\x18\r \x01(\rR\vallowOwnAsn\x12(\n" +
-	"\x10replace_peer_asn\x18\x0e \x01(\bR\x0ereplacePeerAsn\x12\x1d\n" +
+	"\x03vrf\x18\f \x01(\tR\x03vrf\x12'\n" +
+	"\rallow_own_asn\x18\r \x01(\rH\x01R\vallowOwnAsn\x88\x01\x01\x12-\n" +
+	"\x10replace_peer_asn\x18\x0e \x01(\bH\x02R\x0ereplacePeerAsn\x88\x01\x01\x12\x1d\n" +
 	"\n" +
 	"admin_down\x18\x0f \x01(\bR\tadminDown\x122\n" +
-	"\x15send_software_version\x18\x10 \x01(\bR\x13sendSoftwareVersion\x125\n" +
-	"\x17allow_aspath_loop_local\x18\x11 \x01(\bR\x14allowAspathLoopLocalB\x11\n" +
-	"\x0f_send_community\"\xba\x04\n" +
+	"\x15send_software_version\x18\x10 \x01(\bR\x13sendSoftwareVersion\x12:\n" +
+	"\x17allow_aspath_loop_local\x18\x11 \x01(\bH\x03R\x14allowAspathLoopLocal\x88\x01\x01B\x11\n" +
+	"\x0f_send_communityB\x10\n" +
+	"\x0e_allow_own_asnB\x13\n" +
+	"\x11_replace_peer_asnB\x1a\n" +
+	"\x18_allow_aspath_loop_local\"\xba\x04\n" +
 	"\rPeerGroupConf\x12#\n" +
 	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1b\n" +

@@ -41,6 +41,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"google.golang.org/protobuf/proto"
 )
 
 var logger = slog.Default()
@@ -4179,7 +4180,7 @@ func TestUpdatePeer(t *testing.T) {
 			LocalAsn:        65000,
 			PeerAsn:         65001,
 			Type:            api.PeerType_PEER_TYPE_EXTERNAL,
-			ReplacePeerAsn:  false,
+			ReplacePeerAsn:  proto.Bool(false),
 		},
 		Timers: &api.Timers{
 			Config: &api.TimersConfig{
@@ -4206,7 +4207,7 @@ func TestUpdatePeer(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	// update AS_PATH option
-	p.Conf.ReplacePeerAsn = true
+	p.Conf.ReplacePeerAsn = proto.Bool(true)
 	resp, err = s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: p})
 	assert.NoError(t, err)
 	assert.True(t, resp.NeedsSoftResetIn)

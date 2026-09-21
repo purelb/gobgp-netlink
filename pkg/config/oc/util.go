@@ -31,6 +31,7 @@ import (
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"google.golang.org/protobuf/proto"
 )
 
 // Returns config file type by retrieving extension from the given path.
@@ -626,21 +627,24 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 	return &api.Peer{
 		ApplyPolicy: newApplyPolicyFromConfigStruct(&pconf.ApplyPolicy),
 		Conf: &api.PeerConf{
-			NeighborAddress:      pconf.Config.NeighborAddress.String(),
-			PeerAsn:              pconf.Config.PeerAs,
-			LocalAsn:             pconf.Config.LocalAs,
-			Type:                 toPeerType(pconf.Config.PeerType),
-			AuthPassword:         pconf.Config.AuthPassword,
-			RouteFlapDamping:     pconf.Config.RouteFlapDamping,
-			SendCommunity:        SendCommunityToAPI(pconf.Config.SendCommunity),
-			Description:          pconf.Config.Description,
-			PeerGroup:            pconf.Config.PeerGroup,
-			NeighborInterface:    pconf.Config.NeighborInterface,
-			Vrf:                  pconf.Config.Vrf,
-			AllowOwnAsn:          uint32(pconf.AsPathOptions.Config.AllowOwnAs),
-			AllowAspathLoopLocal: pconf.AsPathOptions.Config.AllowAsPathLoopLocal,
+			NeighborAddress:   pconf.Config.NeighborAddress.String(),
+			PeerAsn:           pconf.Config.PeerAs,
+			LocalAsn:          pconf.Config.LocalAs,
+			Type:              toPeerType(pconf.Config.PeerType),
+			AuthPassword:      pconf.Config.AuthPassword,
+			RouteFlapDamping:  pconf.Config.RouteFlapDamping,
+			SendCommunity:     SendCommunityToAPI(pconf.Config.SendCommunity),
+			Description:       pconf.Config.Description,
+			PeerGroup:         pconf.Config.PeerGroup,
+			NeighborInterface: pconf.Config.NeighborInterface,
+			Vrf:               pconf.Config.Vrf,
+			// Always reported, never nil on the read path: the resolved
+			// configuration is a fact, and a client cannot tell "unset" from
+			// "false" in a report anyway. Presence is for what a client sends.
+			AllowOwnAsn:          proto.Uint32(uint32(pconf.AsPathOptions.Config.AllowOwnAs)),
+			AllowAspathLoopLocal: proto.Bool(pconf.AsPathOptions.Config.AllowAsPathLoopLocal),
 			RemovePrivate:        removePrivate,
-			ReplacePeerAsn:       pconf.AsPathOptions.Config.ReplacePeerAs,
+			ReplacePeerAsn:       proto.Bool(pconf.AsPathOptions.Config.ReplacePeerAs),
 			AdminDown:            pconf.Config.AdminDown,
 			SendSoftwareVersion:  pconf.Config.SendSoftwareVersion,
 		},

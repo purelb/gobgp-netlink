@@ -1030,11 +1030,28 @@ message PeerConf {
   optional uint32 send_community = 10;
   string neighbor_interface = 11;
   string vrf = 12;
-  uint32 allow_own_asn = 13;
-  bool replace_peer_asn = 14;
+  // Explicit presence, for the same reason send_community above has it, and
+  // with a sharper consequence.
+  //
+  // These three are the as-path-options block, and peer-group inheritance
+  // decides what a neighbor keeps by asking which blocks it actually sent.
+  // Every other block is a sub-message, so proto3 message presence answers
+  // that. These are bare scalars on a message clients always send, so there
+  // was no signal at all - and a grouped neighbor's as-path options were
+  // silently replaced by the peer group's zero values.
+  //
+  // Presence also makes "replace-peer-as = false" expressible against a group
+  // that sets it true. false is the zero value, so nothing else can say it.
+  //
+  // PeerGroupConf below deliberately does not match. A peer group is only ever
+  // a source of values for its members and never inherits from anything, so
+  // presence buys it nothing and would cost consumers a recompile for no
+  // behaviour.
+  optional uint32 allow_own_asn = 13;
+  optional bool replace_peer_asn = 14;
   bool admin_down = 15;
   bool send_software_version = 16;
-  bool allow_aspath_loop_local = 17;
+  optional bool allow_aspath_loop_local = 17;
 }
 
 message PeerGroupConf {

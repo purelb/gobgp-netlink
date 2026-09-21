@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/osrg/gobgp/v4/api"
+	"google.golang.org/protobuf/proto"
 )
 
 // These inputs each used to reach a Must* call or an unbounded make() and take
@@ -385,4 +386,90 @@ func TestBmpPeerStatsSkipsUnparseableAddresses(t *testing.T) {
 	// dereference unguarded.
 	assert.NotNil(t, bmpPeerStats(0, 0, 0, established("10.0.0.2", "10.0.0.1")),
 		"a well-formed peer must still produce a message, counters or not")
+}
+
+// A grouped neighbor's as-path options were silently replaced by the peer
+// group's zero values - the graceful-restart defect, in the one block whose
+// fields are scalars on api.PeerConf rather than a sub-message. There was no
+// presence signal for them, so the group won every time.
+func TestAsPathOptionsSurvivePeerGroupMembership(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "asgrp", PeerAsn: 65001},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress:      "198.51.100.70",
+			PeerAsn:              65001,
+			PeerGroup:            "asgrp",
+			AllowOwnAsn:          proto.Uint32(3),
+			ReplacePeerAsn:       proto.Bool(true),
+			AllowAspathLoopLocal: proto.Bool(true),
+		},
+	}}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+
+	assert.EqualValues(t, 3, got.Conf.GetAllowOwnAsn(),
+		"the peer group configured no as-path options; its zeros must not erase the neighbor's")
+	assert.True(t, got.Conf.GetReplacePeerAsn())
+	assert.True(t, got.Conf.GetAllowAspathLoopLocal())
+}
+
+// The converse, so the fix cannot be "never inherit": a neighbor that states
+// none of them still takes the group's.
+func TestAsPathOptionsStillInheritFromPeerGroup(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{
+			PeerGroupName: "asgrp2", PeerAsn: 65001,
+			AllowOwnAsn: 5, ReplacePeerAsn: true,
+		},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "198.51.100.71", PeerAsn: 65001, PeerGroup: "asgrp2",
+			// None of the three stated.
+		},
+	}}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	assert.EqualValues(t, 5, got.Conf.GetAllowOwnAsn(), "a neighbor that stated nothing must inherit")
+	assert.True(t, got.Conf.GetReplacePeerAsn())
+}
+
+// And the opt-out that only explicit presence can express: false against a
+// group that says true. false is the zero value, so nothing else can say it.
+func TestAsPathOptionsExplicitFalseOptsOut(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{
+			PeerGroupName: "asgrp3", PeerAsn: 65001,
+			ReplacePeerAsn: true, AllowOwnAsn: 7,
+		},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "198.51.100.72", PeerAsn: 65001, PeerGroup: "asgrp3",
+			ReplacePeerAsn: proto.Bool(false),
+		},
+	}}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	assert.False(t, got.Conf.GetReplacePeerAsn(),
+		"an explicitly false as-path option must not be turned back on by the group")
+	assert.EqualValues(t, 0, got.Conf.GetAllowOwnAsn(),
+		"and stating one field of the block claims the block, as everywhere else")
 }
