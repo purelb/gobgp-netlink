@@ -306,9 +306,9 @@ func TestAddPeerUnnumberedInterface(t *testing.T) {
 
 func TestWatchUpdateCurrentDeliversInitBeforeLiveEvents(t *testing.T) {
 	ctx := context.Background()
-	s1 := runNewServer(t, 1, "1.1.1.1", 10179)
+	s1 := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{})
-	s2 := runNewServer(t, 1, "2.2.2.2", 20179)
+	s2 := runNewServer(t, 1, "2.2.2.2", freeTCPPort(t))
 	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{})
 
 	established := newPeerStateWaiter(s1, api.PeerState_SESSION_STATE_ESTABLISHED)
@@ -2511,6 +2511,29 @@ func TestFamiliesForSoftreset(t *testing.T) {
 	assert.NotContains(t, families, bgp.RF_RTC_UC)
 }
 
+// freeTCPPort asks the kernel for an unused port instead of hardcoding one.
+//
+// Fixed ports were the single largest source of flaky failures in this package:
+// a handful of literals - 10179, 20179, 44179, 55179 - reused across a dozen
+// tests, so anything running concurrently, or any binary left behind by a
+// previous run that timed out, produced "bind: address already in use". That
+// surfaces as a session that never establishes and a test that times out ten
+// seconds later, which reads like a protocol bug rather than a port clash.
+//
+// There is a small window between closing this listener and the server binding
+// the port, in which something else could take it. That is a real race and it
+// is still enormously better than a literal, which collides deterministically.
+func freeTCPPort(t *testing.T) int32 {
+	t.Helper()
+	// ":0" rather than "127.0.0.1:0": the server binds all interfaces, so the
+	// port has to be free there, not just on loopback.
+	l, err := net.Listen("tcp", ":0")
+	require.NoError(t, err, "could not find a free TCP port")
+	port := l.Addr().(*net.TCPAddr).Port
+	require.NoError(t, l.Close())
+	return int32(port)
+}
+
 func runNewServer(t *testing.T, as uint32, routerID string, listenPort int32) *BgpServer {
 	s := NewBgpServer()
 	go s.Serve()
@@ -2649,10 +2672,10 @@ func addVrf(t *testing.T, s *BgpServer, vrfName, rdStr string, importRtsStr []st
 func TestDoNotReactToDuplicateRTCMemberships(t *testing.T) {
 	ctx := context.Background()
 
-	s1 := runNewServer(t, 1, "1.1.1.1", 10179)
+	s1 := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	err := s1.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
-	s2 := runNewServer(t, 1, "2.2.2.2", 20179)
+	s2 := runNewServer(t, 1, "2.2.2.2", freeTCPPort(t))
 	err = s2.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
 
@@ -2756,11 +2779,11 @@ func TestDoNotReactToDuplicateRTCMemberships(t *testing.T) {
 func TestDelVrfWithRTC(t *testing.T) {
 	ctx := context.Background()
 
-	s1 := runNewServer(t, 1, "1.1.1.1", 10179)
+	s1 := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{})
 	err := s1.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
-	s2 := runNewServer(t, 1, "2.2.2.2", 20179)
+	s2 := runNewServer(t, 1, "2.2.2.2", freeTCPPort(t))
 	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{})
 	err = s2.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
@@ -2866,11 +2889,11 @@ func TestDelVrfWithRTC(t *testing.T) {
 func TestSameRTCMessagesWithOneDifferrence(t *testing.T) {
 	ctx := context.Background()
 
-	s1 := runNewServer(t, 1, "1.1.1.1", 10179)
+	s1 := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{})
 	err := s1.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
-	s2 := runNewServer(t, 1, "2.2.2.2", 20179)
+	s2 := runNewServer(t, 1, "2.2.2.2", freeTCPPort(t))
 	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{})
 	err = s2.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
@@ -3000,11 +3023,11 @@ func TestSameRTCMessagesWithOneDifferrence(t *testing.T) {
 func TestRTCWithdrawUpdatedPath(t *testing.T) {
 	ctx := context.Background()
 
-	s1 := runNewServer(t, 1, "1.1.1.1", 10179)
+	s1 := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{})
 	err := s1.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
-	s2 := runNewServer(t, 1, "2.2.2.2", 20179)
+	s2 := runNewServer(t, 1, "2.2.2.2", freeTCPPort(t))
 	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{})
 	err = s2.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
@@ -3105,7 +3128,7 @@ func TestRTCWithdrawUpdatedPath(t *testing.T) {
 }
 
 func TestAddDeletePath(t *testing.T) {
-	s := runNewServer(t, 1, "1.1.1.1", 10179)
+	s := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
 
 	nlri := &api.NLRI{Nlri: &api.NLRI_Prefix{Prefix: &api.IPAddressPrefix{
@@ -3333,7 +3356,7 @@ func TestAddDeletePath(t *testing.T) {
 }
 
 func TestDeleteNonExistingVrf(t *testing.T) {
-	s := runNewServer(t, 1, "1.1.1.1", 10179)
+	s := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
 	err := s.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
@@ -3346,7 +3369,7 @@ func TestDeleteNonExistingVrf(t *testing.T) {
 }
 
 func TestDeleteVrf(t *testing.T) {
-	s := runNewServer(t, 1, "1.1.1.1", 10179)
+	s := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
 	err := s.SetLogLevel(context.Background(), &api.SetLogLevelRequest{Level: api.SetLogLevelRequest_LEVEL_DEBUG})
 	assert.NoError(t, err)
@@ -3359,7 +3382,7 @@ func TestDeleteVrf(t *testing.T) {
 }
 
 func TestAddBogusPath(t *testing.T) {
-	s := runNewServer(t, 1, "1.1.1.1", 10179)
+	s := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
 
 	nlri := &api.NLRI{Nlri: &api.NLRI_Prefix{Prefix: &api.IPAddressPrefix{}}}
@@ -4640,9 +4663,9 @@ func TestStartBgp_RouterIdValidation(t *testing.T) {
 func TestRTCImplicitWithdrawForAcceptedPathWillWithdrawVPNPaths(t *testing.T) {
 	ctx := context.Background()
 
-	s1 := runNewServer(t, 1, "1.1.1.1", 22179)
+	s1 := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{})
-	s2 := runNewServer(t, 1, "2.2.2.2", 33179)
+	s2 := runNewServer(t, 1, "2.2.2.2", freeTCPPort(t))
 	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{})
 
 	wgEstablished := newPeerStateWaiter(s1, api.PeerState_SESSION_STATE_ESTABLISHED)
@@ -4733,9 +4756,9 @@ func TestRTCImplicitWithdrawForAcceptedPathWillWithdrawVPNPaths(t *testing.T) {
 func TestRTCShouldNotAdvertiseVPNRouteWhenRTCIsNotPassImportPolicies(t *testing.T) {
 	ctx := context.Background()
 
-	s1 := runNewServer(t, 1, "1.1.1.1", 44179)
+	s1 := runNewServer(t, 1, "1.1.1.1", freeTCPPort(t))
 	defer s1.StopBgp(context.Background(), &api.StopBgpRequest{})
-	s2 := runNewServer(t, 1, "2.2.2.2", 55179)
+	s2 := runNewServer(t, 1, "2.2.2.2", freeTCPPort(t))
 	defer s2.StopBgp(context.Background(), &api.StopBgpRequest{})
 
 	wgEstablished := newPeerStateWaiter(s1, api.PeerState_SESSION_STATE_ESTABLISHED)
