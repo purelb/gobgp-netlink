@@ -238,10 +238,13 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 		if n.GracefulRestart.Config == none {
 			n.GracefulRestart.Config = g.GracefulRestart.Config
 			recordProvenance(NeighborPresenceKey(n), "graceful-restart", SourceGlobal)
-			// long-lived is not propagated. The per-family LLGR flag is never
-			// derived from the neighbor-level one, so switching it on here
-			// would advertise a long-lived capability carrying no families -
-			// the same empty-capability defect that mp-graceful-restart had.
+			// Long-lived is still not propagated globally, but the reason has
+			// changed: it now derives per family correctly, so it would be a
+			// real capability rather than an empty one. That is exactly why it
+			// stays out. Long-lived retention is measured in hours where
+			// ordinary graceful restart is measured in seconds, so switching it
+			// on for an entire fleet from one global line is a much larger
+			// commitment than this setting is asking for. Set it per peer.
 			n.GracefulRestart.Config.LongLivedEnabled = false
 		}
 	}
@@ -354,6 +357,11 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 			// path, because the families are synthesised.
 			n.AfiSafis[i].MpGracefulRestart.Config.Enabled = n.GracefulRestart.Config.Enabled
 			n.AfiSafis[i].MpGracefulRestart.State.Enabled = n.AfiSafis[i].MpGracefulRestart.Config.Enabled
+			// Long-lived has the same shape and the same defect: fsm.go emits a
+			// long-lived tuple only for families whose flag is set, and nothing
+			// derived it from the neighbor-level one, so long-lived-enabled
+			// produced a capability carrying no families at all.
+			n.AfiSafis[i].LongLivedGracefulRestart.Config.Enabled = n.GracefulRestart.Config.LongLivedEnabled
 			n.AfiSafis[i].AddPaths.Config.Receive = n.AddPaths.Config.Receive
 			n.AfiSafis[i].AddPaths.State.Receive = n.AddPaths.Config.Receive
 			n.AfiSafis[i].AddPaths.Config.SendMax = n.AddPaths.Config.SendMax
@@ -391,6 +399,10 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 				n.AfiSafis[i].MpGracefulRestart.Config.Enabled = n.GracefulRestart.Config.Enabled
 			}
 			n.AfiSafis[i].MpGracefulRestart.State.Enabled = n.AfiSafis[i].MpGracefulRestart.Config.Enabled
+			// As above, for long-lived.
+			if !vv.IsSet("afi-safi.long-lived-graceful-restart.config.enabled") {
+				n.AfiSafis[i].LongLivedGracefulRestart.Config.Enabled = n.GracefulRestart.Config.LongLivedEnabled
+			}
 			if !vv.IsSet("afi-safi.add-paths.config.receive") {
 				if n.AddPaths.Config.Receive {
 					n.AfiSafis[i].AddPaths.Config.Receive = n.AddPaths.Config.Receive

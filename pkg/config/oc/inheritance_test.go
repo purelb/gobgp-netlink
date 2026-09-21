@@ -328,3 +328,46 @@ func TestGlobalGracefulRestartInheritSurvivesTheApiRoundTrip(t *testing.T) {
 	assert.True(t, apiGlobal.GracefulRestart.Enabled)
 	assert.EqualValues(t, 200, apiGlobal.GracefulRestart.RestartTime)
 }
+
+// Long-lived graceful restart had the same defect as mp-graceful-restart, one
+// capability over: fsm.go emits a long-lived tuple only for families whose
+// per-family flag is set, and nothing ever derived that from the
+// neighbor-level long-lived-enabled. So a peer that asked for it advertised a
+// long-lived capability carrying no families - negotiated, and retaining
+// nothing.
+//
+// It was found while excluding long-lived from global propagation, and left
+// unfixed at the time. That was wrong: the defect is live for anyone setting
+// it per peer, which is the only way to set it.
+func TestLongLivedGracefulRestartDerivesPerFamily(t *testing.T) {
+	g := &Global{Config: GlobalConfig{As: 65000, RouterId: netip.MustParseAddr("10.0.0.1")}}
+
+	t.Run("synthesised families", func(t *testing.T) {
+		n := &Neighbor{}
+		n.Config.NeighborAddress = netip.MustParseAddr("198.51.100.220")
+		n.Config.PeerAs = 65001
+		n.GracefulRestart.Config.Enabled = true
+		n.GracefulRestart.Config.LongLivedEnabled = true
+
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, g))
+		require.NotEmpty(t, n.AfiSafis)
+		for _, af := range n.AfiSafis {
+			assert.True(t, af.LongLivedGracefulRestart.Config.Enabled,
+				"%s must carry long-lived, or the capability goes out with no families",
+				af.Config.AfiSafiName)
+		}
+	})
+
+	t.Run("not enabled when the neighbor did not ask", func(t *testing.T) {
+		n := &Neighbor{}
+		n.Config.NeighborAddress = netip.MustParseAddr("198.51.100.221")
+		n.Config.PeerAs = 65001
+		n.GracefulRestart.Config.Enabled = true
+
+		require.NoError(t, SetDefaultNeighborConfigValues(n, nil, g))
+		require.NotEmpty(t, n.AfiSafis)
+		for _, af := range n.AfiSafis {
+			assert.False(t, af.LongLivedGracefulRestart.Config.Enabled, "%s", af.Config.AfiSafiName)
+		}
+	})
+}
