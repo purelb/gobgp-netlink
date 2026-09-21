@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
 )
 
 func mustApi2apiutilPath(path *api.Path) *apiutil.Path {
@@ -85,7 +86,7 @@ func TestNewNeighborFromAPIStructRejectsInvalidAllowOwnAsn(t *testing.T) {
 			Conf: &api.PeerConf{
 				NeighborAddress: "10.0.0.1",
 				PeerAsn:         65001,
-				AllowOwnAsn:     v,
+				AllowOwnAsn:     proto.Uint32(v),
 			},
 		})
 		assert.ErrorContains(t, err, "allow_own_asn is out of range", "value %d", v)
@@ -96,7 +97,7 @@ func TestNewNeighborFromAPIStructRejectsInvalidAllowOwnAsn(t *testing.T) {
 		Conf: &api.PeerConf{
 			NeighborAddress: "10.0.0.1",
 			PeerAsn:         65001,
-			AllowOwnAsn:     255,
+			AllowOwnAsn:     proto.Uint32(255),
 		},
 	})
 	assert.NoError(t, err)

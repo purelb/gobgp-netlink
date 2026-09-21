@@ -67,9 +67,11 @@ var knownAsymmetries = map[string]string{
 	// Recorded rather than quietly skipped, so the gap stays visible to whoever
 	// reads this next.
 	//
-	// stale_routes_time is wired at the global level - newGlobalFromAPIStruct
-	// stores it and NewGlobalFromConfigStruct reports it - but not per peer,
-	// although OpenConfig defines it at both levels.
+	// stale_routes_time used to be listed here as wired globally and not per
+	// peer. That is now the reverse of the truth and was actively misleading -
+	// it pointed the next reader at the working level as the broken one. It is
+	// implemented per peer and per peer group, and acted on; the global block
+	// reaches peers only when graceful-restart-inherit-to-neighbors is set.
 	//
 	// mtu_discovery exists in api.Transport and in the generated config struct
 	// and is referenced nowhere else in the tree: no converter stores it, and no
@@ -289,7 +291,10 @@ func TestConformanceGlobalRoundTrip(t *testing.T) {
 // explicitly so that TestEveryPeerSubMessageIsCovered can fail when a new one
 // is added to the proto and nobody extends the round-trip below.
 var peerSubMessages = map[string]string{
-	"apply_policy":     "covered by TestConformanceWholePeerRoundTrip",
+	// Not actually covered by that test: wholePeerSkip excludes apply_policy,
+	// because the policy names it references have to exist. Recorded honestly
+	// rather than left claiming coverage that is not there.
+	"apply_policy":     "NOT covered - skipped by the whole-peer test because policy names must exist first",
 	"conf":             "covered by TestConformancePeerConfRoundTrip and the whole-peer test",
 	"ebgp_multihop":    "covered by TestConformanceWholePeerRoundTrip",
 	"route_reflector":  "covered by TestConformanceWholePeerRoundTrip",

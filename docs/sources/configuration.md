@@ -426,3 +426,108 @@
 ```
 
 See [Netlink Integration](netlink.md) for detailed documentation.
+
+## Peer-group inheritance
+
+A neighbor in a peer group keeps every setting it configures and takes the rest
+from the group. That is per field, not per block: setting one field of
+`[neighbors.bfd.config]` does not stop the other BFD fields coming from the
+group.
+
+What decides "configured" is whether the setting was *present* in the
+configuration, not whether its value differs from zero. That distinction is the
+whole point, because most of these blocks carry their enable flag as a boolean:
+
+```toml
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "127.0.0.3"
+    peer-group = "my-peer-group"   # suppose the group enables graceful restart
+  [neighbors.graceful-restart.config]
+    enabled = false                # this peer turns it off, and stays off
+```
+
+The same applies over the gRPC API, where presence is per *message*: a request
+that includes a block owns all of it, including the fields left at their zero
+values, and a request that omits a block inherits it. Sending an empty block is
+therefore an explicit "none of this".
+
+The practical consequence for an API client is that a partially populated block
+no longer inherits its remaining fields from the group. If a client sends
+`graceful_restart` with only `enabled` and `restart_time` set, the peer's
+`stale_routes_time` is zero rather than the group's.
+
+`gobgp config running --provenance` reports which blocks a peer inherited and
+from where, since the running configuration otherwise shows a value that was
+set and one that was inherited identically.
+
+## Global graceful restart
+
+`[global.graceful-restart]` does not reach peers unless you ask for it. Add to
+the `[global.config]` block above:
+
+```text
+graceful-restart-inherit-to-neighbors = true
+```
+
+Without it the global block is accepted and reported and does nothing, which is
+what it has always done. It is opt-in rather than simply fixed because turning
+it on changes forwarding behaviour: once graceful restart is negotiated, the
+upstream router keeps this speaker's routes for `restart-time` - defaulted from
+the hold time, so 90 seconds - instead of withdrawing them when the session
+drops. For a speaker announcing service addresses that delays failover by that
+long, and it only becomes visible on the restart *after* the one that enables
+it.
+
+Precedence is the neighbor, then its peer group, then this.
+
+`long-lived-enabled` is not propagated, because the per-family long-lived flag
+is not derived from it and the capability would go out carrying no families.
+
+## Settings gobgpd fills in for you
+
+gobgpd applies defaults to a peer and then reports the *resolved* values, so
+`ListPeer` and `gobgp config running` show fields the configuration never set.
+A controller that compares what it sent against what is reported will see a
+difference on every poll for each of these unless it expects them.
+
+| field | default |
+|---|---|
+| `timers.config.connect-retry` | 120 |
+| `timers.config.hold-time` | 90 |
+| `timers.config.keepalive-interval` | hold-time / 3 |
+| `timers.config.idle-hold-time-after-reset` | 30 |
+| `config.local-as` | the global AS, or the confederation member AS |
+| `config.peer-type` | derived from peer-as against local-as |
+| `graceful-restart.config.restart-time` | the hold time, when graceful restart is enabled |
+| `graceful-restart.config.deferral-time` | 360, when graceful restart is enabled |
+| `ebgp-multihop.config.multihop-ttl` | 255, when ebgp-multihop is enabled |
+| `ttl-security.config.ttl-min` | 255, when ttl-security is enabled |
+| `bfd.config.port` | 3784, when BFD is enabled |
+| `bfd.config.detection-multiplier` | 3, when BFD is enabled |
+| `bfd.config.desired-minimum-tx-interval` | 1000000 (1s, microseconds), when BFD is enabled |
+| `bfd.config.required-minimum-receive` | 1000000 (1s, microseconds), when BFD is enabled |
+
+The as-path options are reported slightly differently and belong in the same
+list. `allow-own-as`, `replace-peer-as` and `allow-aspath-loop-local` carry
+explicit presence on the API, so a client can leave them unstated and inherit
+them from a peer group. The read path always reports all three, because a
+running configuration is what is in force rather than what was typed - so a
+client that stated none of them still gets three values back. There is no
+information lost either way: for these three, "not stated" and "0 or false"
+have the same effect.
+
+Per-family settings are derived from the neighbor's too, which is what makes a
+capability carry families rather than going out empty:
+
+| field | derived from |
+|---|---|
+| `afi-safis.mp-graceful-restart.config.enabled` | `graceful-restart.config.enabled` |
+| `afi-safis.long-lived-graceful-restart.config.enabled` | `graceful-restart.config.long-lived-enabled` |
+| `afi-safis.add-paths.config.receive` / `send-max` | the neighbor's `add-paths` block |
+
+Two ways to avoid the spurious diff: send these fields explicitly with the
+values you want, so the report matches; or exclude them from the comparison.
+`gobgp config running --provenance` distinguishes what was inherited from a
+peer group or the global block, but not what came from a default - a field
+absent from that report and present in the output is a default.

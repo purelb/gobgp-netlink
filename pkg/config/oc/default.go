@@ -23,6 +23,7 @@ import (
 	"net/netip"
 	"reflect"
 	"slices"
+	"sync"
 
 	"github.com/osrg/gobgp/v4/internal/pkg/version"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
@@ -43,13 +44,143 @@ var forcedOverwrittenConfig = []string{
 	"neighbor.timers.config.minimum-advertisement-interval",
 }
 
-var configuredFields map[string]any
+// configuredFields records which fields a TOML neighbor actually set, keyed by
+// the identifier ReadConfigFile registered it under. OverwriteNeighborConfigWithPeerGroup
+// consults it to tell "the neighbor set this field" from "the field is at its
+// zero value", which is what decides whether the peer group's value wins.
+//
+// It is written from the SIGHUP config-reload path and read on the Serve
+// goroutine whenever a peer is added or updated, so it needs the lock: a reload
+// racing an AddPeer is a data race on a plain map. -race does not currently
+// catch it because no test reloads concurrently with an API call.
+//
+// Entries are also removed when a peer goes away. Without that, a peer deleted
+// and re-added over gRPC picks up the presence recorded for whatever TOML
+// neighbor last held its address.
+var (
+	configuredFieldsMu sync.RWMutex
+	configuredFields   = map[string]any{}
+)
 
 func RegisterConfiguredFields(addr string, n any) {
-	if configuredFields == nil {
-		configuredFields = make(map[string]any)
-	}
+	configuredFieldsMu.Lock()
+	defer configuredFieldsMu.Unlock()
 	configuredFields[addr] = n
+}
+
+// UnregisterConfiguredFields drops the presence recorded for a neighbor. Call it
+// when the neighbor is deleted, so a later neighbor reusing the address does not
+// inherit its field-presence.
+func UnregisterConfiguredFields(addr string) {
+	configuredFieldsMu.Lock()
+	delete(configuredFields, addr)
+	configuredFieldsMu.Unlock()
+	forgetProvenance(addr)
+}
+
+func lookupConfiguredFields(addr string) (any, bool) {
+	configuredFieldsMu.RLock()
+	defer configuredFieldsMu.RUnlock()
+	v, ok := configuredFields[addr]
+	return v, ok
+}
+
+// MarkBlockConfigured builds the presence record for one configuration block,
+// in the shape the TOML loader produces, so that overwriteConfig treats every
+// field of the block as explicitly set and leaves it alone.
+//
+// This is how the gRPC path gets the field presence that only the config file
+// had. proto3 gives presence per message, not per field, so the rule is
+// block-level: sending a block means owning all of it, including the fields
+// left at their zero value. A client that sends a partial block therefore stops
+// inheriting the rest of it from the peer group - that is the deliberate
+// trade, and it is what makes "enabled = false" expressible at all, which a
+// zero-value test could never do.
+func MarkBlockConfigured(block any) map[string]any {
+	fields := map[string]any{}
+	t := reflect.Indirect(reflect.ValueOf(block)).Type()
+	for i := range t.NumField() {
+		if tag := t.Field(i).Tag.Get("mapstructure"); tag != "" && tag != "-" {
+			fields[tag] = true
+		}
+	}
+	return map[string]any{"config": fields}
+}
+
+// BlockSource says where a neighbor's configuration block ended up coming
+// from. GetRunningConfig and ListPeer both report the config as *resolved* -
+// defaults applied, peer-group and global inheritance already folded in - so
+// without this an operator cannot tell a value they set from one they got, and
+// after an inheritance change that is exactly the question they need answered.
+type BlockSource string
+
+const (
+	SourceNeighbor  BlockSource = "neighbor"
+	SourcePeerGroup BlockSource = "peer-group"
+	SourceGlobal    BlockSource = "global"
+)
+
+var (
+	provenanceMu sync.RWMutex
+	provenance   = map[string]map[string]BlockSource{}
+)
+
+func recordProvenance(key, block string, src BlockSource) {
+	if key == "" {
+		return
+	}
+	provenanceMu.Lock()
+	defer provenanceMu.Unlock()
+	if provenance[key] == nil {
+		provenance[key] = map[string]BlockSource{}
+	}
+	provenance[key][block] = src
+}
+
+// NeighborProvenance returns where each block of a neighbor's config came from.
+// Blocks that were left at their defaults are absent rather than listed, so the
+// output names only what was actually inherited or set.
+func NeighborProvenance(key string) map[string]BlockSource {
+	provenanceMu.RLock()
+	defer provenanceMu.RUnlock()
+	out := make(map[string]BlockSource, len(provenance[key]))
+	for k, v := range provenance[key] {
+		out[k] = v
+	}
+	return out
+}
+
+func forgetProvenance(key string) {
+	provenanceMu.Lock()
+	defer provenanceMu.Unlock()
+	delete(provenance, key)
+}
+
+// NeighborPresenceKey is the key configuredFields is written and read under.
+// Both sides must derive it identically, so they share this one function.
+//
+// It has to cover every way a neighbor gets identified, because each of them
+// has been a bug. An interface peer has no configured address, so it keys on
+// the interface name - registering it under one and looking it up under the
+// other meant interface peers never matched and the peer group won every field
+// for them. A dynamic peer has no configured address either, only a state one,
+// with the same consequence: it sets passive mode and the group's empty
+// transport block took it straight back off again.
+//
+// Returns "" only for a neighbor with no identity at all, which is not
+// registrable; the caller skips it rather than storing an entry nothing can
+// look up.
+func NeighborPresenceKey(n *Neighbor) string {
+	if n.Config.NeighborAddress.IsValid() {
+		return n.Config.NeighborAddress.String()
+	}
+	if n.Config.NeighborInterface != "" {
+		return n.Config.NeighborInterface
+	}
+	if n.State.NeighborAddress.IsValid() {
+		return n.State.NeighborAddress.String()
+	}
+	return ""
 }
 
 func defaultAfiSafi(typ AfiSafiType, enable bool) AfiSafi {
@@ -90,6 +221,31 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 	if pg != nil {
 		if err := OverwriteNeighborConfigWithPeerGroup(n, pg); err != nil {
 			return err
+		}
+	}
+
+	// Global graceful restart, if the operator opted in. Deliberately outside
+	// the block above: most neighbors have no peer group, and putting this
+	// inside it would have skipped exactly those.
+	//
+	// Precedence is neighbor, then peer group, then global - so this only fills
+	// a block that is still untouched after peer-group inheritance has run.
+	// Presence is what decides "untouched": a neighbor that sent its own
+	// graceful-restart block owns it, including an explicitly disabled one, and
+	// must not have the global block put back on top.
+	if g.Config.GracefulRestartInheritToNeighbors && !v.IsSet("neighbor.graceful-restart.config.enabled") {
+		var none GracefulRestartConfig
+		if n.GracefulRestart.Config == none {
+			n.GracefulRestart.Config = g.GracefulRestart.Config
+			recordProvenance(NeighborPresenceKey(n), "graceful-restart", SourceGlobal)
+			// Long-lived is still not propagated globally, but the reason has
+			// changed: it now derives per family correctly, so it would be a
+			// real capability rather than an empty one. That is exactly why it
+			// stays out. Long-lived retention is measured in hours where
+			// ordinary graceful restart is measured in seconds, so switching it
+			// on for an entire fleet from one global line is a much larger
+			// commitment than this setting is asking for. Set it per peer.
+			n.GracefulRestart.Config.LongLivedEnabled = false
 		}
 	}
 
@@ -153,7 +309,16 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 			return err
 		}
 		if addr != "" {
-			n.State.NeighborAddress = netip.MustParseAddr(addr)
+			// Kernel-derived, so this has not been seen to fail - but it is the
+			// last Must on the AddPeer path and its input, the interface name,
+			// comes from the API. Two lines to make it an error rather than a
+			// process exit.
+			parsed, err := netip.ParseAddr(addr)
+			if err != nil {
+				return fmt.Errorf("interface %s yielded an unparseable link-local address %q: %w",
+					n.Config.NeighborInterface, addr, err)
+			}
+			n.State.NeighborAddress = parsed
 		}
 	}
 
@@ -192,6 +357,20 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 			n.AfiSafis = []AfiSafi{defaultAfiSafi(AFI_SAFI_TYPE_IPV6_UNICAST, true)}
 		}
 		for i := range n.AfiSafis {
+			// Derive per-family Graceful Restart here too. The explicit
+			// afi-safi branch below has done this since the capability bug was
+			// found, but this branch - a neighbor that lists no families at all,
+			// which is the ordinary shape over the API - was left out, so those
+			// peers still advertised a GR capability with an empty AFI/SAFI
+			// list. There is no explicit per-family setting to respect on this
+			// path, because the families are synthesised.
+			n.AfiSafis[i].MpGracefulRestart.Config.Enabled = n.GracefulRestart.Config.Enabled
+			n.AfiSafis[i].MpGracefulRestart.State.Enabled = n.AfiSafis[i].MpGracefulRestart.Config.Enabled
+			// Long-lived has the same shape and the same defect: fsm.go emits a
+			// long-lived tuple only for families whose flag is set, and nothing
+			// derived it from the neighbor-level one, so long-lived-enabled
+			// produced a capability carrying no families at all.
+			n.AfiSafis[i].LongLivedGracefulRestart.Config.Enabled = n.GracefulRestart.Config.LongLivedEnabled
 			n.AfiSafis[i].AddPaths.Config.Receive = n.AddPaths.Config.Receive
 			n.AfiSafis[i].AddPaths.State.Receive = n.AddPaths.Config.Receive
 			n.AfiSafis[i].AddPaths.Config.SendMax = n.AddPaths.Config.SendMax
@@ -229,6 +408,10 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 				n.AfiSafis[i].MpGracefulRestart.Config.Enabled = n.GracefulRestart.Config.Enabled
 			}
 			n.AfiSafis[i].MpGracefulRestart.State.Enabled = n.AfiSafis[i].MpGracefulRestart.Config.Enabled
+			// As above, for long-lived.
+			if !vv.IsSet("afi-safi.long-lived-graceful-restart.config.enabled") {
+				n.AfiSafis[i].LongLivedGracefulRestart.Config.Enabled = n.GracefulRestart.Config.LongLivedEnabled
+			}
 			if !vv.IsSet("afi-safi.add-paths.config.receive") {
 				if n.AddPaths.Config.Receive {
 					n.AfiSafis[i].AddPaths.Config.Receive = n.AddPaths.Config.Receive
@@ -527,11 +710,17 @@ func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 		}
 
 		if pg != nil {
-			identifier := vv.Get("neighbor.config.neighbor-address")
-			if identifier == nil {
-				identifier = vv.Get("neighbor.config.neighbor-interface")
+			// Derive the key from the neighbor itself rather than from viper.
+			// The old code asserted the viper lookup to string, which panicked
+			// on a neighbor carrying neither an address nor an interface, and it
+			// registered interface peers under their interface name while
+			// OverwriteNeighborConfigWithPeerGroup looked them up by address -
+			// so interface peers never matched and the peer group won every
+			// field for them. Using one helper in both places makes the two
+			// halves impossible to drift apart.
+			if key := NeighborPresenceKey(&n); key != "" {
+				RegisterConfiguredFields(key, list[idx])
 			}
-			RegisterConfiguredFields(identifier.(string), list[idx])
 		}
 
 		if err := setDefaultNeighborConfigValuesWithViper(vv, &n, &b.Global, pg); err != nil {
@@ -574,7 +763,7 @@ func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	v := viper.New()
 
-	val, ok := configuredFields[c.Config.NeighborAddress.String()]
+	val, ok := lookupConfiguredFields(NeighborPresenceKey(c))
 	if ok {
 		v.Set("neighbor", val)
 	} else {
@@ -590,36 +779,69 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	overwriteConfig(&c.RouteReflector.Config, &pg.RouteReflector.Config, "neighbor.route-reflector.config", v)
 	overwriteConfig(&c.AsPathOptions.Config, &pg.AsPathOptions.Config, "neighbor.as-path-options.config", v)
 	overwriteConfig(&c.AddPaths.Config, &pg.AddPaths.Config, "neighbor.add-paths.config", v)
-	overwriteConfig(&c.GracefulRestart.Config, &pg.GracefulRestart.Config, "neighbor.gradeful-restart.config", v)
+	overwriteConfig(&c.GracefulRestart.Config, &pg.GracefulRestart.Config, "neighbor.graceful-restart.config", v)
 	overwriteConfig(&c.ApplyPolicy.Config, &pg.ApplyPolicy.Config, "neighbor.apply-policy.config", v)
 	overwriteConfig(&c.UseMultiplePaths.Config, &pg.UseMultiplePaths.Config, "neighbor.use-multiple-paths.config", v)
 	overwriteConfig(&c.RouteServer.Config, &pg.RouteServer.Config, "neighbor.route-server.config", v)
 	overwriteConfig(&c.TtlSecurity.Config, &pg.TtlSecurity.Config, "neighbor.ttl-security.config", v)
-	// BFD inherits as a whole block, not field by field like everything above.
+	// BFD is per-field like everything else again. It was gated on the
+	// neighbor's block being the zero value, because on the gRPC path there was
+	// no field presence and a group with no bfd block erased a neighbor's
+	// settings with its zeros.
 	//
-	// overwriteConfig decides per field on v.IsSet, and v is built from
-	// configuredFields, which only the TOML loader populates. On the gRPC path
-	// IsSet is false for every BFD field, so the peer group always won - a group
-	// with no bfd block erased a neighbor's settings with its zero values, and
-	// a grouped neighbor could neither configure BFD of its own nor opt out of
-	// the group's. docs/sources/bfd.md promised the opposite.
+	// That gate could not express what its own comment claimed. BfdConfig{
+	// Enabled: false } *is* the zero value, so a neighbor asking to opt out of
+	// a group's BFD was read as having asked for nothing and inherited it
+	// anyway; the documented opt-out only worked because a CRD happens to send
+	// the port and the intervals too, which is what made the block non-empty.
+	// Transposing it to the other blocks would have been worse - graceful
+	// restart, route-server and ttl-security all carry their enable flag as the
+	// zero-value-false field.
 	//
-	// Testing the neighbor's block instead makes both paths agree, and it is
-	// what lets `enabled = false` work as an opt-out: per-field presence cannot
-	// express that, because false is the zero value and indistinguishable from
-	// unset. The cost is that a TOML neighbor which sets only some BFD fields
-	// no longer inherits the others from its group - see bfd.md.
-	//
-	// This has to run before the BFD defaults further down, which fill port and
-	// the intervals on every neighbor and would make the block non-empty for
-	// all of them.
-	var noBfd BfdConfig
-	if c.Bfd.Config == noBfd {
-		overwriteConfig(&c.Bfd.Config, &pg.Bfd.Config, "neighbor.bfd.config", v)
-	}
+	// The gRPC converters now record which blocks the client actually sent, so
+	// presence is real on both paths and the heuristic is not needed.
+	overwriteConfig(&c.Bfd.Config, &pg.Bfd.Config, "neighbor.bfd.config", v)
 
 	if !v.IsSet("neighbor.afi-safis") {
 		c.AfiSafis = append([]AfiSafi{}, pg.AfiSafis...)
+	}
+
+	// Record where each block came from, now that the copies have happened.
+	//
+	// Only blocks the group actually contributed something to are recorded. A
+	// block that neither side configured is still at its zero value and saying
+	// "inherited from the peer group" about it is noise - and noise is the
+	// failure mode here, because it buries the one or two lines an operator is
+	// looking for. DeepEqual rather than ==, because ApplyPolicyConfig holds
+	// slices.
+	key := NeighborPresenceKey(c)
+	for _, b := range []struct {
+		name  string
+		block any
+	}{
+		{"timers", c.Timers.Config},
+		{"transport", c.Transport.Config},
+		{"error-handling", c.ErrorHandling.Config},
+		{"logging-options", c.LoggingOptions.Config},
+		{"ebgp-multihop", c.EbgpMultihop.Config},
+		{"route-reflector", c.RouteReflector.Config},
+		{"as-path-options", c.AsPathOptions.Config},
+		{"add-paths", c.AddPaths.Config},
+		{"graceful-restart", c.GracefulRestart.Config},
+		{"apply-policy", c.ApplyPolicy.Config},
+		{"use-multiple-paths", c.UseMultiplePaths.Config},
+		{"route-server", c.RouteServer.Config},
+		{"ttl-security", c.TtlSecurity.Config},
+		{"bfd", c.Bfd.Config},
+	} {
+		if v.IsSet("neighbor." + b.name + ".config") {
+			recordProvenance(key, b.name, SourceNeighbor)
+			continue
+		}
+		zero := reflect.New(reflect.TypeOf(b.block)).Elem().Interface()
+		if !reflect.DeepEqual(b.block, zero) {
+			recordProvenance(key, b.name, SourcePeerGroup)
+		}
 	}
 
 	return nil

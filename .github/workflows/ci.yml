@@ -14,8 +14,14 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "stable"
+      # -timeout is per package, and pkg/server is the one that matters: it
+      # measures about 195s under -race on hardware faster than this runner,
+      # against a 240s limit. That is 45s of headroom for the slowest package in
+      # the tree, and when it runs out the failure is a package-wide timeout
+      # that reads like a flake rather than like a limit being hit. Raising it
+      # costs nothing in wall-clock, because the timeout only fires on failure.
       - run: |
-          go test -v -race -timeout 240s ./...
+          go test -v -race -timeout 600s ./...
           if [ "$(go env GOARCH)" = "amd64" ]; then go test -v -race github.com/osrg/gobgp/v4/pkg/packet/bgp -run ^Test_RaceCondition$; else echo 'skip'; fi
 
   api-conformance:
@@ -45,7 +51,7 @@ jobs:
       - name: API conformance
         run: |
           go test -v -race -timeout 300s ./pkg/server/ \
-            -run 'TestConformance|TestEffect|TestEveryPeerConfFieldIsClassified|TestEveryPeerSubMessageIsCovered|TestRegisteredWireEffectsAllRun|TestNilFamilyIsRejectedNotFatal'
+            -run 'TestConformance|TestEffect|TestEveryPeerConfFieldIsClassified|TestEveryPeerSubMessageIsCovered|TestEveryPeerBlockIsClassified|TestScopedSettingsAreRecorded|TestEveryObjectWriteFieldIsClassified|TestEveryNetlinkWriteFieldIsClassified|TestEveryPolicyConditionAndActionIsClassified|TestObjectConformanceGapsAreRecorded|TestRegisteredWireEffectsAllRun|TestNilFamilyIsRejectedNotFatal'
 
   # Note: 32-bit builds removed as netlink feature is Linux-only and targets modern 64-bit systems
 

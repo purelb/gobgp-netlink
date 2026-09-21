@@ -177,6 +177,17 @@ enum ConfigFormat {
 
 message GetRunningConfigRequest {
   ConfigFormat format = 1;
+  // Also report where each peer's configuration blocks came from - the peer
+  // itself, its peer group, or the global block.
+  //
+  // The running config is the *resolved* configuration: defaults applied and
+  // inheritance already folded in, which is what makes it useful and also
+  // means a value you set and a value you inherited look identical. This
+  // answers that.
+  //
+  // Off by default, and appended rather than mixed in, so the TOML output
+  // stays loadable as a gobgpd config file.
+  bool include_provenance = 2;
 }
 
 message GetRunningConfigResponse {
@@ -657,7 +668,15 @@ message NetlinkExportRuleConfig {
   string vrf = 4; // Target Linux VRF name
   int32 table_id = 5; // Target Linux routing table ID
   uint32 metric = 6; // Route metric
-  bool validate_nexthop = 7; // Whether to validate nexthop reachability
+  // Whether to validate nexthop reachability. Absent means true.
+  //
+  // Explicit presence because the default is true and this is a plain bool:
+  // without it, a client that omitted the field got validation *off*, which is
+  // the opposite of both the documented default and what the config file does.
+  // The config model spells this skip-nexthop-validation and inverts it, so a
+  // TOML user who says nothing gets validation on; the API said nothing and
+  // got it off.
+  optional bool validate_nexthop = 7;
 }
 
 // EnableNetlinkExport configures netlink route export (BGP -> Linux kernel)
@@ -845,6 +864,13 @@ message ListBmpResponse {
     message Conf {
       string address = 1;
       uint32 port = 2;
+      // The rest of what AddBmp accepts. These were settable and unreadable:
+      // which monitoring policy a station uses decides what is exported to it,
+      // and a client had no way to confirm it.
+      AddBmpRequest.MonitoringPolicy policy = 3;
+      string sys_name = 4;
+      string sys_descr = 5;
+      int32 statistics_timeout = 6;
     }
     Conf conf = 1;
     message State {
@@ -1012,11 +1038,28 @@ message PeerConf {
   optional uint32 send_community = 10;
   string neighbor_interface = 11;
   string vrf = 12;
-  uint32 allow_own_asn = 13;
-  bool replace_peer_asn = 14;
+  // Explicit presence, for the same reason send_community above has it, and
+  // with a sharper consequence.
+  //
+  // These three are the as-path-options block, and peer-group inheritance
+  // decides what a neighbor keeps by asking which blocks it actually sent.
+  // Every other block is a sub-message, so proto3 message presence answers
+  // that. These are bare scalars on a message clients always send, so there
+  // was no signal at all - and a grouped neighbor's as-path options were
+  // silently replaced by the peer group's zero values.
+  //
+  // Presence also makes "replace-peer-as = false" expressible against a group
+  // that sets it true. false is the zero value, so nothing else can say it.
+  //
+  // PeerGroupConf below deliberately does not match. A peer group is only ever
+  // a source of values for its members and never inherits from anything, so
+  // presence buys it nothing and would cost consumers a recompile for no
+  // behaviour.
+  optional uint32 allow_own_asn = 13;
+  optional bool replace_peer_asn = 14;
   bool admin_down = 15;
   bool send_software_version = 16;
-  bool allow_aspath_loop_local = 17;
+  optional bool allow_aspath_loop_local = 17;
 }
 
 message PeerGroupConf {
@@ -1632,6 +1675,18 @@ message Global {
   Confederation confederation = 9;
   GracefulRestart graceful_restart = 10;
   string bind_to_device = 11;
+  // Apply graceful_restart above to peers that configure none of their own.
+  // Off by default.
+  //
+  // The global graceful-restart block was accepted, echoed back by GetBgp, and
+  // acted on by nothing: only per-peer and per-peer-group settings ever reached
+  // the session. Enabling the inheritance unconditionally would change the data
+  // plane of every deployment that had set it - once graceful restart is
+  // negotiated the upstream holds this speaker's routes for restart_time rather
+  // than withdrawing when the session drops - so it is opt-in.
+  //
+  // Precedence is peer, then peer group, then this.
+  bool graceful_restart_inherit_to_neighbors = 12;
 }
 
 message Confederation {
@@ -1643,6 +1698,10 @@ message Confederation {
 message RPKIConf {
   string address = 1;
   uint32 remote_port = 2;
+  // Accepted by AddRpki and previously reported nowhere. Reports the effective
+  // value, so a caller that sent 0 sees the 3600 second default that was
+  // applied rather than the 0 it sent.
+  int64 record_lifetime = 3;
 }
 
 message RPKIState {

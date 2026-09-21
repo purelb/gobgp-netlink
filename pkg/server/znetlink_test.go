@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestNetlinkClient(t *testing.T) {
@@ -157,7 +158,7 @@ func TestEnableNetlinkExportGRPC(t *testing.T) {
 				Name:               "rule2",
 				LargeCommunityList: []string{"65000:1:1"},
 				TableId:            200,
-				ValidateNexthop:    true,
+				ValidateNexthop:    proto.Bool(true),
 			},
 		},
 	})

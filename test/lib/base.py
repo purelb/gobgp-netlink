@@ -123,15 +123,34 @@ def wait_for_completion(f, timeout=120):
             raise Exception('timeout')
 
 
-def try_several_times(f, t=3, s=1):
-    for _ in range(t):
+def try_several_times(f, t=5, s=2):
+    """Retry f, backing off, and re-raise the real error if it never succeeds.
+
+    This caught only RuntimeError, and everything it wraps is a docker command
+    run through local(), which uses subprocess.check_output and therefore
+    raises CalledProcessError - not a RuntimeError. So the retry never engaged
+    for the failure it exists to absorb, and a single transient docker error
+    failed the scenario job outright.
+
+    That is not theoretical: two of three CI runs on one branch were lost to
+    Docker Hub timing out while pulling osrg/exabgp and osrg/quagga, each time
+    with the CalledProcessError propagating straight out of the first attempt.
+
+    It also used to raise a bare Exception on exhaustion, discarding what
+    actually went wrong; the last error is re-raised now, so the log names the
+    cause instead of just the exhaustion.
+    """
+    last = None
+    for i in range(t):
         try:
-            r = f()
-        except RuntimeError:
-            time.sleep(s)
-        else:
-            return r
-    raise Exception
+            return f()
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            last = e
+            if i < t - 1:
+                # Back off. Registry timeouts last longer than a second, so a
+                # fixed one-second gap retried into the same outage.
+                time.sleep(s * (i + 1))
+    raise last if last is not None else Exception('try_several_times: no attempt was made')
 
 
 def assert_several_times(f, t=30, s=1):

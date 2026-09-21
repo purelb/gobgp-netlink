@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"net/netip"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,9 +57,12 @@ func runSRPolicyTunnelEncapRound(t *testing.T, withBSID, withCPName, withUnk130,
 	defer cancel()
 
 	const as = uint32(65000)
-	// Pick non-overlapping ports per sub-test so go test -p>1 stays clean.
-	senderPort := 11179 + testTunnelEncapCounter()%100
-	recvPort := senderPort + 1
+	// Ports from the kernel rather than a counter offset from a literal base:
+	// the counter keeps sub-tests of this file apart but does nothing about
+	// another test file, or a binary left behind by a previous run, holding
+	// the same number.
+	senderPort := freeTCPPort(t)
+	recvPort := freeTCPPort(t)
 	sender := runNewServer(t, as, "10.0.0.1", senderPort)
 	defer sender.StopBgp(context.Background(), &api.StopBgpRequest{})
 	receiver := runNewServer(t, as, "10.0.0.2", recvPort)
@@ -208,12 +210,6 @@ func runSRPolicyTunnelEncapRound(t *testing.T, withBSID, withCPName, withUnk130,
 			}
 		}
 	}
-}
-
-var testTunnelEncapPortCounter atomic.Int32
-
-func testTunnelEncapCounter() int32 {
-	return testTunnelEncapPortCounter.Add(1) * 2
 }
 
 func waitEstablished(t *testing.T, ctx context.Context, a, b *BgpServer) error {

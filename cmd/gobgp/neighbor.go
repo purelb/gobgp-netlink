@@ -36,6 +36,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"google.golang.org/protobuf/proto"
 )
 
 // used in showRoute() to determine the width of each column
@@ -312,7 +313,7 @@ func showNeighbor(args []string) error {
 	showBfdNeighbor(p)
 
 	elems := make([]string, 0, 3)
-	if as := p.Conf.AllowOwnAsn; as > 0 {
+	if as := p.Conf.GetAllowOwnAsn(); as > 0 {
 		elems = append(elems, fmt.Sprintf("Allow Own AS: %d", as))
 	}
 	switch p.Conf.RemovePrivate {
@@ -328,7 +329,7 @@ func showNeighbor(args []string) error {
 		}
 		elems = append(elems, fmt.Sprintf("Send community: %s", name))
 	}
-	if p.Conf.ReplacePeerAsn {
+	if p.Conf.GetReplacePeerAsn() {
 		elems = append(elems, "Replace peer AS: enabled")
 	}
 
@@ -1445,7 +1446,7 @@ func modNeighbor(cmdType string, args []string) error {
 			if err != nil {
 				return err
 			}
-			peer.Conf.AllowOwnAsn = uint32(as)
+			peer.Conf.AllowOwnAsn = proto.Uint32(uint32(as))
 		}
 		if option, ok := m["remove-private-as"]; ok {
 			switch option[0] {
@@ -1465,7 +1466,7 @@ func modNeighbor(cmdType string, args []string) error {
 			peer.Conf.SendCommunity = &v
 		}
 		if _, ok := m["replace-peer-as"]; ok {
-			peer.Conf.ReplacePeerAsn = true
+			peer.Conf.ReplacePeerAsn = proto.Bool(true)
 		}
 		if len(m["ebgp-multihop-ttl"]) == 1 {
 			ttl, err := strconv.ParseUint(m["ebgp-multihop-ttl"][0], 10, 32)

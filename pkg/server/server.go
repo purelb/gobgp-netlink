@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -265,7 +266,19 @@ func NewBgpServer(opt ...ServerOption) *BgpServer {
 	s.keychainStore = newTcpAoKeychainStore()
 	if len(opts.grpcAddress) != 0 {
 		grpc.EnableTracing = false
-		s.apiServer = newAPIserver(s, shared, grpc.NewServer(opts.grpcOption...), opts.grpcAddress)
+		// Recover panics on the gRPC handler goroutine. Not everything runs
+		// under the BGP lock - NLRI decoding for AddPath, for one - and a panic
+		// in a handler stops the process just as surely as one on the Serve
+		// goroutine, while being invisible to the handleMGMTOp barrier.
+		//
+		// Chained, and prepended here rather than left to the caller, so that
+		// an embedding application gets it too and so it composes with any
+		// interceptors passed through GrpcOption instead of replacing them.
+		grpcOption := append([]grpc.ServerOption{
+			grpc.ChainUnaryInterceptor(s.recoveryUnaryInterceptor),
+			grpc.ChainStreamInterceptor(s.recoveryStreamInterceptor),
+		}, opts.grpcOption...)
+		s.apiServer = newAPIserver(s, shared, grpc.NewServer(grpcOption...), opts.grpcAddress)
 		go func() {
 			if err := s.apiServer.serve(); err != nil {
 				logger.Error("failed to listen grpc port", slog.String("Error", err.Error()))
@@ -331,7 +344,67 @@ type mgmtOp struct {
 	timestamp   time.Time
 }
 
+// recoveryUnaryInterceptor and recoveryStreamInterceptor turn a panic in a gRPC
+// handler into an error for that one call instead of a dead daemon. They are a
+// backstop behind input validation, not a substitute: every panic found so far
+// is fixed where the bad value enters, and anything that reaches here is a bug
+// worth the stack trace it logs.
+func (s *BgpServer) recoveryUnaryInterceptor(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("recovered from panic in gRPC handler",
+				slog.String("Topic", "Server"),
+				slog.String("Method", info.FullMethod),
+				slog.Any("Panic", r),
+				slog.String("Stack", string(debug.Stack())))
+			err = status.Errorf(codes.Internal, "internal error handling %s", info.FullMethod)
+		}
+	}()
+	return handler(ctx, req)
+}
+
+func (s *BgpServer) recoveryStreamInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("recovered from panic in gRPC stream handler",
+				slog.String("Topic", "Server"),
+				slog.String("Method", info.FullMethod),
+				slog.Any("Panic", r),
+				slog.String("Stack", string(debug.Stack())))
+			err = status.Errorf(codes.Internal, "internal error handling %s", info.FullMethod)
+		}
+	}()
+	return handler(srv, ss)
+}
+
 func (s *BgpServer) handleMGMTOp(op *mgmtOp) {
+	// A panic in op.f() used to stop the process. This runs on the Serve
+	// goroutine and nothing above it recovers, so one malformed request from
+	// any client took BGP down for the whole node and withdrew everything it
+	// was announcing. A gRPC recovery interceptor cannot help: the handler
+	// goroutine is parked on a channel receive while this runs.
+	//
+	// Recovering has one hard requirement - send on errCh. mgmtOperation waits
+	// on "return <-ch" with no timeout, so a recover that returns without
+	// sending turns a crash into a caller stuck forever plus a leaked
+	// goroutine: quieter than a crash, and worse.
+	//
+	// This is a backstop, not the fix. Every panic found so far is fixed at its
+	// source; this is here so the next one is a failed request rather than a
+	// node-wide outage. It is defensible in this deployment specifically
+	// because the consumer reconciles continuously against List*, so an
+	// operation that returns an error gets retried and any half-applied state
+	// repaired. In a daemon with no such consumer, failing fast would be the
+	// better trade.
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("recovered from panic in management operation",
+				slog.String("Topic", "Server"),
+				slog.Any("Panic", r),
+				slog.String("Stack", string(debug.Stack())))
+			op.errCh <- fmt.Errorf("internal error: %v", r)
+		}
+	}()
 	if op.checkActive {
 		if err := s.active(); err != nil {
 			op.errCh <- err
@@ -2334,6 +2407,26 @@ func (s *BgpServer) EnableZebra(ctx context.Context, r *api.EnableZebraRequest) 
 // bmpMonitoringPolicyFromAPI maps gRPC enum values to OpenConfig string policies.
 // Do not use oc.IntToBmpRouteMonitoringPolicyTypeMap[int(policy)]: protobuf assigns
 // MONITORING_POLICY_PRE=1..ALL=5 with UNSPECIFIED=0, while the OC map uses 0..4 only.
+// bmpMonitoringPolicyToAPI is the inverse, for the read path. Without it the
+// policy was write-only: a client could set which monitoring policy a station
+// used and never read it back, although it decides what is exported there.
+func bmpMonitoringPolicyToAPI(p oc.BmpRouteMonitoringPolicyType) api.AddBmpRequest_MonitoringPolicy {
+	switch p {
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_PRE_POLICY:
+		return api.AddBmpRequest_MONITORING_POLICY_PRE
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_POST_POLICY:
+		return api.AddBmpRequest_MONITORING_POLICY_POST
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_BOTH:
+		return api.AddBmpRequest_MONITORING_POLICY_BOTH
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_LOCAL_RIB:
+		return api.AddBmpRequest_MONITORING_POLICY_LOCAL
+	case oc.BMP_ROUTE_MONITORING_POLICY_TYPE_ALL:
+		return api.AddBmpRequest_MONITORING_POLICY_ALL
+	default:
+		return api.AddBmpRequest_MONITORING_POLICY_UNSPECIFIED
+	}
+}
+
 func bmpMonitoringPolicyFromAPI(p api.AddBmpRequest_MonitoringPolicy) oc.BmpRouteMonitoringPolicyType {
 	switch p {
 	case api.AddBmpRequest_MONITORING_POLICY_PRE:
@@ -2354,6 +2447,13 @@ func bmpMonitoringPolicyFromAPI(p api.AddBmpRequest_MonitoringPolicy) oc.BmpRout
 func (s *BgpServer) AddBmp(ctx context.Context, r *api.AddBmpRequest) error {
 	if r == nil {
 		return fmt.Errorf("nil request")
+	}
+	// The handler validated r.Policy and defaulted the port and sysname, but
+	// never the address, which then reached MustParseAddr and stopped the
+	// daemon. Validate up here so a bad request never takes the BGP lock.
+	bmpAddr, err := netip.ParseAddr(r.Address)
+	if err != nil {
+		return fmt.Errorf("invalid bmp server address %q: %w", r.Address, err)
 	}
 	return s.mgmtOperation(func() error {
 		_, ok := api.AddBmpRequest_MonitoringPolicy_name[int32(r.Policy)]
@@ -2379,7 +2479,7 @@ func (s *BgpServer) AddBmp(ctx context.Context, r *api.AddBmpRequest) error {
 			slog.String("Policy", r.Policy.String()))
 
 		return s.bmpManager.addServer(&oc.BmpServerConfig{
-			Address:               netip.MustParseAddr(r.Address),
+			Address:               bmpAddr,
 			Port:                  port,
 			SysName:               sysname,
 			SysDescr:              sysDescr,
@@ -2393,9 +2493,13 @@ func (s *BgpServer) DeleteBmp(ctx context.Context, r *api.DeleteBmpRequest) erro
 	if r == nil {
 		return fmt.Errorf("nil request")
 	}
+	bmpAddr, err := netip.ParseAddr(r.Address)
+	if err != nil {
+		return fmt.Errorf("invalid bmp server address %q: %w", r.Address, err)
+	}
 	return s.mgmtOperation(func() error {
 		return s.bmpManager.deleteServer(&oc.BmpServerConfig{
-			Address: netip.MustParseAddr(r.Address),
+			Address: bmpAddr,
 			Port:    r.Port,
 		})
 	}, true)
@@ -2410,8 +2514,12 @@ func (s *BgpServer) ListBmp(ctx context.Context, req *api.ListBmpRequest, fn fun
 		for _, s := range s.bmpManager.clientMap {
 			stations = append(stations, &api.ListBmpResponse_BmpStation{
 				Conf: &api.ListBmpResponse_BmpStation_Conf{
-					Address: s.c.Address.String(),
-					Port:    s.c.Port,
+					Address:           s.c.Address.String(),
+					Port:              s.c.Port,
+					Policy:            bmpMonitoringPolicyToAPI(s.c.RouteMonitoringPolicy),
+					SysName:           s.c.SysName,
+					SysDescr:          s.c.SysDescr,
+					StatisticsTimeout: int32(s.c.StatisticsTimeout),
 				},
 				State: &api.ListBmpResponse_BmpStation_State{
 					Uptime:   oc.ProtoTimestamp(atomic.LoadInt64(&s.uptime)),
@@ -3704,7 +3812,9 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 				ListenAddresses:  l,
 				UseMultiplePaths: g.UseMultiplePaths.Config.Enabled,
 				BindToDevice:     g.Config.BindToDevice,
-				Families:         families,
+
+				GracefulRestartInheritToNeighbors: g.Config.GracefulRestartInheritToNeighbors,
+				Families:                          families,
 				RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 					AlwaysCompareMed:         g.RouteSelectionOptions.Config.AlwaysCompareMed,
 					IgnoreAsPathLength:       g.RouteSelectionOptions.Config.IgnoreAsPathLength,
@@ -3781,6 +3891,9 @@ func (s *BgpServer) GetRunningConfig(ctx context.Context, r *api.GetRunningConfi
 
 		var err error
 		out, err = marshalRunningConfig(&cfg, r.Format)
+		if err == nil && r.IncludeProvenance {
+			out += provenanceReport(cfg.Neighbors, r.Format)
+		}
 		return err
 	}, false)
 	if err != nil {
@@ -3808,6 +3921,67 @@ func redactRunningConfig(cfg *oc.Bgp) {
 		redact(&cfg.PeerGroups[i].Config.AuthPassword)
 		redact(&cfg.PeerGroups[i].State.AuthPassword)
 	}
+}
+
+// provenanceReport says where each peer's configuration blocks came from.
+//
+// It is appended to the running config rather than folded into it, and only
+// when asked for, because the TOML output's whole point is that it can be
+// loaded back as a config file. So it is emitted as comments for TOML and as a
+// trailing object for JSON: present for a human or a differ, inert for the
+// config loader.
+//
+// Only blocks that were inherited are listed. A block the peer set itself is
+// not interesting here - the config already shows it, and saying "neighbor" for
+// every untouched block would bury the two or three lines that matter.
+func provenanceReport(neighbors []oc.Neighbor, format api.ConfigFormat) string {
+	type peerProv struct {
+		Address string                    `json:"address"`
+		Blocks  map[string]oc.BlockSource `json:"blocks"`
+	}
+	report := make([]peerProv, 0, len(neighbors))
+	for _, n := range neighbors {
+		key := oc.NeighborPresenceKey(&n)
+		if key == "" {
+			key = n.State.NeighborAddress.String()
+		}
+		inherited := map[string]oc.BlockSource{}
+		for block, src := range oc.NeighborProvenance(key) {
+			if src == oc.SourceNeighbor {
+				continue
+			}
+			inherited[block] = src
+		}
+		if len(inherited) == 0 {
+			continue
+		}
+		report = append(report, peerProv{Address: key, Blocks: inherited})
+	}
+	if len(report) == 0 {
+		return ""
+	}
+	slices.SortFunc(report, func(a, b peerProv) int { return strings.Compare(a.Address, b.Address) })
+
+	var sb strings.Builder
+	if format == api.ConfigFormat_CONFIG_FORMAT_TOML {
+		sb.WriteString("\n# inherited configuration blocks, and where each came from\n")
+		for _, p := range report {
+			blocks := make([]string, 0, len(p.Blocks))
+			for b := range p.Blocks {
+				blocks = append(blocks, b)
+			}
+			slices.Sort(blocks)
+			for _, b := range blocks {
+				fmt.Fprintf(&sb, "# %s: %s <- %s\n", p.Address, b, p.Blocks[b])
+			}
+		}
+		return sb.String()
+	}
+	b, err := json.MarshalIndent(map[string]any{"inherited": report}, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return "\n" + string(b) + "\n"
 }
 
 func marshalRunningConfig(cfg *oc.Bgp, format api.ConfigFormat) (string, error) {
@@ -4334,19 +4508,42 @@ func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNoti
 		}
 	}
 
-	addr, err := c.ExtractNeighborAddress()
-	if err != nil {
-		return err
-	}
-
+	// Resolve the interface first. This used to run after
+	// ExtractNeighborAddress, which returns "NeighborAddress is not configured"
+	// when a peer was identified only by interface - so the branch below was
+	// unreachable and deleting an interface peer could never work. addNeighbor
+	// does not have the problem because SetDefaultNeighborConfigValues resolves
+	// the interface into State.NeighborAddress before it looks.
+	var addr string
 	if intf := c.Config.NeighborInterface; intf != "" {
 		var err error
 		addr, err = oc.GetIPv6LinkLocalNeighborAddress(intf)
 		if err != nil {
 			return err
 		}
+		// An interface that exists but carries no IPv6 link-local address
+		// returns ("", nil), not an error. Reporting that as "invalid neighbor
+		// address" blames the wrong thing - the caller gave an interface, not
+		// an address - and it is the difference between a host where the
+		// interface is absent and one where it is present but has no
+		// link-local, which is what made the first version of this pass
+		// locally and fail on CI.
+		if addr == "" {
+			return fmt.Errorf("interface %s has no IPv6 link-local address, so no peer can be identified by it", intf)
+		}
+	} else {
+		var err error
+		addr, err = c.ExtractNeighborAddress()
+		if err != nil {
+			return err
+		}
 	}
-	n, y := s.neighborMap[netip.MustParseAddr(addr)]
+	// MustParseAddr here turned a bad or empty address into a process exit.
+	parsed, err := netip.ParseAddr(addr)
+	if err != nil {
+		return fmt.Errorf("invalid neighbor address %q: %w", addr, err)
+	}
+	n, y := s.neighborMap[parsed]
 	if !y {
 		return fmt.Errorf("can't delete a peer configuration for %s", addr)
 	}
@@ -4364,6 +4561,12 @@ func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNoti
 	}
 	s.dropAdjRIBIn(n, n.configuredRFlist())
 	s.stopNeighbor(n, -1, nil)
+
+	// Drop the field-presence recorded for this neighbor. Nothing pruned this
+	// map before, so a peer deleted and re-added over the API inherited the
+	// presence of whatever TOML neighbor last held its address, and the peer
+	// group then lost fields it should have supplied.
+	oc.UnregisterConfiguredFields(addr)
 	return nil
 }
 
@@ -4388,9 +4591,25 @@ func (s *BgpServer) DeletePeer(ctx context.Context, r *api.DeletePeerRequest) er
 	if r == nil {
 		return fmt.Errorf("nil request")
 	}
+	// Validate before taking the management operation, so a malformed request
+	// never queues work or takes the BGP lock. MustParseAddr here killed the
+	// daemon - and not only on malformed input: a peer identified by interface
+	// alone, which this call explicitly supports via r.Interface below, has no
+	// address at all, so the documented DeletePeer{Interface: "eth0"} form was
+	// a remote process exit from a correct request.
+	var addr netip.Addr
+	if r.Address != "" {
+		var err error
+		addr, err = netip.ParseAddr(r.Address)
+		if err != nil {
+			return fmt.Errorf("invalid neighbor address %q: %w", r.Address, err)
+		}
+	} else if r.Interface == "" {
+		return fmt.Errorf("neither address nor interface specified")
+	}
 	return s.mgmtOperation(func() error {
 		c := &oc.Neighbor{Config: oc.NeighborConfig{
-			NeighborAddress:   netip.MustParseAddr(r.Address),
+			NeighborAddress:   addr,
 			NeighborInterface: r.Interface,
 		}}
 		return s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, true)
@@ -5174,8 +5393,9 @@ func (s *BgpServer) ListRpki(ctx context.Context, r *api.ListRpkiRequest, fn fun
 			sent := &r.State.RpkiMessages.RpkiSent
 			rpki := &api.Rpki{
 				Conf: &api.RPKIConf{
-					Address:    r.Config.Address.String(),
-					RemotePort: r.Config.Port,
+					Address:        r.Config.Address.String(),
+					RemotePort:     r.Config.Port,
+					RecordLifetime: r.Config.RecordLifetime,
 				},
 				State: &api.RPKIState{
 					Uptime:        oc.ProtoTimestamp(r.State.Uptime),
@@ -5245,6 +5465,13 @@ func (s *BgpServer) ListRpkiTable(ctx context.Context, r *api.ListRpkiTableReque
 func (s *BgpServer) AddRpki(ctx context.Context, r *api.AddRpkiRequest) error {
 	if r == nil {
 		return fmt.Errorf("nil request")
+	}
+	// Validate on the way in. AddServer only splits host and port, so an
+	// unparseable address was accepted and stored here and then panicked later,
+	// in GetServers, when some unrelated ListRpki call came along - a landmine
+	// that detonates on a read, far from the request that planted it.
+	if _, err := netip.ParseAddr(r.Address); err != nil {
+		return fmt.Errorf("invalid rpki server address %q: %w", r.Address, err)
 	}
 	return s.mgmtOperation(func() error {
 		return s.roaManager.AddServer(net.JoinHostPort(r.Address, strconv.Itoa(int(r.Port))), r.Lifetime)
@@ -5372,6 +5599,20 @@ func (s *BgpServer) WatchEvent(ctx context.Context, callbacks WatchEventMessageC
 
 	go func() {
 		defer w.Stop()
+		// This goroutine dispatches events to client callbacks, and the panics
+		// that reached it - an unbounded allocation from batch_size, an
+		// unparseable filter address - fired here rather than in the RPC
+		// handler, so neither the caller nor a gRPC interceptor ever saw them;
+		// the process simply stopped. Ending this watch is the right blast
+		// radius for a bad watch request.
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Error("recovered from panic in watch event dispatch",
+					slog.String("Topic", "Server"),
+					slog.Any("Panic", r),
+					slog.String("Stack", string(debug.Stack())))
+			}
+		}()
 
 		for {
 			select {
@@ -5628,6 +5869,16 @@ func WatchBestPath(current bool) WatchOption {
 }
 
 func WatchUpdate(current bool, peerAddress string, peerGroup string) WatchOption {
+	// Parse once here rather than on every event. This was MustParseAddr inside
+	// the filter closure, so an unvalidated client string panicked on the
+	// watcher goroutine at the next update - long after the call that supplied
+	// it had returned, which made it hard to attribute to the request that
+	// caused it. WatchEvent rejects a malformed address up front; an
+	// unparseable one reaching here matches nothing rather than crashing.
+	//
+	// The nil check on ev.Neighbor was present in WatchPostUpdate and missing
+	// here.
+	addr, addrErr := netip.ParseAddr(peerAddress)
 	return func(o *watchOptions) {
 		o.preUpdate = true
 		if current {
@@ -5636,10 +5887,10 @@ func WatchUpdate(current bool, peerAddress string, peerGroup string) WatchOption
 		if peerAddress != "" || peerGroup != "" {
 			o.preUpdateFilter = func(w watchEvent) bool {
 				ev, ok := w.(*watchEventUpdate)
-				if !ok || ev == nil {
+				if !ok || ev == nil || ev.Neighbor == nil {
 					return false
 				}
-				if len(peerAddress) > 0 && ev.Neighbor.State.NeighborAddress == netip.MustParseAddr(peerAddress) {
+				if len(peerAddress) > 0 && addrErr == nil && ev.Neighbor.State.NeighborAddress == addr {
 					return true
 				}
 				if len(peerGroup) > 0 && ev.Neighbor.State.PeerGroup == peerGroup {
@@ -5663,6 +5914,8 @@ func WatchAdjInWithdraw() WatchOption {
 }
 
 func WatchPostUpdate(current bool, peerAddress string, peerGroup string) WatchOption {
+	// Parsed once, as in WatchUpdate above.
+	addr, addrErr := netip.ParseAddr(peerAddress)
 	return func(o *watchOptions) {
 		o.postUpdate = true
 		if current {
@@ -5671,10 +5924,10 @@ func WatchPostUpdate(current bool, peerAddress string, peerGroup string) WatchOp
 		if peerAddress != "" || peerGroup != "" {
 			o.postUpdateFilter = func(w watchEvent) bool {
 				ev, ok := w.(*watchEventUpdate)
-				if !ok || ev == nil {
+				if !ok || ev == nil || ev.Neighbor == nil {
 					return false
 				}
-				if len(peerAddress) > 0 && ev.Neighbor != nil && ev.Neighbor.State.NeighborAddress == netip.MustParseAddr(peerAddress) {
+				if len(peerAddress) > 0 && addrErr == nil && ev.Neighbor.State.NeighborAddress == addr {
 					return true
 				}
 				if len(peerGroup) > 0 && ev.Neighbor != nil && ev.Neighbor.State.PeerGroup == peerGroup {
@@ -6248,9 +6501,15 @@ func (s *BgpServer) EnableNetlinkExport(ctx context.Context, r *api.EnableNetlin
 					Vrf:                ruleProto.Vrf,
 					TableId:            ruleProto.TableId,
 					Metric:             ruleProto.Metric,
-					// The rule proto still says validate-; the config model says
+					// The rule proto says validate-; the config model says
 					// skip-, so it inverts here.
-					SkipNexthopValidation: !ruleProto.ValidateNexthop,
+					//
+					// Absent means validate, which is the documented default
+					// and what the config file already does. It was a plain
+					// bool, so absent was indistinguishable from false and a
+					// client that omitted the field silently got nexthop
+					// validation turned off - the opposite of both.
+					SkipNexthopValidation: ruleProto.ValidateNexthop != nil && !*ruleProto.ValidateNexthop,
 				}
 				rules = append(rules, rule)
 			}

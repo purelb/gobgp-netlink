@@ -58,9 +58,9 @@ func TestExtendedMessage_AdvertisedUnconditionally(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	s1 := runNewServer(t, 64512, "1.1.1.1", 10179)
+	s1 := runNewServer(t, 64512, "1.1.1.1", freeTCPPort(t))
 	defer s1.StopBgp(ctx, &api.StopBgpRequest{})
-	s2 := runNewServer(t, 64512, "2.2.2.2", 20179)
+	s2 := runNewServer(t, 64512, "2.2.2.2", freeTCPPort(t))
 	defer s2.StopBgp(ctx, &api.StopBgpRequest{})
 
 	require.NoError(t, peerServers(t, ctx, []*BgpServer{s1, s2},

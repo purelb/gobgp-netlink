@@ -24,6 +24,8 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -47,6 +49,22 @@ import (
 // Unlimited batch size by default
 const defaultListPathBatchSize = math.MaxUint64
 
+// maxWatchEventBatchSize caps what WatchEvent will preallocate. ListPath can
+// leave its batch size unbounded because it only ever compares against it;
+// WatchEvent used it as a make() capacity, so a client asking for the uint32
+// maximum requested a 4.29e9-element slice of pointers - around 34GB - from a
+// single RPC. Batching above a few thousand paths per message buys nothing, so
+// clamping costs no throughput.
+const maxWatchEventBatchSize = 4096
+
+// clampWatchBatchSize bounds a client-supplied batch size to something safe to
+// preallocate. Split out from watchEvent so it can be tested directly: driving
+// the full watch machinery from a test does not reliably reach the allocation,
+// which made an end-to-end test of this pass whether or not the cap was there.
+func clampWatchBatchSize(requested uint64) int {
+	return int(min(requested, maxWatchEventBatchSize))
+}
+
 type server struct {
 	bgpServer  *BgpServer
 	shared     *sharedData
@@ -67,14 +85,79 @@ func newAPIserver(b *BgpServer, shared *sharedData, g *grpc.Server, hosts string
 	return s
 }
 
+// apiSocketMode is what the API socket is set to. The gRPC API is a write
+// interface - it adds peers and paths, and in this fork it installs routes into
+// the host FIB - so it is owner-only.
+//
+// This is right for the deployment this fork targets, where gobgpd and its
+// controller run in the same pod sharing an emptyDir and both run as root. If
+// the two ever run as different users, this needs to become a group-readable
+// mode plus an fsGroup on the shared volume, not a looser default here.
+const apiSocketMode = 0o600
+
+// checkUnixSocketPath refuses a socket path that cannot be protected, before
+// anything binds to it.
+func checkUnixSocketPath(address string, logger *slog.Logger) error {
+	// An address starting with @ (or NUL) is Linux's abstract namespace. Those
+	// sockets have no filesystem presence and therefore no permissions at all:
+	// any process in the network namespace can connect. Under a hostNetwork
+	// DaemonSet that is every process on the node, reaching an API that is
+	// unauthenticated unless a client CA is configured. os.Chmod on one returns
+	// ENOENT, so a mode cannot be applied either.
+	if strings.HasPrefix(address, "@") || strings.HasPrefix(address, "\x00") {
+		return fmt.Errorf("refusing to serve the API on the abstract unix socket %q: "+
+			"abstract sockets have no filesystem permissions, so any process in the network namespace "+
+			"can reach a write API that installs routes; use a filesystem path", address)
+	}
+	return nil
+}
+
+// hardenUnixSocket sets the socket's mode explicitly instead of leaving it to
+// whatever umask the process happens to have, and warns when the directory
+// holding it is writable by anyone else.
+//
+// Note the window: Go's net.Listen creates the socket with 0777 &^ umask and
+// there is no exported way to fchmod the listener, so between bind and chmod
+// the mode is the umask's. Under the usual umask of 022 that is 0755, and
+// AF_UNIX connect() needs write permission, so it is not connectable by others
+// in that window - but at umask 000 it is. Tightening the parent directory is
+// what actually closes this, which is why a permissive one is worth a warning.
+func hardenUnixSocket(address string, logger *slog.Logger) error {
+	if err := os.Chmod(address, apiSocketMode); err != nil {
+		return fmt.Errorf("failed to set mode on API socket %s: %w", address, err)
+	}
+	dir := filepath.Dir(address)
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return nil // the socket bound, so the directory exists; nothing to say
+	}
+	if mode := fi.Mode().Perm(); mode&0o022 != 0 {
+		logger.Warn("the directory holding the API socket is writable by group or others, "+
+			"so another process there can replace the socket between bind and chmod; "+
+			"prefer a directory owned by this process with mode 0700",
+			slog.String("Topic", "grpc"),
+			slog.String("Directory", dir),
+			slog.String("Mode", fmt.Sprintf("%04o", mode)))
+	}
+	return nil
+}
+
 func (s *server) serve() error {
 	var wg sync.WaitGroup
 	l := []net.Listener{}
 	var err error
 	for _, host := range strings.Split(s.hosts, ",") {
 		network, address := parseHost(host)
+		if network == "unix" {
+			if err := checkUnixSocketPath(address, s.bgpServer.logger); err != nil {
+				return err
+			}
+		}
 		var lis net.Listener
 		lis, err = net.Listen(network, address)
+		if err == nil && network == "unix" {
+			err = hardenUnixSocket(address, s.bgpServer.logger)
+		}
 		if err != nil {
 			s.bgpServer.logger.Warn("listen failed",
 				slog.String("Topic", "grpc"),
@@ -379,6 +462,14 @@ func (s *server) watchEvent(ctx context.Context, r *api.WatchEventRequest, fn fu
 	}
 	if t := r.GetTable(); t != nil {
 		for _, filter := range t.Filters {
+			// The filter's peer address is used to compare against every event.
+			// Reject a malformed one here, where the client can be told, rather
+			// than letting it silently match nothing for the life of the watch.
+			if filter.PeerAddress != "" {
+				if _, err := netip.ParseAddr(filter.PeerAddress); err != nil {
+					return status.Errorf(codes.InvalidArgument, "invalid filter peer address %q: %v", filter.PeerAddress, err)
+				}
+			}
 			switch filter.Type {
 			case api.WatchEventRequest_Table_Filter_TYPE_BEST:
 				opts = append(opts, WatchBestPath(filter.Init))
@@ -396,28 +487,39 @@ func (s *server) watchEvent(ctx context.Context, r *api.WatchEventRequest, fn fu
 	if len(opts) == 0 {
 		return status.Errorf(codes.InvalidArgument, "no events to watch")
 	}
+	// batch_size arrives from the client as an unbounded uint64 and was handed
+	// straight to make() as a capacity, so a single request could ask for a
+	// slice bigger than the runtime permits - "makeslice: cap out of range",
+	// which is a panic, not an error - or merely big enough to exhaust the
+	// node's memory. It is a batching hint, not an allocation instruction.
+	//
+	// This runs on the watcher goroutine, and WatchBestPath replays immediately
+	// at registration, so the panic landed before the RPC even returned and
+	// nowhere near a handler a recovery interceptor could see.
+	batchSize := clampWatchBatchSize(uint64(r.BatchSize))
+
 	simpleSend := func(paths []*api.Path, when time.Time) {
 		fn(&api.WatchEventResponse{Event: &api.WatchEventResponse_Table{Table: &api.WatchEventResponse_TableEvent{Paths: paths}}}, when)
 	}
 	err := s.bgpServer.WatchEvent(ctx, WatchEventMessageCallbacks{
 		OnPathUpdate: func(pathList []*apiutil.Path, timestamp time.Time) {
-			paths := make([]*api.Path, 0, r.BatchSize)
+			paths := make([]*api.Path, 0, batchSize)
 			for _, path := range pathList {
 				paths = append(paths, toPathApi(path, false, false, false))
-				if r.BatchSize > 0 && len(paths) > int(r.BatchSize) {
+				if batchSize > 0 && len(paths) > batchSize {
 					simpleSend(paths, timestamp)
-					paths = make([]*api.Path, 0, r.BatchSize)
+					paths = make([]*api.Path, 0, batchSize)
 				}
 			}
 			simpleSend(paths, timestamp)
 		},
 		OnBestPath: func(pathList []*apiutil.Path, timestamp time.Time) {
-			pl := make([]*api.Path, 0, r.BatchSize)
+			pl := make([]*api.Path, 0, batchSize)
 			for _, path := range pathList {
 				pl = append(pl, toPathApi(path, false, false, false))
-				if r.BatchSize > 0 && len(pl) > int(r.BatchSize) {
+				if batchSize > 0 && len(pl) > batchSize {
 					simpleSend(pl, timestamp)
-					pl = make([]*api.Path, 0, r.BatchSize)
+					pl = make([]*api.Path, 0, batchSize)
 				}
 			}
 			simpleSend(pl, timestamp)
@@ -1083,6 +1185,111 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 	}, nil
 }
 
+// neighborPresenceBlocks maps each configuration block that peer-group
+// inheritance can overwrite to the test for whether this request carried it.
+//
+// A table rather than a run of if-statements so that it can be checked against
+// the set of blocks OverwriteNeighborConfigWithPeerGroup actually touches. That
+// check is the point: as-path options were missing from this list for a
+// release, and a grouped neighbor's allow-own-as, replace-peer-as and
+// allow-aspath-loop-local were silently replaced by the group's zeros - the
+// graceful-restart defect again, in a block nobody had thought to look at.
+var neighborPresenceBlocks = map[string]func(*api.Peer) bool{
+	"timers":           func(a *api.Peer) bool { return a.Timers != nil },
+	"transport":        func(a *api.Peer) bool { return a.Transport != nil },
+	"ebgp-multihop":    func(a *api.Peer) bool { return a.EbgpMultihop != nil },
+	"route-reflector":  func(a *api.Peer) bool { return a.RouteReflector != nil },
+	"route-server":     func(a *api.Peer) bool { return a.RouteServer != nil },
+	"graceful-restart": func(a *api.Peer) bool { return a.GracefulRestart != nil },
+	"ttl-security":     func(a *api.Peer) bool { return a.TtlSecurity != nil },
+	"bfd":              func(a *api.Peer) bool { return a.Bfd != nil },
+	"apply-policy":     func(a *api.Peer) bool { return a.ApplyPolicy != nil },
+
+	// The one block that is not a sub-message. Its three fields live on
+	// api.PeerConf, which clients send on every request, so "the block was
+	// sent" is meaningless here and the fields carry explicit presence
+	// individually instead. Any one of them being present means the client is
+	// stating its as-path options, and the peer group does not override them.
+	"as-path-options": func(a *api.Peer) bool {
+		return a.Conf != nil && (a.Conf.AllowOwnAsn != nil ||
+			a.Conf.ReplacePeerAsn != nil ||
+			a.Conf.AllowAspathLoopLocal != nil)
+	},
+}
+
+// neighborBlocksWithNothingToRecord are the blocks inheritance touches that
+// have no presence signal to take, with the reason. Each is here because the
+// API cannot express the block, not because nobody got to it.
+var neighborBlocksWithNothingToRecord = map[string]string{
+	"config": "api.PeerConf is sent on every request - it carries the peer group name - so treating it as " +
+		"'the client owns this block' would stop every NeighborConfig field inheriting. The config file path " +
+		"still has real per-field presence for it; the API path does not.",
+	"add-paths": "add_paths exists only on api.AfiSafi, not on api.Peer, and readAddPathsFromAPIStruct is only " +
+		"called per family. Nothing can set the neighbor-level block over the API, so there is nothing to record.",
+	"error-handling":     "no field on api.Peer; nothing can set it over the API",
+	"logging-options":    "no field on api.Peer; nothing can set it over the API",
+	"use-multiple-paths": "no field on api.Peer; nothing can set it over the API",
+}
+
+// recordNeighborPresence tells the peer-group inheritance which blocks this
+// request actually supplied.
+//
+// Only the config file used to carry that information, so on the API path
+// overwriteConfig saw no field as set and the peer group won every one of them
+// - including a group whose block was never configured and is therefore all
+// zeros. A neighbor added with graceful-restart enabled and a peer group named
+// came up with graceful restart off, silently.
+//
+// proto3 gives presence per message rather than per field, so this is
+// block-level: a block that was sent is owned entirely by the sender,
+// including the fields it left at zero. Sending an empty block is therefore a
+// real opt-out, which is the thing a zero-value test cannot express.
+func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
+	key := oc.NeighborPresenceKey(pconf)
+	if key == "" || pconf.Config.PeerGroup == "" {
+		// Nothing to inherit from, so nothing to record.
+		return
+	}
+	presence := map[string]any{}
+	for block, sent := range neighborPresenceBlocks {
+		if sent(a) {
+			presence[block] = oc.MarkBlockConfigured(blockConfigZero(block))
+		}
+	}
+	if len(presence) == 0 {
+		return
+	}
+	oc.RegisterConfiguredFields(key, presence)
+}
+
+// blockConfigZero returns a zero value of the oc config struct for a block, so
+// MarkBlockConfigured can read its mapstructure tags.
+func blockConfigZero(block string) any {
+	switch block {
+	case "timers":
+		return oc.TimersConfig{}
+	case "transport":
+		return oc.TransportConfig{}
+	case "ebgp-multihop":
+		return oc.EbgpMultihopConfig{}
+	case "route-reflector":
+		return oc.RouteReflectorConfig{}
+	case "route-server":
+		return oc.RouteServerConfig{}
+	case "graceful-restart":
+		return oc.GracefulRestartConfig{}
+	case "ttl-security":
+		return oc.TtlSecurityConfig{}
+	case "bfd":
+		return oc.BfdConfig{}
+	case "apply-policy":
+		return oc.ApplyPolicyConfig{}
+	case "as-path-options":
+		return oc.AsPathOptionsConfig{}
+	}
+	return nil
+}
+
 func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	pconf := &oc.Neighbor{}
 	if a.Conf != nil {
@@ -1109,12 +1316,12 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		// allow our own ASN at all" - the operator asks for the loosest setting
 		// and silently gets the strictest. It fails closed, so it leaks nothing,
 		// but the peer then rejects paths it was meant to accept.
-		if a.Conf.AllowOwnAsn > math.MaxUint8 {
-			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.AllowOwnAsn)
+		if a.Conf.GetAllowOwnAsn() > math.MaxUint8 {
+			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.GetAllowOwnAsn())
 		}
-		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.AllowOwnAsn)
-		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.ReplacePeerAsn
-		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.AllowAspathLoopLocal
+		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.GetAllowOwnAsn())
+		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.GetReplacePeerAsn()
+		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.GetAllowAspathLoopLocal()
 		pconf.Config.SendSoftwareVersion = a.Conf.SendSoftwareVersion
 
 		switch a.Conf.RemovePrivate {
@@ -1210,10 +1417,23 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
 	}
 	if a.EbgpMultihop != nil {
+		if a.EbgpMultihop.MultihopTtl > math.MaxUint8 {
+			return nil, fmt.Errorf("ebgp-multihop multihop-ttl must be 0-255, got %d", a.EbgpMultihop.MultihopTtl)
+		}
 		pconf.EbgpMultihop.Config.Enabled = a.EbgpMultihop.Enabled
 		pconf.EbgpMultihop.Config.MultihopTtl = uint8(a.EbgpMultihop.MultihopTtl)
 	}
 	if a.TtlSecurity != nil {
+		// Reject rather than truncate. These arrive as uint32 and the internal
+		// model is uint8, so 257 silently became 1 - which for GTSM means
+		// "accept from any hop count", i.e. the control is reported as enabled
+		// and does nothing. It is also non-monotonic: 256 became 0, which the
+		// defaulting then rescued to 255. A value out of range is a mistake
+		// worth telling the caller about, not one to round into a weaker
+		// security posture.
+		if a.TtlSecurity.TtlMin > math.MaxUint8 {
+			return nil, fmt.Errorf("ttl-security ttl-min must be 0-255, got %d", a.TtlSecurity.TtlMin)
+		}
 		pconf.TtlSecurity.Config.Enabled = a.TtlSecurity.Enabled
 		pconf.TtlSecurity.Config.TtlMin = uint8(a.TtlSecurity.TtlMin)
 	}
@@ -1224,6 +1444,7 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		}
 		pconf.Bfd.Config = bfdConfig
 	}
+	recordNeighborPresence(a, pconf)
 	if a.State != nil {
 		var sessionState oc.SessionState
 		switch a.State.SessionState {
@@ -1290,12 +1511,12 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		pconf.Config.Description = a.Conf.Description
 		pconf.Config.PeerGroupName = a.Conf.PeerGroupName
 		pconf.Config.SendSoftwareVersion = a.Conf.SendSoftwareVersion
-		if a.Conf.AllowOwnAsn > math.MaxUint8 {
-			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.AllowOwnAsn)
+		if a.Conf.GetAllowOwnAsn() > math.MaxUint8 {
+			return nil, fmt.Errorf("allow_own_asn is out of range: %d", a.Conf.GetAllowOwnAsn())
 		}
-		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.AllowOwnAsn)
-		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.ReplacePeerAsn
-		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.AllowAspathLoopLocal
+		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.GetAllowOwnAsn())
+		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.GetReplacePeerAsn()
+		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.GetAllowAspathLoopLocal()
 
 		switch a.Conf.RemovePrivate {
 		case api.RemovePrivate_REMOVE_PRIVATE_ALL:
@@ -1372,10 +1593,23 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
 	}
 	if a.EbgpMultihop != nil {
+		if a.EbgpMultihop.MultihopTtl > math.MaxUint8 {
+			return nil, fmt.Errorf("ebgp-multihop multihop-ttl must be 0-255, got %d", a.EbgpMultihop.MultihopTtl)
+		}
 		pconf.EbgpMultihop.Config.Enabled = a.EbgpMultihop.Enabled
 		pconf.EbgpMultihop.Config.MultihopTtl = uint8(a.EbgpMultihop.MultihopTtl)
 	}
 	if a.TtlSecurity != nil {
+		// Reject rather than truncate. These arrive as uint32 and the internal
+		// model is uint8, so 257 silently became 1 - which for GTSM means
+		// "accept from any hop count", i.e. the control is reported as enabled
+		// and does nothing. It is also non-monotonic: 256 became 0, which the
+		// defaulting then rescued to 255. A value out of range is a mistake
+		// worth telling the caller about, not one to round into a weaker
+		// security posture.
+		if a.TtlSecurity.TtlMin > math.MaxUint8 {
+			return nil, fmt.Errorf("ttl-security ttl-min must be 0-255, got %d", a.TtlSecurity.TtlMin)
+		}
 		pconf.TtlSecurity.Config.Enabled = a.TtlSecurity.Enabled
 		pconf.TtlSecurity.Config.TtlMin = uint8(a.TtlSecurity.TtlMin)
 	}
@@ -2594,18 +2828,35 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 		})
 	}
 
+	// listen_addresses is client-supplied and was validated nowhere - not here,
+	// not in the gRPC wrapper, not in StartBgp - so MustParseAddr took the whole
+	// process down from a single request.
 	l := make([]netip.Addr, 0, len(a.ListenAddresses))
 	for _, addr := range a.ListenAddresses {
-		l = append(l, netip.MustParseAddr(addr))
+		parsed, err := netip.ParseAddr(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid listen address %q: %w", addr, err)
+		}
+		l = append(l, parsed)
+	}
+
+	// router_id happens to be pre-validated by StartBgp today, so this one was
+	// only ever a latent trap - but that guard is incidental to this function,
+	// and any future caller that skips it would reintroduce the panic.
+	routerID, err := netip.ParseAddr(a.RouterId)
+	if err != nil {
+		return nil, fmt.Errorf("invalid router-id %q: %w", a.RouterId, err)
 	}
 
 	global := &oc.Global{
 		Config: oc.GlobalConfig{
 			As:               a.Asn,
-			RouterId:         netip.MustParseAddr(a.RouterId),
+			RouterId:         routerID,
 			Port:             a.ListenPort,
 			LocalAddressList: l,
 			BindToDevice:     a.BindToDevice,
+
+			GracefulRestartInheritToNeighbors: a.GracefulRestartInheritToNeighbors,
 		},
 		AfiSafis: families,
 		UseMultiplePaths: oc.UseMultiplePaths{

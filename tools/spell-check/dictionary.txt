@@ -75,6 +75,7 @@ syslog
 teid
 toml
 unicast
+unparseable
 uptime
 vpls
 zapi

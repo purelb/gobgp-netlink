@@ -316,11 +316,35 @@ func newPathFromIPRouteMessage(logger *slog.Logger, m *zebra.Message, version ui
 		slog.String("api", header.Command.String()),
 	)
 
-	nlri, _ = bgp.NewIPAddrPrefix(netip.MustParsePrefix(fmt.Sprintf("%s/%d", body.Prefix.Prefix.String(), body.Prefix.PrefixLen)))
+	// Parsed rather than Must-ed. This is data off the zebra socket, and while
+	// zebra is normally a local, trusted process, a malformed prefix length or
+	// nexthop from it stopped the whole daemon. The caller already skips a nil
+	// path, so the cost of bad input is one route rather than the process.
+	//
+	// The IPv6 branch below has always parsed with an error; this makes the
+	// IPv4 side agree with it.
+	prefix, err := netip.ParsePrefix(fmt.Sprintf("%s/%d", body.Prefix.Prefix.String(), body.Prefix.PrefixLen))
+	if err != nil {
+		logger.Error("unparseable prefix from zebra; ignoring the route",
+			slog.String("Topic", "Zebra"),
+			slog.String("Prefix", body.Prefix.Prefix.String()),
+			slog.Int("PrefixLength", int(body.Prefix.PrefixLen)),
+			slog.Any("Error", err))
+		return nil
+	}
+	nlri, _ = bgp.NewIPAddrPrefix(prefix)
 	switch family {
 	case bgp.RF_IPv4_UC:
 		if len(body.Nexthops) > 0 {
-			pa, _ := bgp.NewPathAttributeNextHop(netip.MustParseAddr(body.Nexthops[0].Gate.String()))
+			gate, err := netip.ParseAddr(body.Nexthops[0].Gate.String())
+			if err != nil {
+				logger.Error("unparseable nexthop from zebra; ignoring the route",
+					slog.String("Topic", "Zebra"),
+					slog.String("Nexthop", body.Nexthops[0].Gate.String()),
+					slog.Any("Error", err))
+				return nil
+			}
+			pa, _ := bgp.NewPathAttributeNextHop(gate)
 			pattr = append(pattr, pa)
 		}
 	case bgp.RF_IPv6_UC:
