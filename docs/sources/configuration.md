@@ -508,6 +508,15 @@ difference on every poll for each of these unless it expects them.
 | `bfd.config.desired-minimum-tx-interval` | 1000000 (1s, microseconds), when BFD is enabled |
 | `bfd.config.required-minimum-receive` | 1000000 (1s, microseconds), when BFD is enabled |
 
+The as-path options are reported slightly differently and belong in the same
+list. `allow-own-as`, `replace-peer-as` and `allow-aspath-loop-local` carry
+explicit presence on the API, so a client can leave them unstated and inherit
+them from a peer group. The read path always reports all three, because a
+running configuration is what is in force rather than what was typed - so a
+client that stated none of them still gets three values back. There is no
+information lost either way: for these three, "not stated" and "0 or false"
+have the same effect.
+
 Per-family settings are derived from the neighbor's too, which is what makes a
 capability carry families rather than going out empty:
 

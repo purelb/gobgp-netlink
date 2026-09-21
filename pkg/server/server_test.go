@@ -4206,7 +4206,15 @@ func TestUpdatePeer(t *testing.T) {
 		})
 	}, time.Second, 10*time.Millisecond)
 
-	// update AS_PATH option
+	// update AS_PATH option.
+	//
+	// Compared field by field from here on rather than by whole-struct
+	// equality. The as-path options carry explicit presence now, and the read
+	// path reports the resolved value for all three, so the daemon's PeerConf
+	// has three non-nil pointers where a client that set one has two nils.
+	// That is intended - the running configuration is what is in force, not
+	// what was typed - and it means comparing a client-built message against a
+	// reported one was only ever equal by coincidence.
 	p.Conf.ReplacePeerAsn = proto.Bool(true)
 	resp, err = s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: p})
 	assert.NoError(t, err)
@@ -4214,7 +4222,9 @@ func TestUpdatePeer(t *testing.T) {
 
 	assert.EventuallyWithT(t, func(collect *assert.CollectT) {
 		_ = s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(peer *api.Peer) {
-			assert.Equal(collect, peer.Conf, p.Conf)
+			assert.True(collect, peer.Conf.GetReplacePeerAsn(), "the update must take effect")
+			assert.Equal(collect, p.Conf.NeighborAddress, peer.Conf.NeighborAddress)
+			assert.Equal(collect, p.Conf.PeerAsn, peer.Conf.PeerAsn)
 		})
 	}, time.Second, 10*time.Millisecond)
 
@@ -4226,7 +4236,8 @@ func TestUpdatePeer(t *testing.T) {
 
 	assert.EventuallyWithT(t, func(collect *assert.CollectT) {
 		_ = s.ListPeer(context.Background(), &api.ListPeerRequest{}, func(peer *api.Peer) {
-			assert.Equal(collect, peer.Conf, p.Conf)
+			assert.True(collect, peer.Conf.AdminDown, "admin-down must take effect")
+			assert.True(collect, peer.Conf.GetReplacePeerAsn(), "and the earlier update must survive it")
 		})
 	}, time.Second, 10*time.Millisecond)
 }

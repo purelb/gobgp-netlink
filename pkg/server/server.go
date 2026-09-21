@@ -4521,6 +4521,16 @@ func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNoti
 		if err != nil {
 			return err
 		}
+		// An interface that exists but carries no IPv6 link-local address
+		// returns ("", nil), not an error. Reporting that as "invalid neighbor
+		// address" blames the wrong thing - the caller gave an interface, not
+		// an address - and it is the difference between a host where the
+		// interface is absent and one where it is present but has no
+		// link-local, which is what made the first version of this pass
+		// locally and fail on CI.
+		if addr == "" {
+			return fmt.Errorf("interface %s has no IPv6 link-local address, so no peer can be identified by it", intf)
+		}
 	} else {
 		var err error
 		addr, err = c.ExtractNeighborAddress()

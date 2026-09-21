@@ -62,9 +62,33 @@ func TestDeletePeerByInterfaceDoesNotPanic(t *testing.T) {
 	// interface peer, which is what used to happen before the interface branch
 	// could run, and it is the exact string this test exists to keep out.
 	require.Error(t, err)
+	// "NeighborAddress is not configured" is ExtractNeighborAddress refusing an
+	// interface peer, which is what used to happen before the interface branch
+	// could run. Anything else means the interface path was taken, and which
+	// error it is depends on the host: absent interface, or present with no
+	// IPv6 link-local. Both are fine; the first version of this test asserted
+	// on the specific message and so passed locally and failed on CI.
 	assert.NotContains(t, err.Error(), "NeighborAddress is not configured",
 		"an interface peer has no address; the interface must be resolved first")
-	assert.NotContains(t, err.Error(), "invalid neighbor address")
+}
+
+// The condition that made the first version of the test above pass locally and
+// fail on CI: an interface that exists and carries no IPv6 link-local address.
+// GetIPv6LinkLocalNeighborAddress returns ("", nil) for it - not an error - so
+// the empty string reached the parser and was reported as an invalid address,
+// blaming the caller for something it did not supply.
+//
+// "lo" has that shape on essentially any host, which is why it is used here
+// rather than a name that depends on the machine.
+func TestDeletePeerByInterfaceWithoutLinkLocalIsExplicit(t *testing.T) {
+	s := newPanicTestServer(t)
+
+	err := s.DeletePeer(context.Background(), &api.DeletePeerRequest{Interface: "lo"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no IPv6 link-local address",
+		"the error must name what is actually wrong with the interface")
+	assert.NotContains(t, err.Error(), "invalid neighbor address",
+		"the caller supplied an interface, not an address; blaming the address misdirects")
 }
 
 func TestDeletePeerWithMalformedAddressReturnsError(t *testing.T) {
