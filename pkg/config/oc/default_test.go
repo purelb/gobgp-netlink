@@ -236,6 +236,47 @@ func TestSetDefaultNeighborConfigValuesSendCommunity(t *testing.T) {
 	})
 }
 
+// N3: a neighbor that lists no afi-safis at all - the ordinary shape over the
+// API - used to advertise a Graceful Restart capability with an empty AFI/SAFI
+// list, because the per-family derivation lived only in the branch that handles
+// an explicit list. fsm.go emits a tuple only for families whose
+// mp-graceful-restart is enabled, so the peer negotiated GR and retained
+// nothing: indistinguishable from working until a restart actually happens.
+func Test_SetDefaultNeighborConfigValues_DerivesMpGracefulRestartWithoutExplicitFamilies(t *testing.T) {
+	g := &Global{Config: GlobalConfig{As: 65000, RouterId: netip.MustParseAddr("10.0.0.1")}}
+
+	n := &Neighbor{}
+	n.Config.NeighborAddress = netip.MustParseAddr("198.51.100.20")
+	n.Config.PeerAs = 65001
+	n.GracefulRestart.Config.Enabled = true
+
+	require.NoError(t, SetDefaultNeighborConfigValues(n, nil, g))
+
+	require.NotEmpty(t, n.AfiSafis, "a neighbor with no explicit families should get a default one")
+	for _, af := range n.AfiSafis {
+		assert.True(t, af.MpGracefulRestart.Config.Enabled,
+			"%s must carry mp-graceful-restart, or the GR capability goes out with no families",
+			af.Config.AfiSafiName)
+		assert.True(t, af.MpGracefulRestart.State.Enabled, "%s state must match config", af.Config.AfiSafiName)
+	}
+}
+
+// The converse: GR off must not switch the families on.
+func Test_SetDefaultNeighborConfigValues_NoMpGracefulRestartWhenGrDisabled(t *testing.T) {
+	g := &Global{Config: GlobalConfig{As: 65000, RouterId: netip.MustParseAddr("10.0.0.1")}}
+
+	n := &Neighbor{}
+	n.Config.NeighborAddress = netip.MustParseAddr("198.51.100.21")
+	n.Config.PeerAs = 65001
+
+	require.NoError(t, SetDefaultNeighborConfigValues(n, nil, g))
+
+	require.NotEmpty(t, n.AfiSafis)
+	for _, af := range n.AfiSafis {
+		assert.False(t, af.MpGracefulRestart.Config.Enabled, "%s", af.Config.AfiSafiName)
+	}
+}
+
 // N6: an interface peer is registered under its interface name, so it has to be
 // looked up under the same key. It used to be looked up by address - which is
 // "invalid IP" for an interface peer - so the lookup always missed and the peer

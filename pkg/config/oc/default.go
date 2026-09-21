@@ -237,6 +237,15 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 			n.AfiSafis = []AfiSafi{defaultAfiSafi(AFI_SAFI_TYPE_IPV6_UNICAST, true)}
 		}
 		for i := range n.AfiSafis {
+			// Derive per-family Graceful Restart here too. The explicit
+			// afi-safi branch below has done this since the capability bug was
+			// found, but this branch - a neighbor that lists no families at all,
+			// which is the ordinary shape over the API - was left out, so those
+			// peers still advertised a GR capability with an empty AFI/SAFI
+			// list. There is no explicit per-family setting to respect on this
+			// path, because the families are synthesised.
+			n.AfiSafis[i].MpGracefulRestart.Config.Enabled = n.GracefulRestart.Config.Enabled
+			n.AfiSafis[i].MpGracefulRestart.State.Enabled = n.AfiSafis[i].MpGracefulRestart.Config.Enabled
 			n.AfiSafis[i].AddPaths.Config.Receive = n.AddPaths.Config.Receive
 			n.AfiSafis[i].AddPaths.State.Receive = n.AddPaths.Config.Receive
 			n.AfiSafis[i].AddPaths.Config.SendMax = n.AddPaths.Config.SendMax
