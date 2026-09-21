@@ -366,11 +366,6 @@ var objectConformanceGaps = map[string]string{
 	"Actions.*": "as Conditions.*: they round-trip; the assertions are missing, not the behaviour.",
 	"Mrt": "EnableMrt and DisableMrt have no List, so there is nothing to round-trip and no way " +
 		"for a client to discover what is configured. A read path would be a proto addition.",
-	"Netlink": "the export and import configuration, the export rules and their per-rule fields " +
-		"all round-trip correctly - verified against a running daemon, including the " +
-		"dampening_interval and route_protocol fields fixed in v1.3.2. None of it has a test " +
-		"here, so a regression in the fork's core feature would be silent. This is the most " +
-		"valuable gap on the list to close.",
 }
 
 // The services whose round trip this file is responsible for. Derived from the
@@ -379,6 +374,8 @@ func TestObjectConformanceGapsAreRecorded(t *testing.T) {
 	covered := map[string]bool{
 		"Vrf": true, "Rpki": true, "Bmp": true,
 		"DefinedSet": true, "Policy": true, "PolicyAssignment": true,
+		// conformance_netlink_test.go
+		"Netlink": true,
 	}
 
 	// Each configurable object reachable over the API, and where it stands.

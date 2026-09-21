@@ -51,7 +51,7 @@ jobs:
       - name: API conformance
         run: |
           go test -v -race -timeout 300s ./pkg/server/ \
-            -run 'TestConformance|TestEffect|TestEveryPeerConfFieldIsClassified|TestEveryPeerSubMessageIsCovered|TestEveryPeerBlockIsClassified|TestScopedSettingsAreRecorded|TestEveryObjectWriteFieldIsClassified|TestEveryPolicyConditionAndActionIsClassified|TestObjectConformanceGapsAreRecorded|TestRegisteredWireEffectsAllRun|TestNilFamilyIsRejectedNotFatal'
+            -run 'TestConformance|TestEffect|TestEveryPeerConfFieldIsClassified|TestEveryPeerSubMessageIsCovered|TestEveryPeerBlockIsClassified|TestScopedSettingsAreRecorded|TestEveryObjectWriteFieldIsClassified|TestEveryNetlinkWriteFieldIsClassified|TestEveryPolicyConditionAndActionIsClassified|TestObjectConformanceGapsAreRecorded|TestRegisteredWireEffectsAllRun|TestNilFamilyIsRejectedNotFatal'
 
   # Note: 32-bit builds removed as netlink feature is Linux-only and targets modern 64-bit systems
 
