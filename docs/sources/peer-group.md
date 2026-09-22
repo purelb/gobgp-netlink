@@ -80,3 +80,60 @@ BGP neighbor is 172.40.1.3, remote AS 65001
     Received:               0
     Accepted:               0
 ```
+
+## Inheritance over the gRPC API
+
+The configuration file states inheritance per field: a field written under
+`[[neighbors]]` is the neighbor's, and everything else comes from the group.
+
+`AddPeer` and `UpdatePeer` cannot work that way directly, because a protobuf
+message does not record which fields the client set. `api.Peer` answers it in
+two different ways, and the difference is visible to clients.
+
+**Sub-message blocks are all or nothing.** `timers`, `transport`,
+`ebgp_multihop`, `route_reflector`, `route_server`, `graceful_restart`,
+`ttl_security`, `bfd` and `apply_policy` are separate messages, so sending one
+at all means the neighbor owns every field in it - including the fields left at
+zero. Omitting it inherits the whole block from the group.
+
+Sending an empty block is therefore a real opt-out.
+`graceful_restart{enabled: false}` keeps graceful restart off on a neighbor
+whose group enables it, which no rule inferring "unset" from "all fields zero"
+could express.
+
+The practical consequence is for clients that send partial blocks. If the
+group sets `graceful_restart.stale_routes_time` and a neighbor sends a
+`graceful_restart` carrying only `enabled` and `restart_time`, the neighbor
+gets `stale_routes_time = 0`, not the group's. Send complete blocks.
+
+**`PeerConf` is per field.** Its fields are not a sub-message, and every
+request carries the message because it names the peer group, so the
+all-or-nothing rule cannot apply. These fields carry explicit presence
+individually instead:
+
+| field | omitted | sent |
+|-------|---------|------|
+| `description` | inherits the group | the neighbor's, including `""` |
+| `local_asn` | inherits the group | the neighbor's, including `0` |
+| `auth_password` | inherits the group | the neighbor's, including `""` |
+| `remove_private` | inherits the group | the neighbor's, including unspecified |
+| `route_flap_damping` | inherits the group | the neighbor's, including `false` |
+| `send_software_version` | inherits the group | the neighbor's, including `false` |
+| `send_community` | inherits the group | the neighbor's, including `0` |
+| `allow_own_asn` | inherits the group | the neighbor's, including `0` |
+| `replace_peer_asn` | inherits the group | the neighbor's, including `false` |
+| `allow_aspath_loop_local` | inherits the group | the neighbor's, including `false` |
+
+Because these are `optional` in the proto, "sent" means the field was set, not
+that it was set to something non-zero. A Go client uses
+`proto.String("")`, `proto.Bool(false)` or `proto.Uint32(0)` to state a zero
+value and leaves the field `nil` to inherit.
+
+**`peer_asn` is the exception.** The peer group owns a member's remote AS
+whether or not the member states one, so sending it changes nothing. `type` is
+likewise derived from `peer_asn` and `local_asn` after inheritance resolves.
+
+On the read path every field is reported with a value, never `nil`. The
+resolved configuration is a fact, and presence describes what a client sent,
+not what a peer ended up with. To see where a value came from, use
+`gobgp config running --provenance`.
