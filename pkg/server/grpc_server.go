@@ -1216,15 +1216,78 @@ var neighborPresenceBlocks = map[string]func(*api.Peer) bool{
 			a.Conf.ReplacePeerAsn != nil ||
 			a.Conf.AllowAspathLoopLocal != nil)
 	},
+
+	// The NeighborConfig block. Like as-path-options it is not a sub-message,
+	// but unlike it the answer is not all-or-nothing: api.PeerConf carries the
+	// peer group name, so every request has one and "the block was sent" would
+	// mean no NeighborConfig field ever inherits. Presence is therefore taken
+	// per field, from neighborConfigFieldPresence below, and this predicate
+	// only decides whether there is anything to record at all.
+	"config": func(a *api.Peer) bool { return len(configFieldsPresent(a)) > 0 },
+}
+
+// neighborConfigFieldPresence is the per-field half of the "config" block,
+// keyed by the mapstructure tag overwriteConfig builds its viper key from.
+//
+// The tags come from PeerGroupConfig, because that is the struct
+// overwriteConfig iterates; a key spelled to match NeighborConfig instead
+// would never be consulted and would fail silently, which is the same shape as
+// the defect this fixes.
+var neighborConfigFieldPresence = map[string]func(*api.Peer) bool{
+	"description":           func(a *api.Peer) bool { return a.Conf.Description != nil },
+	"local-as":              func(a *api.Peer) bool { return a.Conf.LocalAsn != nil },
+	"auth-password":         func(a *api.Peer) bool { return a.Conf.AuthPassword != nil },
+	"remove-private-as":     func(a *api.Peer) bool { return a.Conf.RemovePrivate != nil },
+	"route-flap-damping":    func(a *api.Peer) bool { return a.Conf.RouteFlapDamping != nil },
+	"send-software-version": func(a *api.Peer) bool { return a.Conf.SendSoftwareVersion != nil },
+
+	// send_community has carried presence since it was added, for its own
+	// reason - 0 means "standard", not "unset" - but nothing ever consulted it
+	// for inheritance, so a grouped neighbor's choice was replaced by the
+	// group's anyway. The pointer was already there; only the wiring was
+	// missing.
+	"send-community": func(a *api.Peer) bool { return a.Conf.SendCommunity != nil },
+}
+
+// neighborConfigFieldsWithNothingToRecord are the remaining PeerGroupConfig
+// fields that reach a NeighborConfig field, and why presence would not change
+// what they do.
+var neighborConfigFieldsWithNothingToRecord = map[string]string{
+	"peer-as": "neighbor.config.peer-as is in oc's forcedOverwrittenConfig, so overwriteConfig copies the " +
+		"peer group's value whether or not the field was configured. Presence would be recorded and then " +
+		"ignored, and the proto pointer would be a source break for consumers that buys no behaviour. " +
+		"Whether a peer group should own its members' remote AS is a separate question from presence.",
+	"peer-type": "derived by getConfigPeerType from peer-as and local-as after inheritance resolves, so " +
+		"whatever a client sends is overwritten either way.",
+}
+
+// configFieldsPresent returns the presence map for the "config" block: which
+// NeighborConfig fields this request actually stated.
+//
+// Flat, deliberately. overwriteConfig is called for this block with the prefix
+// "neighbor.config", so the keys it looks up are neighbor.config.<tag> and the
+// map under "config" must be the tags themselves. Every other block sits a
+// level deeper - "neighbor.timers.config" - which is why MarkBlockConfigured
+// wraps its result in another "config". Passing that wrapped shape here would
+// build neighbor.config.config.<tag>, which nothing looks up, so every field
+// would silently keep inheriting and this fix would appear to do nothing.
+func configFieldsPresent(a *api.Peer) map[string]any {
+	if a.Conf == nil {
+		return nil
+	}
+	fields := map[string]any{}
+	for tag, sent := range neighborConfigFieldPresence {
+		if sent(a) {
+			fields[tag] = true
+		}
+	}
+	return fields
 }
 
 // neighborBlocksWithNothingToRecord are the blocks inheritance touches that
 // have no presence signal to take, with the reason. Each is here because the
 // API cannot express the block, not because nobody got to it.
 var neighborBlocksWithNothingToRecord = map[string]string{
-	"config": "api.PeerConf is sent on every request - it carries the peer group name - so treating it as " +
-		"'the client owns this block' would stop every NeighborConfig field inheriting. The config file path " +
-		"still has real per-field presence for it; the API path does not.",
 	"add-paths": "add_paths exists only on api.AfiSafi, not on api.Peer, and readAddPathsFromAPIStruct is only " +
 		"called per family. Nothing can set the neighbor-level block over the API, so there is nothing to record.",
 	"error-handling":     "no field on api.Peer; nothing can set it over the API",
@@ -1253,9 +1316,15 @@ func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 	}
 	presence := map[string]any{}
 	for block, sent := range neighborPresenceBlocks {
-		if sent(a) {
-			presence[block] = oc.MarkBlockConfigured(blockConfigZero(block))
+		if !sent(a) {
+			continue
 		}
+		if block == "config" {
+			// Per field, and flat - see configFieldsPresent.
+			presence[block] = configFieldsPresent(a)
+			continue
+		}
+		presence[block] = oc.MarkBlockConfigured(blockConfigZero(block))
 	}
 	if len(presence) == 0 {
 		return

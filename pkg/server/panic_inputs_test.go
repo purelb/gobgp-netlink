@@ -497,3 +497,65 @@ func TestAsPathOptionsExplicitFalseOptsOut(t *testing.T) {
 	assert.EqualValues(t, 0, got.Conf.GetAllowOwnAsn(),
 		"and stating one field of the block claims the block, as everywhere else")
 }
+
+// The same defect, one block over, and the half a controller actually sees.
+//
+// Graceful restart above is a sub-message, so proto3 message presence answered
+// "did the client send this block". The NeighborConfig fields are bare scalars
+// on api.PeerConf, which every request carries, so there was no signal at all
+// and the peer group won all of them - including a peer group that never
+// configured them and supplied zeros.
+//
+// The consequence is not only the lost setting. ListPeer reports the group's
+// value, so a controller diffing desired against observed never converges: it
+// re-issues UpdatePeer every reconcile, for ever, taking the server-wide
+// mgmtOperation lock each time and masking genuine edits behind the churn.
+// That is why this asserts the readback rather than the internal config.
+func TestNeighborConfigFieldsSurvivePeerGroupMembership(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	// A group that sets none of these. Its zeros are what used to land on the
+	// member.
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+	}}))
+
+	const addr = "198.51.100.41"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress:     addr,
+			PeerAsn:             65001,
+			PeerGroup:           "edge",
+			Description:         proto.String("Spine uplink 1"),
+			LocalAsn:            proto.Uint32(65002),
+			AuthPassword:        proto.String("correct-horse-battery-staple"),
+			RouteFlapDamping:    proto.Bool(true),
+			SendSoftwareVersion: proto.Bool(true),
+			RemovePrivate:       api.RemovePrivate_REMOVE_PRIVATE_REPLACE.Enum(),
+			SendCommunity:       proto.Uint32(1),
+		},
+	}}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	require.NotNil(t, got.Conf)
+
+	assert.Equal(t, "Spine uplink 1", got.Conf.GetDescription())
+	assert.EqualValues(t, 65002, got.Conf.GetLocalAsn())
+	assert.True(t, got.Conf.GetRouteFlapDamping())
+	assert.True(t, got.Conf.GetSendSoftwareVersion())
+	assert.Equal(t, api.RemovePrivate_REMOVE_PRIVATE_REPLACE, got.Conf.GetRemovePrivate())
+	assert.EqualValues(t, 1, got.Conf.GetSendCommunity())
+
+	// The password cannot be asserted directly: ListPeer blanks
+	// Conf.AuthPassword on the way out, so both "kept" and "erased" read back
+	// empty. PeerState.AuthPasswordSet is derived before the redaction and is
+	// the only observable difference - and the difference matters, because the
+	// erasure took MD5 off while leaving the session up.
+	require.NotNil(t, got.State)
+	assert.True(t, got.State.AuthPasswordSet,
+		"the neighbor's MD5 key must survive peer-group membership")
+	assert.Empty(t, got.Conf.GetAuthPassword(), "and must still not cross the wire")
+}

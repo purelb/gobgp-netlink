@@ -27,9 +27,10 @@ package server
 
 import (
 	"context"
-	"google.golang.org/protobuf/proto"
 	"os"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

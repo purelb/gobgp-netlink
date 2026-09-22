@@ -808,3 +808,247 @@ func TestNilFamilyIsRejectedNotFatal(t *testing.T) {
 		assert.Contains(t, err.Error(), "family")
 	})
 }
+
+// Peer-group inheritance and the NeighborConfig block, over the API.
+//
+// This runs the real conversion - newNeighborFromAPIStruct, which is what
+// records presence - rather than registering presence by hand, because the
+// defect was never in overwriteConfig. overwriteConfig has always honoured
+// per-field presence; nothing on the API path produced any. A test that builds
+// the presence map itself asserts the half that was already right and passes
+// with the wiring deleted.
+//
+// Four cases per field, because each fails differently in production:
+//
+//   - group sets it, neighbor omits it   -> the neighbor inherits
+//   - group sets it, neighbor sends its own -> the neighbor's value wins
+//   - group never set it, neighbor sends -> the neighbor keeps its value
+//   - neighbor sends the zero value      -> the zero wins
+//
+// The third is the one users reported: the group supplies a zero for a field it
+// never configured, and the neighbor's setting is erased by it. The fourth is
+// the one only presence can express - false is the zero value, so nothing else
+// can say "explicitly off" against a group that says true.
+func TestPeerGroupInheritancePerConfigFieldOverAPI(t *testing.T) {
+	const group = "edge"
+
+	cases := []struct {
+		field string
+		// the neighbor's own, distinguishable from the group's
+		setOwn func(*api.PeerConf)
+		// an explicit zero, which must beat a group that set the field
+		setZero func(*api.PeerConf)
+		// the group's value
+		setGroup func(*oc.PeerGroupConfig)
+
+		wantOwn       func(*testing.T, *oc.Neighbor)
+		wantInherited func(*testing.T, *oc.Neighbor)
+		wantZero      func(*testing.T, *oc.Neighbor)
+
+		// A bool has two values. The group's must be non-zero for "omitted
+		// inherits" to mean anything, which leaves the neighbor only "true" -
+		// the same value, so nothing is proved - or "false", which is already
+		// the explicit-zero case. Such a field has three distinguishable
+		// cases, not four, and saying so here is better than a sub-test that
+		// passes with the feature deleted.
+		ownIndistinguishableFromGroup bool
+	}{
+		{
+			field:    "description",
+			setOwn:   func(c *api.PeerConf) { c.Description = proto.String("member desc") },
+			setZero:  func(c *api.PeerConf) { c.Description = proto.String("") },
+			setGroup: func(g *oc.PeerGroupConfig) { g.Description = "Spine fabric" },
+			wantOwn: func(t *testing.T, n *oc.Neighbor) {
+				assert.Equal(t, "member desc", n.Config.Description)
+			},
+			wantInherited: func(t *testing.T, n *oc.Neighbor) {
+				assert.Equal(t, "Spine fabric", n.Config.Description)
+			},
+			wantZero: func(t *testing.T, n *oc.Neighbor) {
+				assert.Empty(t, n.Config.Description)
+			},
+		},
+		{
+			field:    "local-as",
+			setOwn:   func(c *api.PeerConf) { c.LocalAsn = proto.Uint32(65002) },
+			setZero:  func(c *api.PeerConf) { c.LocalAsn = proto.Uint32(0) },
+			setGroup: func(g *oc.PeerGroupConfig) { g.LocalAs = 65001 },
+			wantOwn: func(t *testing.T, n *oc.Neighbor) {
+				assert.EqualValues(t, 65002, n.Config.LocalAs)
+			},
+			wantInherited: func(t *testing.T, n *oc.Neighbor) {
+				assert.EqualValues(t, 65001, n.Config.LocalAs)
+			},
+			wantZero: func(t *testing.T, n *oc.Neighbor) {
+				assert.Zero(t, n.Config.LocalAs)
+			},
+		},
+		{
+			field:    "auth-password",
+			setOwn:   func(c *api.PeerConf) { c.AuthPassword = proto.String("memberpw") },
+			setZero:  func(c *api.PeerConf) { c.AuthPassword = proto.String("") },
+			setGroup: func(g *oc.PeerGroupConfig) { g.AuthPassword = "grouppw" },
+			wantOwn: func(t *testing.T, n *oc.Neighbor) {
+				assert.Equal(t, "memberpw", n.Config.AuthPassword)
+			},
+			wantInherited: func(t *testing.T, n *oc.Neighbor) {
+				assert.Equal(t, "grouppw", n.Config.AuthPassword)
+			},
+			wantZero: func(t *testing.T, n *oc.Neighbor) {
+				// MD5 off against a group that sets a key. Without presence
+				// this is unsayable, and the session comes up authenticated
+				// with a key the operator did not choose.
+				assert.Empty(t, n.Config.AuthPassword)
+			},
+		},
+		{
+			field:                         "route-flap-damping",
+			ownIndistinguishableFromGroup: true,
+			setOwn:                        func(c *api.PeerConf) { c.RouteFlapDamping = proto.Bool(true) },
+			setZero:                       func(c *api.PeerConf) { c.RouteFlapDamping = proto.Bool(false) },
+			setGroup:                      func(g *oc.PeerGroupConfig) { g.RouteFlapDamping = true },
+			wantOwn: func(t *testing.T, n *oc.Neighbor) {
+				assert.True(t, n.Config.RouteFlapDamping)
+			},
+			wantInherited: func(t *testing.T, n *oc.Neighbor) {
+				assert.True(t, n.Config.RouteFlapDamping)
+			},
+			wantZero: func(t *testing.T, n *oc.Neighbor) {
+				assert.False(t, n.Config.RouteFlapDamping,
+					"an explicit false must survive a group that damps")
+			},
+		},
+		{
+			field:                         "send-software-version",
+			ownIndistinguishableFromGroup: true,
+			setOwn:                        func(c *api.PeerConf) { c.SendSoftwareVersion = proto.Bool(true) },
+			setZero:                       func(c *api.PeerConf) { c.SendSoftwareVersion = proto.Bool(false) },
+			setGroup:                      func(g *oc.PeerGroupConfig) { g.SendSoftwareVersion = true },
+			wantOwn: func(t *testing.T, n *oc.Neighbor) {
+				assert.True(t, n.Config.SendSoftwareVersion)
+			},
+			wantInherited: func(t *testing.T, n *oc.Neighbor) {
+				assert.True(t, n.Config.SendSoftwareVersion)
+			},
+			wantZero: func(t *testing.T, n *oc.Neighbor) {
+				assert.False(t, n.Config.SendSoftwareVersion,
+					"this advertises the daemon's version to the peer; an explicit opt-out is a disclosure decision")
+			},
+		},
+		{
+			field:    "remove-private-as",
+			setOwn:   func(c *api.PeerConf) { c.RemovePrivate = api.RemovePrivate_REMOVE_PRIVATE_REPLACE.Enum() },
+			setZero:  func(c *api.PeerConf) { c.RemovePrivate = api.RemovePrivate_REMOVE_PRIVATE_UNSPECIFIED.Enum() },
+			setGroup: func(g *oc.PeerGroupConfig) { g.RemovePrivateAs = oc.REMOVE_PRIVATE_AS_OPTION_ALL },
+			wantOwn: func(t *testing.T, n *oc.Neighbor) {
+				assert.Equal(t, oc.REMOVE_PRIVATE_AS_OPTION_REPLACE, n.Config.RemovePrivateAs)
+			},
+			wantInherited: func(t *testing.T, n *oc.Neighbor) {
+				assert.Equal(t, oc.REMOVE_PRIVATE_AS_OPTION_ALL, n.Config.RemovePrivateAs)
+			},
+			wantZero: func(t *testing.T, n *oc.Neighbor) {
+				assert.Empty(t, string(n.Config.RemovePrivateAs),
+					"what leaves this speaker's AS path is the neighbor's decision, not the group's")
+			},
+		},
+		{
+			field:    "send-community",
+			setOwn:   func(c *api.PeerConf) { c.SendCommunity = proto.Uint32(1) }, // extended
+			setZero:  func(c *api.PeerConf) { c.SendCommunity = proto.Uint32(0) }, // standard
+			setGroup: func(g *oc.PeerGroupConfig) { g.SendCommunity = oc.COMMUNITY_TYPE_BOTH },
+			wantOwn: func(t *testing.T, n *oc.Neighbor) {
+				assert.Equal(t, oc.COMMUNITY_TYPE_EXTENDED, n.Config.SendCommunity)
+			},
+			wantInherited: func(t *testing.T, n *oc.Neighbor) {
+				assert.Equal(t, oc.COMMUNITY_TYPE_BOTH, n.Config.SendCommunity)
+			},
+			wantZero: func(t *testing.T, n *oc.Neighbor) {
+				assert.Equal(t, oc.COMMUNITY_TYPE_STANDARD, n.Config.SendCommunity,
+					"standard-only must survive a group asking for both; it decides whether route targets are sent")
+			},
+		},
+	}
+
+	// configuredFields is keyed by address and pruned only on peer delete, so
+	// every sub-test needs its own or the result depends on ordering.
+	next := 0
+	addr := func() string {
+		next++
+		return fmt.Sprintf("198.51.100.%d", next)
+	}
+
+	// resolve runs the real path: API struct in, presence recorded as a side
+	// effect of the conversion, inheritance applied.
+	resolve := func(t *testing.T, a string, setPeer func(*api.PeerConf), setGroup func(*oc.PeerGroupConfig)) *oc.Neighbor {
+		t.Helper()
+		conf := &api.PeerConf{NeighborAddress: a, PeerAsn: 65001, PeerGroup: group}
+		if setPeer != nil {
+			setPeer(conf)
+		}
+		n, err := newNeighborFromAPIStruct(&api.Peer{Conf: conf})
+		require.NoError(t, err)
+		t.Cleanup(func() { oc.UnregisterConfiguredFields(a) })
+
+		pg := &oc.PeerGroup{}
+		pg.Config.PeerGroupName = group
+		if setGroup != nil {
+			setGroup(&pg.Config)
+		}
+		require.NoError(t, oc.OverwriteNeighborConfigWithPeerGroup(n, pg))
+		return n
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.field+"/omitted inherits the group", func(t *testing.T) {
+			tc.wantInherited(t, resolve(t, addr(), nil, tc.setGroup))
+		})
+
+		t.Run(tc.field+"/sent beats the group", func(t *testing.T) {
+			if tc.ownIndistinguishableFromGroup {
+				t.Skip("a bool the group sets true has no neighbor value that both differs from it " +
+					"and is not the explicit-zero case below")
+			}
+			tc.wantOwn(t, resolve(t, addr(), tc.setOwn, tc.setGroup))
+		})
+
+		t.Run(tc.field+"/sent survives a group that never set it", func(t *testing.T) {
+			// The reported symptom: the group supplies a zero for a field it
+			// never configured, and it lands on the neighbor as if configured.
+			tc.wantOwn(t, resolve(t, addr(), tc.setOwn, nil))
+		})
+
+		t.Run(tc.field+"/explicit zero beats the group", func(t *testing.T) {
+			tc.wantZero(t, resolve(t, addr(), tc.setZero, tc.setGroup))
+		})
+	}
+}
+
+// peer_asn is deliberately not in the presence table: it is in oc's
+// forcedOverwrittenConfig, so the peer group owns a member's remote AS whether
+// or not the member stated one. Pinned here because it is the one field whose
+// behaviour differs from every other field in the same block, and the reason
+// lives in a slice literal in another package.
+//
+// If this is ever changed, it is a deliberate decision about peer groups, not
+// a presence fix - and every grouped deployment's session AS changes with it.
+func TestPeerASNStillForcedFromThePeerGroup(t *testing.T) {
+	const a = "198.51.100.250"
+	n, err := newNeighborFromAPIStruct(&api.Peer{Conf: &api.PeerConf{
+		NeighborAddress: a,
+		PeerAsn:         65002,
+		PeerGroup:       "edge",
+		Description:     proto.String("keeps its own description"),
+	}})
+	require.NoError(t, err)
+	t.Cleanup(func() { oc.UnregisterConfiguredFields(a) })
+
+	pg := &oc.PeerGroup{}
+	pg.Config.PeerGroupName = "edge"
+	pg.Config.PeerAs = 65001
+	require.NoError(t, oc.OverwriteNeighborConfigWithPeerGroup(n, pg))
+
+	assert.EqualValues(t, 65001, n.Config.PeerAs,
+		"peer-as is in forcedOverwrittenConfig; the group owns it")
+	assert.Equal(t, "keeps its own description", n.Config.Description,
+		"and that must not be mistaken for presence being broken in general")
+}

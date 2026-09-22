@@ -17,8 +17,9 @@ package server
 
 import (
 	"context"
-	"google.golang.org/protobuf/proto"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 
 	api "github.com/osrg/gobgp/v4/api"
 
