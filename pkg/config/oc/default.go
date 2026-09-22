@@ -878,9 +878,26 @@ func overwriteConfig(c, pg any, tagPrefix string, v *viper.Viper) {
 	for i := range pgType.NumField() {
 		field := pgType.Field(i).Name
 		tag := tagPrefix + "." + pgType.Field(i).Tag.Get("mapstructure")
-		if slices.Contains(forcedOverwrittenConfig, tag) || !v.IsSet(tag) {
+		forced := slices.Contains(forcedOverwrittenConfig, tag)
+		if forced || !v.IsSet(tag) {
 			if nField := nValue.FieldByName(field); nField.IsValid() {
-				nField.Set(pgValue.FieldByName(field))
+				pgField := pgValue.FieldByName(field)
+				// A forced field is owned by the peer group where the group
+				// states a value, not where it is silent. Forcing a zero over
+				// the member's own value is never what the group meant, and for
+				// peer-as - the only forced field - it is a security downgrade:
+				// peer-as 0 makes the FSM skip ASN negotiation entirely, so the
+				// peer chooses its own type from the OPEN it sends. Claiming our
+				// local AS then makes it iBGP, which keeps LOCAL_PREF and loses
+				// the eBGP TTL clamp.
+				//
+				// A peer group that configures timers and policy but leaves the
+				// remote AS to its members is an ordinary shape, and it silently
+				// disabled ASN validation for every member that set one.
+				if forced && pgField.IsZero() {
+					continue
+				}
+				nField.Set(pgField)
 			}
 		}
 	}

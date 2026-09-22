@@ -1190,3 +1190,53 @@ func TestMinimumAdvertisementIntervalIsNotOwnedByTheGroup(t *testing.T) {
 	assert.EqualValues(t, 65001, got.Conf.GetPeerAsn(),
 		"peer-as is session identity and stays owned by the group")
 }
+
+// A peer group that does not state a remote AS must not zero its members'.
+//
+// peer-as is owned by the peer group, which is right when the group names an
+// AS: a member of that group peers with that AS. It was owned unconditionally,
+// so a group configuring timers and policy while leaving the remote AS to its
+// members - an ordinary shape - overwrote every member's peer-as with zero.
+//
+// peer-as 0 makes the FSM skip ASN negotiation entirely and let the peer
+// choose its own type from the OPEN it sends. A peer claiming our local AS is
+// then treated as iBGP, which keeps LOCAL_PREF across the session and drops
+// the eBGP TTL clamp. The member asked for validation against 65001 and
+// silently got none.
+func TestPeerGroupWithoutAnASNDoesNotZeroItsMembers(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	peerAs := func(t *testing.T, addr string) uint32 {
+		t.Helper()
+		var got uint32
+		require.NoError(t, s.mgmtOperation(func() error {
+			got = s.neighborMap[netip.MustParseAddr(addr)].fsm.pConf.ReadOnly().Config.PeerAs
+			return nil
+		}, false))
+		return got
+	}
+
+	// A group with no remote AS of its own.
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:   &api.PeerGroupConf{PeerGroupName: "silent"},
+		Timers: &api.Timers{Config: &api.TimersConfig{HoldTime: 90, KeepaliveInterval: 30}},
+	}}))
+	const own = "198.51.100.160"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: own, PeerAsn: 65001, PeerGroup: "silent"},
+	}}))
+	assert.EqualValues(t, 65001, peerAs(t, own),
+		"the group named no AS and still zeroed the member's, disabling ASN validation")
+
+	// A group that does name one still owns it - that half must not regress.
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "stated", PeerAsn: 64512},
+	}}))
+	const overridden = "198.51.100.161"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: overridden, PeerAsn: 65001, PeerGroup: "stated"},
+	}}))
+	assert.EqualValues(t, 64512, peerAs(t, overridden),
+		"a group that names an AS owns it; members peer with the AS the group names")
+}
