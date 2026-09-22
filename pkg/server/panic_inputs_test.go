@@ -18,15 +18,17 @@ package server
 import (
 	"context"
 	"math"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/osrg/gobgp/v4/api"
-	"google.golang.org/protobuf/proto"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
 )
 
 // These inputs each used to reach a Must* call or an unbounded make() and take
@@ -558,4 +560,62 @@ func TestNeighborConfigFieldsSurvivePeerGroupMembership(t *testing.T) {
 	assert.True(t, got.State.AuthPasswordSet,
 		"the neighbor's MD5 key must survive peer-group membership")
 	assert.Empty(t, got.Conf.GetAuthPassword(), "and must still not cross the wire")
+}
+
+// The configuration file was not exempt, which is the part the report of this
+// defect did not reach.
+//
+// ReadConfigFile records real per-field presence and resolves the neighbor
+// against its group correctly. But addNeighbors then hands the *resolved*
+// neighbor to AddPeer as an api.Peer, and inheritance runs a second time
+// inside the server - against whatever presence the API path recorded. With no
+// presence for the config block that second pass copied the group's values
+// over settings the operator had written in TOML and that had already been
+// applied once, correctly.
+//
+// So a TOML neighbor overriding its peer group's description or local-as came
+// up with the group's, and the config file it was started from said otherwise.
+// Pinned end to end, because neither half is wrong on its own.
+func TestTOMLNeighborOverrideSurvivesTheSecondInheritancePass(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	pg := &oc.PeerGroup{}
+	pg.Config.PeerGroupName = "edge"
+	pg.Config.PeerAs = 65001
+	pg.Config.Description = "Spine fabric"
+	pg.Config.LocalAs = 65001
+
+	n := &oc.Neighbor{}
+	n.Config.NeighborAddress = netip.MustParseAddr("198.51.100.42")
+	n.Config.PeerGroup = "edge"
+	n.Config.PeerAs = 65001
+	n.Config.Description = "TOML override"
+	n.Config.LocalAs = 65002
+
+	// What the TOML loader registers: the decoded map for this neighbor, whose
+	// "config" level is flat.
+	key := oc.NeighborPresenceKey(n)
+	oc.RegisterConfiguredFields(key, map[string]any{"config": map[string]any{
+		"description": true,
+		"local-as":    true,
+	}})
+	t.Cleanup(func() { oc.UnregisterConfiguredFields(key) })
+
+	require.NoError(t, oc.SetDefaultNeighborConfigValues(n, pg, &oc.Global{}))
+	require.Equal(t, "TOML override", n.Config.Description, "the config read itself was never wrong")
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{
+		PeerGroup: oc.NewPeerGroupFromConfigStruct(pg),
+	}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{
+		Peer: oc.NewPeerFromConfigStruct(n),
+	}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	assert.Equal(t, "TOML override", got.Conf.GetDescription(),
+		"the peer group overwrote a value the configuration file set explicitly")
+	assert.EqualValues(t, 65002, got.Conf.GetLocalAsn())
 }
