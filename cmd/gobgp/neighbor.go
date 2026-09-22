@@ -316,7 +316,7 @@ func showNeighbor(args []string) error {
 	if as := p.Conf.GetAllowOwnAsn(); as > 0 {
 		elems = append(elems, fmt.Sprintf("Allow Own AS: %d", as))
 	}
-	switch p.Conf.RemovePrivate {
+	switch p.Conf.GetRemovePrivate() {
 	case api.RemovePrivate_REMOVE_PRIVATE_ALL:
 		elems = append(elems, "Remove private AS: all")
 	case api.RemovePrivate_REMOVE_PRIVATE_REPLACE:
@@ -1417,7 +1417,7 @@ func modNeighbor(cmdType string, args []string) error {
 			if err != nil {
 				return err
 			}
-			peer.Conf.LocalAsn = uint32(as)
+			peer.Conf.LocalAsn = proto.Uint32(uint32(as))
 		}
 		if len(m["family"]) == 1 {
 			peer.AfiSafis = make([]*api.AfiSafi, 0) // for the case of cmdUpdate
@@ -1451,9 +1451,9 @@ func modNeighbor(cmdType string, args []string) error {
 		if option, ok := m["remove-private-as"]; ok {
 			switch option[0] {
 			case "all":
-				peer.Conf.RemovePrivate = api.RemovePrivate_REMOVE_PRIVATE_ALL
+				peer.Conf.RemovePrivate = api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum()
 			case "replace":
-				peer.Conf.RemovePrivate = api.RemovePrivate_REMOVE_PRIVATE_REPLACE
+				peer.Conf.RemovePrivate = api.RemovePrivate_REMOVE_PRIVATE_REPLACE.Enum()
 			default:
 				return fmt.Errorf("invalid remove-private-as value: all or replace")
 			}

@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"google.golang.org/protobuf/proto"
 	"testing"
 
 	api "github.com/osrg/gobgp/v4/api"
@@ -47,7 +48,7 @@ func TestListPeerRedactsAuthPassword(t *testing.T) {
 		Conf: &api.PeerConf{
 			NeighborAddress: "127.0.0.1",
 			PeerAsn:         2,
-			AuthPassword:    secret,
+			AuthPassword:    proto.String(secret),
 		},
 	}}))
 
@@ -92,7 +93,7 @@ func TestListPeerReportsAuthPasswordSetWithoutLeakingIt(t *testing.T) {
 
 	const secret = "correct-horse-battery-staple"
 	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
-		Conf: &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2, AuthPassword: secret},
+		Conf: &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2, AuthPassword: proto.String(secret)},
 	}}))
 	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
 		Conf: &api.PeerConf{NeighborAddress: "127.0.0.2", PeerAsn: 3},

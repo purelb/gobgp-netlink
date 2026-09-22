@@ -40,6 +40,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/internal/pkg/netutils"
@@ -4118,7 +4119,7 @@ func (s *BgpServer) ListPeer(ctx context.Context, r *api.ListPeerRequest, fn fun
 			// AddPeer requests and grpc_server reads Conf.AuthPassword back out,
 			// so stripping it there leaves TOML sessions up but unauthenticated.
 			if p.Conf != nil {
-				p.Conf.AuthPassword = ""
+				p.Conf.AuthPassword = proto.String("")
 			}
 			for _, family := range peer.configuredRFlist() {
 				for i, afisafi := range p.AfiSafis {

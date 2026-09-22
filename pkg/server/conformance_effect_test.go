@@ -218,7 +218,7 @@ func TestEffectSendCommunityUnsetSendsEverything(t *testing.T) {
 func TestEffectRemovePrivateAs(t *testing.T) {
 	const prefix = "10.62.0.0/24"
 	a, b := effectPeers(t, 10621, &api.PeerConf{
-		RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL,
+		RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
 	})
 	advertise(t, a, prefix)
 

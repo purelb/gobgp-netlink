@@ -9259,16 +9259,38 @@ func (x *PrefixLimit) GetShutdownThresholdPct() uint32 {
 }
 
 type PeerConf struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	AuthPassword     string                 `protobuf:"bytes,1,opt,name=auth_password,json=authPassword,proto3" json:"auth_password,omitempty"`
-	Description      string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`
-	LocalAsn         uint32                 `protobuf:"varint,3,opt,name=local_asn,json=localAsn,proto3" json:"local_asn,omitempty"`
-	NeighborAddress  string                 `protobuf:"bytes,4,opt,name=neighbor_address,json=neighborAddress,proto3" json:"neighbor_address,omitempty"`
-	PeerAsn          uint32                 `protobuf:"varint,5,opt,name=peer_asn,json=peerAsn,proto3" json:"peer_asn,omitempty"`
-	PeerGroup        string                 `protobuf:"bytes,6,opt,name=peer_group,json=peerGroup,proto3" json:"peer_group,omitempty"`
-	Type             PeerType               `protobuf:"varint,7,opt,name=type,proto3,enum=api.PeerType" json:"type,omitempty"`
-	RemovePrivate    RemovePrivate          `protobuf:"varint,8,opt,name=remove_private,json=removePrivate,proto3,enum=api.RemovePrivate" json:"remove_private,omitempty"`
-	RouteFlapDamping bool                   `protobuf:"varint,9,opt,name=route_flap_damping,json=routeFlapDamping,proto3" json:"route_flap_damping,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// auth_password, description, local_asn, remove_private,
+	// route_flap_damping and send_software_version carry explicit presence for
+	// the reason send_community and the as-path-options fields below do: they
+	// are the NeighborConfig block, peer-group inheritance decides per field
+	// whether a neighbor keeps its own value, and it decides by asking whether
+	// the field was configured. The config file answers that per field. This
+	// message could not, because a bare proto3 scalar cannot tell "unset" from
+	// the zero value - so a grouped neighbor lost its description, local AS,
+	// MD5 password, remove-private-as setting, flap damping and software
+	// version advertisement to the peer group, including to a peer group that
+	// never configured them and supplied zeros.
+	//
+	// Presence is also what makes an explicit opt-out expressible:
+	// route_flap_damping = false against a group that sets it true has no other
+	// way to be said.
+	//
+	// Three fields in this message deliberately do not have presence.
+	// peer_asn is in forcedOverwrittenConfig, so the peer group owns a member's
+	// remote AS unconditionally and presence would be read and then ignored.
+	// type is derived from peer_asn and local_asn after inheritance resolves, so
+	// whatever a client sends is overwritten either way. peer_group itself is
+	// the thing being inherited from.
+	AuthPassword     *string        `protobuf:"bytes,1,opt,name=auth_password,json=authPassword,proto3,oneof" json:"auth_password,omitempty"`
+	Description      *string        `protobuf:"bytes,2,opt,name=description,proto3,oneof" json:"description,omitempty"`
+	LocalAsn         *uint32        `protobuf:"varint,3,opt,name=local_asn,json=localAsn,proto3,oneof" json:"local_asn,omitempty"`
+	NeighborAddress  string         `protobuf:"bytes,4,opt,name=neighbor_address,json=neighborAddress,proto3" json:"neighbor_address,omitempty"`
+	PeerAsn          uint32         `protobuf:"varint,5,opt,name=peer_asn,json=peerAsn,proto3" json:"peer_asn,omitempty"`
+	PeerGroup        string         `protobuf:"bytes,6,opt,name=peer_group,json=peerGroup,proto3" json:"peer_group,omitempty"`
+	Type             PeerType       `protobuf:"varint,7,opt,name=type,proto3,enum=api.PeerType" json:"type,omitempty"`
+	RemovePrivate    *RemovePrivate `protobuf:"varint,8,opt,name=remove_private,json=removePrivate,proto3,enum=api.RemovePrivate,oneof" json:"remove_private,omitempty"`
+	RouteFlapDamping *bool          `protobuf:"varint,9,opt,name=route_flap_damping,json=routeFlapDamping,proto3,oneof" json:"route_flap_damping,omitempty"`
 	// Which community types to send to this peer: standard=0, extended=1,
 	// both=2, none=3. Not a bitmask, and there is no "large" or "all".
 	//
@@ -9301,7 +9323,7 @@ type PeerConf struct {
 	AllowOwnAsn          *uint32 `protobuf:"varint,13,opt,name=allow_own_asn,json=allowOwnAsn,proto3,oneof" json:"allow_own_asn,omitempty"`
 	ReplacePeerAsn       *bool   `protobuf:"varint,14,opt,name=replace_peer_asn,json=replacePeerAsn,proto3,oneof" json:"replace_peer_asn,omitempty"`
 	AdminDown            bool    `protobuf:"varint,15,opt,name=admin_down,json=adminDown,proto3" json:"admin_down,omitempty"`
-	SendSoftwareVersion  bool    `protobuf:"varint,16,opt,name=send_software_version,json=sendSoftwareVersion,proto3" json:"send_software_version,omitempty"`
+	SendSoftwareVersion  *bool   `protobuf:"varint,16,opt,name=send_software_version,json=sendSoftwareVersion,proto3,oneof" json:"send_software_version,omitempty"`
 	AllowAspathLoopLocal *bool   `protobuf:"varint,17,opt,name=allow_aspath_loop_local,json=allowAspathLoopLocal,proto3,oneof" json:"allow_aspath_loop_local,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
@@ -9338,22 +9360,22 @@ func (*PeerConf) Descriptor() ([]byte, []int) {
 }
 
 func (x *PeerConf) GetAuthPassword() string {
-	if x != nil {
-		return x.AuthPassword
+	if x != nil && x.AuthPassword != nil {
+		return *x.AuthPassword
 	}
 	return ""
 }
 
 func (x *PeerConf) GetDescription() string {
-	if x != nil {
-		return x.Description
+	if x != nil && x.Description != nil {
+		return *x.Description
 	}
 	return ""
 }
 
 func (x *PeerConf) GetLocalAsn() uint32 {
-	if x != nil {
-		return x.LocalAsn
+	if x != nil && x.LocalAsn != nil {
+		return *x.LocalAsn
 	}
 	return 0
 }
@@ -9387,15 +9409,15 @@ func (x *PeerConf) GetType() PeerType {
 }
 
 func (x *PeerConf) GetRemovePrivate() RemovePrivate {
-	if x != nil {
-		return x.RemovePrivate
+	if x != nil && x.RemovePrivate != nil {
+		return *x.RemovePrivate
 	}
 	return RemovePrivate_REMOVE_PRIVATE_UNSPECIFIED
 }
 
 func (x *PeerConf) GetRouteFlapDamping() bool {
-	if x != nil {
-		return x.RouteFlapDamping
+	if x != nil && x.RouteFlapDamping != nil {
+		return *x.RouteFlapDamping
 	}
 	return false
 }
@@ -9443,8 +9465,8 @@ func (x *PeerConf) GetAdminDown() bool {
 }
 
 func (x *PeerConf) GetSendSoftwareVersion() bool {
-	if x != nil {
-		return x.SendSoftwareVersion
+	if x != nil && x.SendSoftwareVersion != nil {
+		return *x.SendSoftwareVersion
 	}
 	return false
 }
@@ -16716,31 +16738,38 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\vPrefixLimit\x12#\n" +
 	"\x06family\x18\x01 \x01(\v2\v.api.FamilyR\x06family\x12!\n" +
 	"\fmax_prefixes\x18\x02 \x01(\rR\vmaxPrefixes\x124\n" +
-	"\x16shutdown_threshold_pct\x18\x03 \x01(\rR\x14shutdownThresholdPct\"\x89\x06\n" +
-	"\bPeerConf\x12#\n" +
-	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +
-	"\vdescription\x18\x02 \x01(\tR\vdescription\x12\x1b\n" +
-	"\tlocal_asn\x18\x03 \x01(\rR\blocalAsn\x12)\n" +
+	"\x16shutdown_threshold_pct\x18\x03 \x01(\rR\x14shutdownThresholdPct\"\x9b\a\n" +
+	"\bPeerConf\x12(\n" +
+	"\rauth_password\x18\x01 \x01(\tH\x00R\fauthPassword\x88\x01\x01\x12%\n" +
+	"\vdescription\x18\x02 \x01(\tH\x01R\vdescription\x88\x01\x01\x12 \n" +
+	"\tlocal_asn\x18\x03 \x01(\rH\x02R\blocalAsn\x88\x01\x01\x12)\n" +
 	"\x10neighbor_address\x18\x04 \x01(\tR\x0fneighborAddress\x12\x19\n" +
 	"\bpeer_asn\x18\x05 \x01(\rR\apeerAsn\x12\x1d\n" +
 	"\n" +
 	"peer_group\x18\x06 \x01(\tR\tpeerGroup\x12!\n" +
-	"\x04type\x18\a \x01(\x0e2\r.api.PeerTypeR\x04type\x129\n" +
-	"\x0eremove_private\x18\b \x01(\x0e2\x12.api.RemovePrivateR\rremovePrivate\x12,\n" +
-	"\x12route_flap_damping\x18\t \x01(\bR\x10routeFlapDamping\x12*\n" +
+	"\x04type\x18\a \x01(\x0e2\r.api.PeerTypeR\x04type\x12>\n" +
+	"\x0eremove_private\x18\b \x01(\x0e2\x12.api.RemovePrivateH\x03R\rremovePrivate\x88\x01\x01\x121\n" +
+	"\x12route_flap_damping\x18\t \x01(\bH\x04R\x10routeFlapDamping\x88\x01\x01\x12*\n" +
 	"\x0esend_community\x18\n" +
-	" \x01(\rH\x00R\rsendCommunity\x88\x01\x01\x12-\n" +
+	" \x01(\rH\x05R\rsendCommunity\x88\x01\x01\x12-\n" +
 	"\x12neighbor_interface\x18\v \x01(\tR\x11neighborInterface\x12\x10\n" +
 	"\x03vrf\x18\f \x01(\tR\x03vrf\x12'\n" +
-	"\rallow_own_asn\x18\r \x01(\rH\x01R\vallowOwnAsn\x88\x01\x01\x12-\n" +
-	"\x10replace_peer_asn\x18\x0e \x01(\bH\x02R\x0ereplacePeerAsn\x88\x01\x01\x12\x1d\n" +
+	"\rallow_own_asn\x18\r \x01(\rH\x06R\vallowOwnAsn\x88\x01\x01\x12-\n" +
+	"\x10replace_peer_asn\x18\x0e \x01(\bH\aR\x0ereplacePeerAsn\x88\x01\x01\x12\x1d\n" +
 	"\n" +
-	"admin_down\x18\x0f \x01(\bR\tadminDown\x122\n" +
-	"\x15send_software_version\x18\x10 \x01(\bR\x13sendSoftwareVersion\x12:\n" +
-	"\x17allow_aspath_loop_local\x18\x11 \x01(\bH\x03R\x14allowAspathLoopLocal\x88\x01\x01B\x11\n" +
+	"admin_down\x18\x0f \x01(\bR\tadminDown\x127\n" +
+	"\x15send_software_version\x18\x10 \x01(\bH\bR\x13sendSoftwareVersion\x88\x01\x01\x12:\n" +
+	"\x17allow_aspath_loop_local\x18\x11 \x01(\bH\tR\x14allowAspathLoopLocal\x88\x01\x01B\x10\n" +
+	"\x0e_auth_passwordB\x0e\n" +
+	"\f_descriptionB\f\n" +
+	"\n" +
+	"_local_asnB\x11\n" +
+	"\x0f_remove_privateB\x15\n" +
+	"\x13_route_flap_dampingB\x11\n" +
 	"\x0f_send_communityB\x10\n" +
 	"\x0e_allow_own_asnB\x13\n" +
-	"\x11_replace_peer_asnB\x1a\n" +
+	"\x11_replace_peer_asnB\x18\n" +
+	"\x16_send_software_versionB\x1a\n" +
 	"\x18_allow_aspath_loop_local\"\xba\x04\n" +
 	"\rPeerGroupConf\x12#\n" +
 	"\rauth_password\x18\x01 \x01(\tR\fauthPassword\x12 \n" +

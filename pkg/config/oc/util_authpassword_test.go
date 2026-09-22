@@ -38,14 +38,14 @@ func TestConfigStructConvertersKeepAuthPassword(t *testing.T) {
 	n.Config.NeighborAddress = netip.MustParseAddr("10.0.0.1")
 	n.Config.PeerAs = 65001
 	n.Config.AuthPassword = secret
-	assert.Equal(t, secret, NewPeerFromConfigStruct(n).Conf.AuthPassword,
+	assert.Equal(t, secret, NewPeerFromConfigStruct(n).Conf.GetAuthPassword(),
 		"InitialConfig feeds this into AddPeer; redacting here disables MD5")
 
 	pg := &PeerGroup{}
 	pg.Config.PeerGroupName = "g1"
 	pg.Config.PeerAs = 65001
 	pg.Config.AuthPassword = secret
-	assert.Equal(t, secret, NewPeerGroupFromConfigStruct(pg).Conf.AuthPassword,
+	assert.Equal(t, secret, NewPeerGroupFromConfigStruct(pg).Conf.GetAuthPassword(),
 		"InitialConfig feeds this into AddPeerGroup; redacting here disables MD5")
 }
 

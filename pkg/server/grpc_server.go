@@ -37,6 +37,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	tspb "google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/osrg/gobgp/v4/api"
@@ -545,7 +546,7 @@ func (s *server) watchEvent(ctx context.Context, r *api.WatchEventRequest, fn fu
 						Peer: &api.Peer{
 							Conf: &api.PeerConf{
 								PeerAsn:           p.Conf.PeerASN,
-								LocalAsn:          p.Conf.LocalASN,
+								LocalAsn:          proto.Uint32(p.Conf.LocalASN),
 								NeighborAddress:   p.Conf.NeighborAddress.String(),
 								NeighborInterface: p.Conf.NeighborInterface,
 								PeerGroup:         p.Conf.PeerGroup,
@@ -1295,11 +1296,11 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	if a.Conf != nil {
 		var err error
 		pconf.Config.PeerAs = a.Conf.PeerAsn
-		pconf.Config.LocalAs = a.Conf.LocalAsn
-		pconf.Config.AuthPassword = a.Conf.AuthPassword
-		pconf.Config.RouteFlapDamping = a.Conf.RouteFlapDamping
+		pconf.Config.LocalAs = a.Conf.GetLocalAsn()
+		pconf.Config.AuthPassword = a.Conf.GetAuthPassword()
+		pconf.Config.RouteFlapDamping = a.Conf.GetRouteFlapDamping()
 		pconf.Config.SendCommunity = oc.SendCommunityFromAPI(a.Conf.SendCommunity)
-		pconf.Config.Description = a.Conf.Description
+		pconf.Config.Description = a.Conf.GetDescription()
 		pconf.Config.PeerGroup = a.Conf.PeerGroup
 		pconf.Config.PeerType, err = PeerTypeFromApi(a.Conf.Type)
 		if err != nil {
@@ -1322,9 +1323,9 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.GetAllowOwnAsn())
 		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.GetReplacePeerAsn()
 		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.GetAllowAspathLoopLocal()
-		pconf.Config.SendSoftwareVersion = a.Conf.SendSoftwareVersion
+		pconf.Config.SendSoftwareVersion = a.Conf.GetSendSoftwareVersion()
 
-		switch a.Conf.RemovePrivate {
+		switch a.Conf.GetRemovePrivate() {
 		case api.RemovePrivate_REMOVE_PRIVATE_ALL:
 			pconf.Config.RemovePrivateAs = oc.REMOVE_PRIVATE_AS_OPTION_ALL
 		case api.RemovePrivate_REMOVE_PRIVATE_REPLACE:
