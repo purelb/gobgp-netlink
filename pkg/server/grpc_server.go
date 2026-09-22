@@ -1187,7 +1187,8 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 }
 
 // neighborPresenceBlocks maps each configuration block that peer-group
-// inheritance can overwrite to the test for whether this request carried it.
+// inheritance can overwrite to the presence this request recorded for it, or
+// nil when the request did not carry the block.
 //
 // A table rather than a run of if-statements so that it can be checked against
 // the set of blocks OverwriteNeighborConfigWithPeerGroup actually touches. That
@@ -1195,36 +1196,93 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 // release, and a grouped neighbor's allow-own-as, replace-peer-as and
 // allow-aspath-loop-local were silently replaced by the group's zeros - the
 // graceful-restart defect again, in a block nobody had thought to look at.
-var neighborPresenceBlocks = map[string]func(*api.Peer) bool{
-	"timers":           func(a *api.Peer) bool { return a.Timers != nil },
-	"transport":        func(a *api.Peer) bool { return a.Transport != nil },
-	"ebgp-multihop":    func(a *api.Peer) bool { return a.EbgpMultihop != nil },
-	"route-reflector":  func(a *api.Peer) bool { return a.RouteReflector != nil },
-	"route-server":     func(a *api.Peer) bool { return a.RouteServer != nil },
-	"graceful-restart": func(a *api.Peer) bool { return a.GracefulRestart != nil },
-	"ttl-security":     func(a *api.Peer) bool { return a.TtlSecurity != nil },
-	"bfd":              func(a *api.Peer) bool { return a.Bfd != nil },
-	"apply-policy":     func(a *api.Peer) bool { return a.ApplyPolicy != nil },
+//
+// Each entry returns the presence value rather than a bool so that the block's
+// zero-valued config struct is written beside the test that needs it. It used
+// to live in a second switch keyed by the same names, which returned nil for a
+// block it did not know - and MarkBlockConfigured panics on nil. Two lists that
+// had to agree, with nothing making them.
+var neighborPresenceBlocks = map[string]func(*api.Peer) map[string]any{
+	"timers": func(a *api.Peer) map[string]any {
+		if a.Timers == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.TimersConfig{})
+	},
+	"transport": func(a *api.Peer) map[string]any {
+		if a.Transport == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.TransportConfig{})
+	},
+	"ebgp-multihop": func(a *api.Peer) map[string]any {
+		if a.EbgpMultihop == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.EbgpMultihopConfig{})
+	},
+	"route-reflector": func(a *api.Peer) map[string]any {
+		if a.RouteReflector == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.RouteReflectorConfig{})
+	},
+	"route-server": func(a *api.Peer) map[string]any {
+		if a.RouteServer == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.RouteServerConfig{})
+	},
+	"graceful-restart": func(a *api.Peer) map[string]any {
+		if a.GracefulRestart == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.GracefulRestartConfig{})
+	},
+	"ttl-security": func(a *api.Peer) map[string]any {
+		if a.TtlSecurity == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.TtlSecurityConfig{})
+	},
+	"bfd": func(a *api.Peer) map[string]any {
+		if a.Bfd == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.BfdConfig{})
+	},
+	"apply-policy": func(a *api.Peer) map[string]any {
+		if a.ApplyPolicy == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.ApplyPolicyConfig{})
+	},
 
 	// The one block that is not a sub-message. Its three fields live on
 	// api.PeerConf, which clients send on every request, so "the block was
 	// sent" is meaningless here and the fields carry explicit presence
 	// individually instead. Any one of them being present means the client is
 	// stating its as-path options, and the peer group does not override them.
-	"as-path-options": func(a *api.Peer) bool {
-		return a.Conf != nil && (a.Conf.AllowOwnAsn != nil ||
-			a.Conf.ReplacePeerAsn != nil ||
-			a.Conf.AllowAspathLoopLocal != nil)
+	"as-path-options": func(a *api.Peer) map[string]any {
+		if a.Conf == nil || (a.Conf.AllowOwnAsn == nil &&
+			a.Conf.ReplacePeerAsn == nil &&
+			a.Conf.AllowAspathLoopLocal == nil) {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.AsPathOptionsConfig{})
 	},
 
 	// The NeighborConfig block. Like as-path-options it is not a sub-message,
 	// but unlike it the answer is not all-or-nothing: api.PeerConf carries the
 	// peer group name, so every request has one and "the block was sent" would
 	// mean no NeighborConfig field ever inherits. Presence is therefore taken
-	// per field, from neighborConfigFieldPresence below, and this predicate
-	// only decides whether there is anything to record at all.
-	"config": func(a *api.Peer) bool { return len(configFieldsPresent(a)) > 0 },
+	// per field, and flat - see configFieldsPresent.
+	configBlock: configFieldsPresent,
 }
+
+// configBlock is the NeighborConfig block's name, shared by the tables above
+// and the per-field ones below.
+const configBlock = "config"
 
 // neighborConfigFieldPresence is the per-field half of the "config" block,
 // keyed by the mapstructure tag overwriteConfig builds its viper key from.
@@ -1315,49 +1373,15 @@ func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 		return
 	}
 	presence := map[string]any{}
-	for block, sent := range neighborPresenceBlocks {
-		if !sent(a) {
-			continue
+	for block, presenceOf := range neighborPresenceBlocks {
+		if v := presenceOf(a); len(v) > 0 {
+			presence[block] = v
 		}
-		if block == "config" {
-			// Per field, and flat - see configFieldsPresent.
-			presence[block] = configFieldsPresent(a)
-			continue
-		}
-		presence[block] = oc.MarkBlockConfigured(blockConfigZero(block))
 	}
 	if len(presence) == 0 {
 		return
 	}
 	oc.RegisterConfiguredFields(key, presence)
-}
-
-// blockConfigZero returns a zero value of the oc config struct for a block, so
-// MarkBlockConfigured can read its mapstructure tags.
-func blockConfigZero(block string) any {
-	switch block {
-	case "timers":
-		return oc.TimersConfig{}
-	case "transport":
-		return oc.TransportConfig{}
-	case "ebgp-multihop":
-		return oc.EbgpMultihopConfig{}
-	case "route-reflector":
-		return oc.RouteReflectorConfig{}
-	case "route-server":
-		return oc.RouteServerConfig{}
-	case "graceful-restart":
-		return oc.GracefulRestartConfig{}
-	case "ttl-security":
-		return oc.TtlSecurityConfig{}
-	case "bfd":
-		return oc.BfdConfig{}
-	case "apply-policy":
-		return oc.ApplyPolicyConfig{}
-	case "as-path-options":
-		return oc.AsPathOptionsConfig{}
-	}
-	return nil
 }
 
 func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
