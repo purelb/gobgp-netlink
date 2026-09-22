@@ -2575,7 +2575,7 @@ func (s *BgpServer) StopBgp(ctx context.Context, r *api.StopBgpRequest) error {
 				NeighborAddress: address,
 			}}
 			sendNotification := !r.AllowGracefulRestart || !neighbor.isGracefulRestartEnabled()
-			if err := s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, sendNotification); err != nil {
+			if err := s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, sendNotification, false); err != nil {
 				return err
 			}
 		}
@@ -4501,7 +4501,12 @@ func (s *BgpServer) deletePeerGroup(name string) error {
 	return nil
 }
 
-func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNotification bool) error {
+// keepPresence distinguishes the two reasons this is called. Deleting a peer
+// means its configuration is gone and the field-presence recorded for it must
+// go too. Rebuilding a session during an update does not: the configuration
+// stays, and addNeighbor resolves it again on the way back in, so dropping
+// presence here hands the peer group every field the member owned.
+func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNotification, keepPresence bool) error {
 	if c.Config.PeerGroup != "" {
 		_, y := s.peerGroupMap[c.Config.PeerGroup]
 		if y {
@@ -4567,7 +4572,11 @@ func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNoti
 	// map before, so a peer deleted and re-added over the API inherited the
 	// presence of whatever TOML neighbor last held its address, and the peer
 	// group then lost fields it should have supplied.
-	oc.UnregisterConfiguredFields(addr)
+	//
+	// Not when this is the teardown half of an update: see keepPresence.
+	if !keepPresence {
+		oc.UnregisterConfiguredFields(addr)
+	}
 	return nil
 }
 
@@ -4613,7 +4622,7 @@ func (s *BgpServer) DeletePeer(ctx context.Context, r *api.DeletePeerRequest) er
 			NeighborAddress:   addr,
 			NeighborInterface: r.Interface,
 		}}
-		return s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, true)
+		return s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, true, false)
 	}, true)
 }
 
@@ -4766,7 +4775,7 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 		peer.fsm.pConf.Update(&conf)
 		peer.fsm.lock.Unlock()
 
-		if err = s.deleteNeighbor(&conf, bgp.BGP_ERROR_CEASE, sub, true); err != nil {
+		if err = s.deleteNeighbor(&conf, bgp.BGP_ERROR_CEASE, sub, true, true); err != nil {
 			// rollback to original ApplyPolicy
 			peer.fsm.pConf.Update(original)
 

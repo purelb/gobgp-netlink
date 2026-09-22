@@ -937,3 +937,96 @@ func TestPeerGroupDescriptionChangeDoesNotResetMembers(t *testing.T) {
 			"the inherited description still has to be applied, not merely not-reset")
 	}))
 }
+
+// A session reset must not cost a grouped neighbor the settings it owns.
+//
+// updateNeighbor rebuilds the session for any change that reaches the OPEN
+// message, and it does that by calling deleteNeighbor and addNeighbor.
+// deleteNeighbor drops the field-presence recorded for the neighbor - correct
+// when a peer is genuinely being deleted, so a later peer reusing the address
+// does not inherit it - and addNeighbor then resolves the configuration again.
+// With the presence already gone, that second resolve handed the peer group
+// every field the member owned: its MD5 key, its local AS, graceful restart,
+// ebgp-multihop, passive mode.
+//
+// It did not self-heal, because every attempt to put the value back is itself
+// a change that resets the session. And through updatePeerGroup one edit does
+// it to every member of the group at once.
+//
+// v1.3.3 survived this by accident: SetDefaultNeighborConfigValues skipped any
+// neighbor it had already resolved, so addNeighbor's second resolve did
+// nothing. Removing that short-circuit is what makes peer-group edits reach
+// existing members, and it is what exposed this - the presence has to be kept
+// deliberately now rather than protected by a guard that also broke
+// propagation.
+func TestSessionResetKeepsTheFieldsAMemberOwns(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const addr = "198.51.100.120"
+
+	// A group that sets its own values for everything the member overrides, so
+	// "the member kept its own" and "the group had nothing to give" cannot be
+	// confused.
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:            &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, AuthPassword: "grouppw"},
+		GracefulRestart: &api.GracefulRestart{Enabled: false},
+		EbgpMultihop:    &api.EbgpMultihop{Enabled: false},
+		Transport:       &api.Transport{PassiveMode: false},
+	}}))
+
+	member := func(localAs uint32) *api.Peer {
+		return &api.Peer{
+			Conf: &api.PeerConf{
+				NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+				AuthPassword: proto.String("memberpw"),
+				LocalAsn:     proto.Uint32(localAs),
+			},
+			GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120},
+			EbgpMultihop:    &api.EbgpMultihop{Enabled: true, MultihopTtl: 5},
+			Transport:       &api.Transport{PassiveMode: true},
+		}
+	}
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: member(65042)}))
+
+	// Read the resolved configuration the FSM holds. ListPeer blanks the
+	// password on the way out, and the password is the setting whose loss is
+	// worst: the session stays up, unauthenticated or authenticated with a key
+	// the operator did not choose.
+	type owned struct {
+		authPassword string
+		localAs      uint32
+		gr           bool
+		multihop     bool
+		multihopTTL  uint8
+		passive      bool
+	}
+	read := func(t *testing.T) owned {
+		t.Helper()
+		var got owned
+		require.NoError(t, s.mgmtOperation(func() error {
+			c := s.neighborMap[netip.MustParseAddr(addr)].fsm.pConf.ReadOnly()
+			got = owned{
+				authPassword: c.Config.AuthPassword,
+				localAs:      c.Config.LocalAs,
+				gr:           c.GracefulRestart.Config.Enabled,
+				multihop:     c.EbgpMultihop.Config.Enabled,
+				multihopTTL:  c.EbgpMultihop.Config.MultihopTtl,
+				passive:      c.Transport.Config.PassiveMode,
+			}
+			return nil
+		}, false))
+		return got
+	}
+
+	require.Equal(t, owned{"memberpw", 65042, true, true, 5, true}, read(t),
+		"the member's own settings at AddPeer")
+
+	// Change local-as. It is carried in this speaker's OPEN, so the session is
+	// rebuilt - which is the path under test, not the change itself.
+	p := member(65043)
+	_, err := s.UpdatePeer(ctx, &api.UpdatePeerRequest{Peer: p})
+	require.NoError(t, err)
+
+	assert.Equal(t, owned{"memberpw", 65043, true, true, 5, true}, read(t),
+		"rebuilding the session handed the peer group the fields this member owns")
+}
