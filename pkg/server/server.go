@@ -4808,6 +4808,26 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 	if err == nil {
 		peer.fsm.pConf.Update(&conf)
 		peer.fsm.lock.Unlock()
+
+		// The peer group keeps a copy of each member's resolved configuration
+		// and updatePeerGroup re-resolves every member from it. Only
+		// addNeighbor refreshed that copy, and this path deliberately does not
+		// go through addNeighbor - that is what "no session reset" means here.
+		//
+		// So everything applied on this path - send-community, timers, BFD,
+		// apply-policy - stayed stale in the member copy, and the next touch of
+		// the peer group re-resolved from it and silently put the old value
+		// back. Measured: send-community standard -> both -> standard, and
+		// hold-time 90 -> 180 -> 90, with no error and no log.
+		//
+		// conf rather than c: conf is what the FSM now holds. c carries fields
+		// that were accepted but not applied on this path, and a member copy
+		// claiming those would be a different lie in the same place.
+		if name := conf.Config.PeerGroup; name != "" {
+			if pg, ok := s.peerGroupMap[name]; ok {
+				pg.AddMember(conf)
+			}
+		}
 		// Already-advertised routes were filtered under the old setting, so they
 		// have to be re-sent. Must run after the Unlock above - softResetOut
 		// reaches back into the peer.

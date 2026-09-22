@@ -619,3 +619,89 @@ func TestTOMLNeighborOverrideSurvivesTheSecondInheritancePass(t *testing.T) {
 		"the peer group overwrote a value the configuration file set explicitly")
 	assert.EqualValues(t, 65002, got.Conf.GetLocalAsn())
 }
+
+// A peer group keeps a copy of each member's resolved configuration, and
+// updatePeerGroup re-resolves every member from that copy when the group
+// changes. Only addNeighbor ever refreshed it.
+//
+// So any field that reaches a live peer without a session reset - everything
+// outside NeedsResendOpenMessage: send-community, timers, BFD, apply-policy -
+// was applied to the FSM and left stale in the member copy. The next touch of
+// the peer group, for any reason at all, re-resolved from the stale copy and
+// silently put the old value back:
+//
+//	AddPeer(send-community standard) -> UpdatePeer(both) -> UpdatePeerGroup()
+//	  reports standard again, with no error and no log
+//
+// The one field gobgp had already excluded from a session reset was the one
+// field that silently reverted. Measured the same way for hold-time, so this
+// is not specific to send-community - it is every field on that path.
+func TestUpdatesSurviveALaterPeerGroupUpdate(t *testing.T) {
+	setup := func(t *testing.T, addr string, peer *api.Peer) *BgpServer {
+		t.Helper()
+		s := newPanicTestServer(t)
+		ctx := context.Background()
+		require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+			Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+		}}))
+		require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: peer}))
+		return s
+	}
+	// Touch the peer group for an unrelated reason. Nothing here concerns the
+	// member's own settings.
+	touchGroup := func(t *testing.T, s *BgpServer) {
+		t.Helper()
+		_, err := s.UpdatePeerGroup(context.Background(), &api.UpdatePeerGroupRequest{
+			PeerGroup: &api.PeerGroup{Conf: &api.PeerGroupConf{
+				PeerGroupName: "edge", PeerAsn: 65001, Description: "unrelated edit",
+			}},
+		})
+		require.NoError(t, err)
+	}
+	read := func(t *testing.T, s *BgpServer) *api.Peer {
+		t.Helper()
+		var got *api.Peer
+		require.NoError(t, s.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(p *api.Peer) { got = p }))
+		require.NotNil(t, got)
+		return got
+	}
+
+	t.Run("send-community", func(t *testing.T) {
+		const addr = "198.51.100.43"
+		conf := func(sc uint32) *api.PeerConf {
+			return &api.PeerConf{
+				NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+				SendCommunity: proto.Uint32(sc),
+			}
+		}
+		s := setup(t, addr, &api.Peer{Conf: conf(0)}) // standard
+		_, err := s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{
+			Peer: &api.Peer{Conf: conf(2)}, // both
+		})
+		require.NoError(t, err)
+		require.EqualValues(t, 2, read(t, s).Conf.GetSendCommunity(), "the update must apply")
+
+		touchGroup(t, s)
+		assert.EqualValues(t, 2, read(t, s).Conf.GetSendCommunity(),
+			"touching the peer group reverted send-community to its AddPeer value")
+	})
+
+	t.Run("timers", func(t *testing.T) {
+		const addr = "198.51.100.44"
+		peer := func(hold uint64) *api.Peer {
+			return &api.Peer{
+				Conf:   &api.PeerConf{NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge"},
+				Timers: &api.Timers{Config: &api.TimersConfig{HoldTime: hold, KeepaliveInterval: hold / 3}},
+			}
+		}
+		s := setup(t, addr, peer(90))
+		_, err := s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: peer(180)})
+		require.NoError(t, err)
+		require.EqualValues(t, 180, read(t, s).Timers.Config.HoldTime, "the update must apply")
+
+		touchGroup(t, s)
+		assert.EqualValues(t, 180, read(t, s).Timers.Config.HoldTime,
+			"touching the peer group reverted hold-time to its AddPeer value")
+	})
+}
