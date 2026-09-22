@@ -229,17 +229,32 @@ func isAfiSafiChanged(x, y []AfiSafi) bool {
 }
 
 func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
-	// send-community is an egress attribute filter. It has no bearing on the
-	// OPEN message, so changing it must not tear the session down - the caller
-	// applies it in place and soft-resets out instead. Before this carve-out,
-	// first-time adoption of the setting flapped every session, which for a
-	// service-VIP DaemonSet means traffic loss on every node.
+	// Three fields have no bearing on the OPEN message, so changing one must
+	// not tear the session down - updateNeighbor applies them in place, and
+	// soft-resets out where already-advertised routes were built under the old
+	// setting. Before the first of these carve-outs, adopting send-community
+	// flapped every session, which for a service-VIP DaemonSet means traffic
+	// loss on every node. Through updatePeerGroup one edit to a group does it
+	// to every member at once.
 	//
-	// Neutralise the field on copies rather than enumerating the ones that do
+	//   send-community    an egress attribute filter, applied per advertisement
+	//   remove-private-as an egress AS_PATH rewrite, likewise
+	//   description       copied to State and reported; never on the wire
+	//
+	// Everything else here does reach the wire or the socket and still resets:
+	// peer-as is validated against the peer's OPEN, local-as is carried in
+	// ours, auth-password is a TCP-MD5 socket option, send-software-version
+	// emits a capability. route-flap-damping is read by nothing in this tree
+	// and so resets for no benefit, but it is left alone deliberately - a
+	// carve-out would have to be revisited the day damping is implemented.
+	//
+	// Neutralise the fields on copies rather than enumerating the ones that do
 	// matter: NeighborConfig is generated, so a field added by a future
 	// regeneration must keep triggering a reset by default.
 	lhs, rhs := n.Config, new.Config
 	lhs.SendCommunity, rhs.SendCommunity = "", ""
+	lhs.Description, rhs.Description = "", ""
+	lhs.RemovePrivateAs, rhs.RemovePrivateAs = "", ""
 
 	return !lhs.Equal(&rhs) ||
 		!n.Transport.Config.Equal(&new.Transport.Config) ||

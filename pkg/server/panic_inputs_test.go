@@ -792,3 +792,148 @@ func TestPeerGroupChangesReachExistingMembers(t *testing.T) {
 	assert.Equal(t, resolved{"mine", 30, 42}, after[owns],
 		"a member that stated its own settings must not lose them when the group changes")
 }
+
+// A change to a field that never reaches the OPEN message must apply without
+// dropping the session, and a change that does reach it must still drop it.
+//
+// The reset path deletes and re-adds the neighbor, which constructs a fresh
+// *peer, so pointer identity is the direct observable for "was this session
+// rebuilt". Read through mgmtOperation because neighborMap belongs to the
+// Serve goroutine.
+func TestCarvedOutFieldsApplyWithoutResettingTheSession(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const addr = "198.51.100.45"
+
+	identity := func(t *testing.T) *peer {
+		t.Helper()
+		var p *peer
+		require.NoError(t, s.mgmtOperation(func() error {
+			p = s.neighborMap[netip.MustParseAddr(addr)]
+			return nil
+		}, false))
+		require.NotNil(t, p)
+		return p
+	}
+	description := func(t *testing.T) string {
+		t.Helper()
+		var got *api.Peer
+		require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+		require.NotNil(t, got)
+		return got.Conf.GetDescription()
+	}
+	update := func(t *testing.T, conf *api.PeerConf) {
+		t.Helper()
+		_, err := s.UpdatePeer(ctx, &api.UpdatePeerRequest{Peer: &api.Peer{Conf: conf}})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description: proto.String("before"),
+		},
+	}}))
+	before := identity(t)
+	require.Equal(t, "before", description(t))
+
+	t.Run("description alone keeps the session", func(t *testing.T) {
+		update(t, &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description: proto.String("after"),
+		})
+		assert.Same(t, before, identity(t),
+			"a description change tore the session down; it never reaches the wire")
+		assert.Equal(t, "after", description(t),
+			"carved out of the reset means updateNeighbor has to apply it in place")
+	})
+
+	t.Run("remove-private-as alone keeps the session", func(t *testing.T) {
+		// An egress AS_PATH rewrite, applied per advertisement from
+		// State.RemovePrivateAs - so it has to reach State as well as Config,
+		// and already-advertised routes have to be re-sent under the new
+		// setting. eBGP only; SetDefaultNeighborConfigValues rejects it on an
+		// iBGP peer, and this peer is 65000 -> 65001.
+		update(t, &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description:   proto.String("after"),
+			RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+		})
+		assert.Same(t, before, identity(t),
+			"stripping private ASNs changes what is advertised, not what is negotiated")
+
+		var got *api.Peer
+		require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+		require.NotNil(t, got)
+		assert.Equal(t, api.RemovePrivate_REMOVE_PRIVATE_ALL, got.Conf.GetRemovePrivate(),
+			"carved out of the reset means updateNeighbor has to apply it in place")
+	})
+
+	t.Run("a change that reaches the OPEN still resets", func(t *testing.T) {
+		// The control. Without it, a carve-out that swallowed everything would
+		// pass the case above.
+		update(t, &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description:   proto.String("after"),
+			RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+			LocalAsn:      proto.Uint32(65042),
+		})
+		assert.NotSame(t, before, identity(t),
+			"local-as is carried in this speaker's OPEN; the session must be rebuilt")
+	})
+}
+
+// And the same through the peer group, which is where it multiplies: one edit
+// to a group runs updateNeighbor for every member, so before the carve-out
+// renaming a peer group dropped every session under it at once.
+func TestPeerGroupDescriptionChangeDoesNotResetMembers(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	addrs := []string{"198.51.100.46", "198.51.100.47", "198.51.100.48"}
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, Description: "Spine fabric"},
+	}}))
+	for _, a := range addrs {
+		// No description of their own, so they inherit the group's - the shape
+		// where a group edit actually changes the member's resolved config.
+		require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+			Conf: &api.PeerConf{NeighborAddress: a, PeerAsn: 65001, PeerGroup: "edge"},
+		}}))
+	}
+
+	identities := func(t *testing.T) map[string]*peer {
+		t.Helper()
+		out := map[string]*peer{}
+		require.NoError(t, s.mgmtOperation(func() error {
+			for _, a := range addrs {
+				out[a] = s.neighborMap[netip.MustParseAddr(a)]
+			}
+			return nil
+		}, false))
+		return out
+	}
+	before := identities(t)
+	for _, a := range addrs {
+		require.NotNil(t, before[a])
+	}
+
+	_, err := s.UpdatePeerGroup(ctx, &api.UpdatePeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, Description: "Spine fabric (renamed)"},
+	}})
+	require.NoError(t, err)
+
+	after := identities(t)
+	for _, a := range addrs {
+		assert.Same(t, before[a], after[a],
+			"renaming the peer group dropped member %s; a description reaches no peer", a)
+	}
+
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) {
+		assert.Equal(t, "Spine fabric (renamed)", p.Conf.GetDescription(),
+			"the inherited description still has to be applied, not merely not-reset")
+	}))
+}

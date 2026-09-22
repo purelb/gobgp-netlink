@@ -4788,13 +4788,13 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 		conf.Timers.Config = c.Timers.Config
 	}
 
-	// send-community is the only NeighborConfig field excluded from
-	// NeedsResendOpenMessage, and therefore the only one that reaches a live peer
-	// without going through deleteNeighbor/addNeighbor. Nothing else copies
-	// conf.Config from c.Config on this path, so without these two lines the
-	// setting would be accepted and silently never applied. State is what
-	// postFilterpath reads; SetDefaultNeighborConfigValues already validated and
-	// populated it on c near the top of this function.
+	// The NeighborConfig fields excluded from NeedsResendOpenMessage are the
+	// only ones that reach a live peer without going through
+	// deleteNeighbor/addNeighbor. Nothing else copies conf.Config from c.Config
+	// on this path, so without these lines each setting would be accepted and
+	// silently never applied. State is what postFilterpath and the export path
+	// read; SetDefaultNeighborConfigValues already validated and populated it
+	// on c near the top of this function.
 	sendCommunityChanged := original.Config.SendCommunity != c.Config.SendCommunity
 	if sendCommunityChanged {
 		peer.fsm.logger.Info("Update send-community configuration",
@@ -4802,6 +4802,28 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 			slog.String("To", string(c.Config.SendCommunity)))
 		conf.Config.SendCommunity = c.Config.SendCommunity
 		conf.State.SendCommunity = c.State.SendCommunity
+	}
+
+	removePrivateAsChanged := original.Config.RemovePrivateAs != c.Config.RemovePrivateAs
+	if removePrivateAsChanged {
+		peer.fsm.logger.Info("Update remove-private-as configuration",
+			slog.String("From", string(original.Config.RemovePrivateAs)),
+			slog.String("To", string(c.Config.RemovePrivateAs)))
+		conf.Config.RemovePrivateAs = c.Config.RemovePrivateAs
+		// Only populated for eBGP - SetDefaultNeighborConfigValues rejects the
+		// field outright on an iBGP peer - so this copies the empty value there
+		// rather than leaving a stale one.
+		conf.State.RemovePrivateAs = c.State.RemovePrivateAs
+	}
+
+	// No soft reset for this one: the description never reaches the wire, which
+	// is why it is carved out of the session reset in the first place.
+	if original.Config.Description != c.Config.Description {
+		peer.fsm.logger.Info("Update description",
+			slog.String("From", original.Config.Description),
+			slog.String("To", c.Config.Description))
+		conf.Config.Description = c.Config.Description
+		conf.State.Description = c.State.Description
 	}
 
 	isLimit, err := peer.updatePrefixLimitConfig(&conf, c.AfiSafis)
@@ -4828,12 +4850,35 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 				pg.AddMember(conf)
 			}
 		}
-		// Already-advertised routes were filtered under the old setting, so they
-		// have to be re-sent. Must run after the Unlock above - softResetOut
+		// PeerInfo is a snapshot of the peer's configuration taken when the
+		// session reaches ESTABLISHED, and the export path reads
+		// RemovePrivateAs out of it rather than out of the live config - unlike
+		// send-community, which peer.sendCommunity() reads from pConf each
+		// time. Every configuration change used to rebuild the session and so
+		// the snapshot with it; a field excluded from NeedsResendOpenMessage
+		// does not, so without this the setting is accepted, reported by
+		// ListPeer, and has no effect on a single advertisement until the next
+		// time the session happens to flap.
+		//
+		// Before softResetOut below, so the routes it re-sends are built from
+		// the new snapshot rather than the old one.
+		if removePrivateAsChanged && peer.State() == bgp.BGP_FSM_ESTABLISHED {
+			updated := peer.fsm.pConf.ReadOnly()
+			peer.peerInfo.Store(table.NewPeerInfo(peer.fsm.gConf, updated,
+				updated.State.PeerAs, updated.Config.LocalAs,
+				updated.State.RemoteRouterId, peer.fsm.gConf.Config.RouterId,
+				updated.Transport.State.RemoteAddress, updated.Transport.State.LocalAddress))
+		}
+
+		// Already-advertised routes were built under the old setting, so they
+		// have to be re-sent. Both of these rewrite what leaves this speaker -
+		// which communities travel, and whether private ASNs are stripped from
+		// the AS_PATH - so without this the change applies only to routes
+		// advertised after it. Must run after the Unlock above: softResetOut
 		// reaches back into the peer.
-		if sendCommunityChanged {
+		if sendCommunityChanged || removePrivateAsChanged {
 			if rerr := s.softResetOut(addr, bgp.Family(0), false); rerr != nil {
-				peer.fsm.logger.Error("failed to soft reset out after send-community change",
+				peer.fsm.logger.Error("failed to soft reset out after an egress configuration change",
 					slog.String("Err", rerr.Error()))
 			}
 		}
