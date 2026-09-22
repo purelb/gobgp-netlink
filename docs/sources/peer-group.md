@@ -137,3 +137,42 @@ On the read path every field is reported with a value, never `nil`. The
 resolved configuration is a fact, and presence describes what a client sent,
 not what a peer ended up with. To see where a value came from, use
 `gobgp config running --provenance`.
+
+## Changing a peer group later
+
+Editing a peer group applies to the peers already in it, not only to peers
+added afterwards. Each member is re-resolved against the new group, and
+whatever the member stated for itself is kept:
+
+| the member | the group changes | result |
+|------------|-------------------|--------|
+| stated nothing for a field | sets a new value | the member follows the group |
+| stated its own value | sets a different one | the member keeps its own |
+
+That is the same rule inheritance uses at `AddPeer` time, applied again. What
+counts as "stated its own" is described above: for a sub-message block, sending
+the block at all; for a `PeerConf` field, setting it.
+
+### Which changes drop the session
+
+A change that alters what this speaker puts in its OPEN message, or the socket
+the session runs on, has to rebuild the session. A change that only alters what
+is advertised does not, and is applied to the running session instead:
+
+| change | session |
+|--------|---------|
+| `peer_asn`, `local_asn` | rebuilt |
+| `auth_password` | rebuilt (TCP-MD5 is a socket option) |
+| `send_software_version` | rebuilt (it is an OPEN capability) |
+| `ttl_security`, `ebgp_multihop`, `transport`, `graceful_restart`, `afi_safis` | rebuilt |
+| `description` | kept |
+| `send_community`, `remove_private` | kept, and already-advertised routes are re-sent |
+| `timers`, `bfd`, `apply_policy` | kept |
+
+This matters most through a peer group, because one edit runs the same decision
+for every member. Renaming a group - changing only its `description` - leaves
+every session up.
+
+`route_flap_damping` is currently in the first group. Nothing in this daemon
+reads it, so the reset buys nothing, but it is left there rather than carved
+out so the question gets asked again if damping is ever implemented.
