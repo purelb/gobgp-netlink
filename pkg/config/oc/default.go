@@ -39,9 +39,19 @@ const (
 	DEFAULT_CONNECT_RETRY             = 120
 )
 
+// forcedOverwrittenConfig names the fields a peer group owns unconditionally,
+// whether or not the member configured one.
+//
+// peer-as is here because it is session identity: a member of a group peers
+// with the AS the group names. minimum-advertisement-interval used to be here
+// too, which meant a member could set it, have it silently replaced by the
+// group's - usually zero, because groups rarely set it - and read the group's
+// value back for ever, so a controller comparing desired against observed
+// never converged. Nothing in this daemon reads the value, so removing it
+// changes no advertisement timing; it changes what a member is allowed to
+// state and have reported back.
 var forcedOverwrittenConfig = []string{
 	"neighbor.config.peer-as",
-	"neighbor.timers.config.minimum-advertisement-interval",
 }
 
 // configuredFields records which fields a TOML neighbor actually set, keyed by
@@ -868,9 +878,7 @@ func overwriteConfig(c, pg any, tagPrefix string, v *viper.Viper) {
 	for i := range pgType.NumField() {
 		field := pgType.Field(i).Name
 		tag := tagPrefix + "." + pgType.Field(i).Tag.Get("mapstructure")
-		if func() bool {
-			return slices.Contains(forcedOverwrittenConfig, tag)
-		}() || !v.IsSet(tag) {
+		if slices.Contains(forcedOverwrittenConfig, tag) || !v.IsSet(tag) {
 			if nField := nValue.FieldByName(field); nField.IsValid() {
 				nField.Set(pgValue.FieldByName(field))
 			}

@@ -1153,3 +1153,40 @@ func TestOutOfRangeIntegersAreRejectedNotWrapped(t *testing.T) {
 	assert.EqualValues(t, 255, n.EbgpMultihop.Config.MultihopTtl)
 	assert.EqualValues(t, 65535, n.Transport.Config.TcpMss)
 }
+
+// minimum-advertisement-interval was owned by the peer group unconditionally.
+//
+// It sat in forcedOverwrittenConfig beside peer-as, which short-circuits the
+// presence check entirely, so a member that set it had it replaced by the
+// group's value - usually zero, because groups rarely set it - and read the
+// group's value back for ever. A controller comparing desired against observed
+// never converged on it.
+//
+// peer-as stays forced: a member of a group peers with the AS the group names,
+// and that is session identity rather than a preference. Both halves are
+// asserted here so the distinction cannot quietly erode.
+func TestMinimumAdvertisementIntervalIsNotOwnedByTheGroup(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const addr = "198.51.100.150"
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:   &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+		Timers: &api.Timers{Config: &api.TimersConfig{HoldTime: 90, KeepaliveInterval: 30}},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: addr, PeerAsn: 65002, PeerGroup: "edge"},
+		Timers: &api.Timers{Config: &api.TimersConfig{
+			HoldTime: 90, KeepaliveInterval: 30, MinimumAdvertisementInterval: 15,
+		}},
+	}}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+
+	assert.EqualValues(t, 15, got.Timers.Config.MinimumAdvertisementInterval,
+		"the peer group replaced a value the member stated, with one it never set")
+	assert.EqualValues(t, 65001, got.Conf.GetPeerAsn(),
+		"peer-as is session identity and stays owned by the group")
+}
