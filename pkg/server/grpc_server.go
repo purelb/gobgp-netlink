@@ -1202,56 +1202,56 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 // to live in a second switch keyed by the same names, which returned nil for a
 // block it did not know - and MarkBlockConfigured panics on nil. Two lists that
 // had to agree, with nothing making them.
-var neighborPresenceBlocks = map[string]func(*api.Peer) map[string]any{
-	"timers": func(a *api.Peer) map[string]any {
+var neighborPresenceBlocks = map[string]func(*api.Peer) any{
+	"timers": func(a *api.Peer) any {
 		if a.Timers == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.TimersConfig{})
 	},
-	"transport": func(a *api.Peer) map[string]any {
+	"transport": func(a *api.Peer) any {
 		if a.Transport == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.TransportConfig{})
 	},
-	"ebgp-multihop": func(a *api.Peer) map[string]any {
+	"ebgp-multihop": func(a *api.Peer) any {
 		if a.EbgpMultihop == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.EbgpMultihopConfig{})
 	},
-	"route-reflector": func(a *api.Peer) map[string]any {
+	"route-reflector": func(a *api.Peer) any {
 		if a.RouteReflector == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.RouteReflectorConfig{})
 	},
-	"route-server": func(a *api.Peer) map[string]any {
+	"route-server": func(a *api.Peer) any {
 		if a.RouteServer == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.RouteServerConfig{})
 	},
-	"graceful-restart": func(a *api.Peer) map[string]any {
+	"graceful-restart": func(a *api.Peer) any {
 		if a.GracefulRestart == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.GracefulRestartConfig{})
 	},
-	"ttl-security": func(a *api.Peer) map[string]any {
+	"ttl-security": func(a *api.Peer) any {
 		if a.TtlSecurity == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.TtlSecurityConfig{})
 	},
-	"bfd": func(a *api.Peer) map[string]any {
+	"bfd": func(a *api.Peer) any {
 		if a.Bfd == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.BfdConfig{})
 	},
-	"apply-policy": func(a *api.Peer) map[string]any {
+	"apply-policy": func(a *api.Peer) any {
 		if a.ApplyPolicy == nil {
 			return nil
 		}
@@ -1263,7 +1263,7 @@ var neighborPresenceBlocks = map[string]func(*api.Peer) map[string]any{
 	// sent" is meaningless here and the fields carry explicit presence
 	// individually instead. Any one of them being present means the client is
 	// stating its as-path options, and the peer group does not override them.
-	"as-path-options": func(a *api.Peer) map[string]any {
+	"as-path-options": func(a *api.Peer) any {
 		if a.Conf == nil {
 			return nil
 		}
@@ -1278,7 +1278,36 @@ var neighborPresenceBlocks = map[string]func(*api.Peer) map[string]any{
 	// peer group name, so every request has one and "the block was sent" would
 	// mean no NeighborConfig field ever inherits. Presence is therefore taken
 	// per field, and flat - see configFieldsPresent.
-	configBlock: configFieldsPresent,
+	configBlock: func(a *api.Peer) any {
+		if f := configFieldsPresent(a); len(f) > 0 {
+			return f
+		}
+		return nil
+	},
+
+	// afi-safis is a list, not a block of fields, and inheritance replaces it
+	// wholesale: OverwriteNeighborConfigWithPeerGroup copies the group's list
+	// unless "neighbor.afi-safis" is set. Nothing ever set it, so a grouped
+	// neighbor's address families were always replaced by its group's.
+	//
+	// The value has to be a slice. setDefaultNeighborConfigValuesWithViper
+	// reads this same key back through extractArray, which rejects anything
+	// that is not []any or []map[string]any - a map here would turn AddPeer
+	// into an error rather than a silent overwrite.
+	//
+	// One empty entry per family sent. That is enough for IsSet to gate the
+	// inheritance, and leaves the per-family defaults deriving exactly as they
+	// do today, when extractArray gets nil and produces an empty list.
+	"afi-safis": func(a *api.Peer) any {
+		if len(a.AfiSafis) == 0 {
+			return nil
+		}
+		out := make([]any, len(a.AfiSafis))
+		for i := range out {
+			out[i] = map[string]any{}
+		}
+		return out
+	},
 }
 
 // configBlock is the NeighborConfig block's name, shared by the tables above
@@ -1375,7 +1404,7 @@ func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 	}
 	presence := map[string]any{}
 	for block, presenceOf := range neighborPresenceBlocks {
-		if v := presenceOf(a); len(v) > 0 {
+		if v := presenceOf(a); v != nil {
 			presence[block] = v
 		}
 	}

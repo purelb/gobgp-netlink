@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/netip"
 	"strings"
@@ -1029,4 +1030,58 @@ func TestSessionResetKeepsTheFieldsAMemberOwns(t *testing.T) {
 
 	assert.Equal(t, owned{"memberpw", 65043, true, true, 5, true}, read(t),
 		"rebuilding the session handed the peer group the fields this member owns")
+}
+
+// A grouped neighbor's address families were always the peer group's.
+//
+// Inheritance replaces the afi-safi list wholesale unless "neighbor.afi-safis"
+// is set, and nothing ever set it - the presence table had an entry for every
+// block except this one. It was also excused from the coverage guard, on the
+// grounds that a list is not a block, which is precisely why nobody noticed.
+//
+// A neighbor asking for IPv6 in a group configured for IPv4 got IPv4, with no
+// error: the families it asked for simply were not negotiated.
+func TestNeighborKeepsItsOwnAfiSafis(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+		AfiSafis: []*api.AfiSafi{{Config: &api.AfiSafiConfig{
+			Family: &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST}, Enabled: true,
+		}}},
+	}}))
+
+	families := func(t *testing.T, addr string) []string {
+		t.Helper()
+		var out []string
+		require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) {
+			if p.Conf.NeighborAddress != addr {
+				return
+			}
+			for _, af := range p.AfiSafis {
+				out = append(out, fmt.Sprintf("%v/%v", af.Config.Family.Afi, af.Config.Family.Safi))
+			}
+		}))
+		return out
+	}
+
+	// States its own family: IPv6, where the group says IPv4.
+	const own = "198.51.100.130"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: own, PeerAsn: 65001, PeerGroup: "edge"},
+		AfiSafis: []*api.AfiSafi{{Config: &api.AfiSafiConfig{
+			Family: &api.Family{Afi: api.Family_AFI_IP6, Safi: api.Family_SAFI_UNICAST}, Enabled: true,
+		}}},
+	}}))
+	assert.Equal(t, []string{"AFI_IP6/SAFI_UNICAST"}, families(t, own),
+		"the neighbor asked for IPv6 and the peer group replaced it with its own families")
+
+	// States nothing: still inherits, which is the half that must not regress.
+	const inherits = "198.51.100.131"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: inherits, PeerAsn: 65001, PeerGroup: "edge"},
+	}}))
+	assert.Equal(t, []string{"AFI_IP/SAFI_UNICAST"}, families(t, inherits),
+		"a neighbor that stated no families must still take the group's")
 }

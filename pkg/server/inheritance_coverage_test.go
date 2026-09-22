@@ -84,9 +84,18 @@ func inheritableBlocks() []string {
 	for i := range t.NumField() {
 		f := t.Field(i)
 		tag := f.Tag.Get("mapstructure")
-		if tag == "" || tag == "state" || tag == "afi-safis" {
-			// state is read-only; afi-safis is a list and is inherited
-			// wholesale rather than through overwriteConfig.
+		if tag == "" || tag == "state" {
+			// state is read-only.
+			continue
+		}
+		// afi-safis is a list rather than a block of fields, and inheritance
+		// replaces it wholesale instead of going through overwriteConfig. It
+		// was excused from this check for that reason, and that is exactly how
+		// it went a release with no presence entry at all: a grouped neighbor's
+		// address families were always replaced by its group's. Being shaped
+		// differently is not being exempt.
+		if tag == "afi-safis" {
+			out = append(out, tag)
 			continue
 		}
 		if f.Type.Kind() != reflect.Struct {
