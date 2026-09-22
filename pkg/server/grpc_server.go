@@ -1264,9 +1264,10 @@ var neighborPresenceBlocks = map[string]func(*api.Peer) map[string]any{
 	// individually instead. Any one of them being present means the client is
 	// stating its as-path options, and the peer group does not override them.
 	"as-path-options": func(a *api.Peer) map[string]any {
-		if a.Conf == nil || (a.Conf.AllowOwnAsn == nil &&
-			a.Conf.ReplacePeerAsn == nil &&
-			a.Conf.AllowAspathLoopLocal == nil) {
+		if a.Conf == nil {
+			return nil
+		}
+		if a.Conf.AllowOwnAsn == nil && a.Conf.ReplacePeerAsn == nil && a.Conf.AllowAspathLoopLocal == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.AsPathOptionsConfig{})
