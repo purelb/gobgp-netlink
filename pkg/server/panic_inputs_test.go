@@ -705,3 +705,90 @@ func TestUpdatesSurviveALaterPeerGroupUpdate(t *testing.T) {
 			"touching the peer group reverted hold-time to its AddPeer value")
 	})
 }
+
+// Editing a peer group did nothing to the peers already in it.
+//
+// updatePeerGroup re-resolves every member against the new group, but the
+// member copy it starts from has already been resolved once, and
+// SetDefaultNeighborConfigValues began with
+//
+//	if n.State.LocalAs != 0 { return nil }
+//
+// as a guard against being run twice over the same struct. State.LocalAs is set
+// by the first resolution, so for a member the guard always fired: inheritance
+// never re-ran, the member was compared against itself, and UpdatePeerGroup
+// returned success having changed nothing. Description, timers, graceful
+// restart - nothing reached an existing member. A peer group was a template
+// applied once at AddPeer and inert from then on.
+//
+// The guard could not simply be removed before now. Re-running inheritance
+// needs presence to tell a member's own value from one it inherited, and until
+// the API path recorded presence there was nothing to tell them apart with - so
+// re-resolving would have overwritten every member's own settings with the
+// group's. The guard suppressed propagation, but it also suppressed that. Now
+// that presence is recorded on both paths, re-resolution is correct and the
+// guard is what stands in the way.
+//
+// Both halves are asserted here because a fix that only propagates is as wrong
+// as one that never did.
+func TestPeerGroupChangesReachExistingMembers(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const inherits = "198.51.100.70" // states nothing of its own
+	const owns = "198.51.100.71"     // states all three
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:            &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, Description: "v1"},
+		Timers:          &api.Timers{Config: &api.TimersConfig{HoldTime: 90, KeepaliveInterval: 30}},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 100},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: inherits, PeerAsn: 65001, PeerGroup: "edge"},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: owns, PeerAsn: 65001, PeerGroup: "edge",
+			Description: proto.String("mine"),
+		},
+		Timers:          &api.Timers{Config: &api.TimersConfig{HoldTime: 30, KeepaliveInterval: 10}},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 42},
+	}}))
+
+	type resolved struct {
+		description string
+		holdTime    uint64
+		restartTime uint32
+	}
+	read := func(t *testing.T) map[string]resolved {
+		t.Helper()
+		out := map[string]resolved{}
+		require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) {
+			r := resolved{description: p.Conf.GetDescription()}
+			if p.Timers != nil && p.Timers.Config != nil {
+				r.holdTime = p.Timers.Config.HoldTime
+			}
+			if p.GracefulRestart != nil {
+				r.restartTime = p.GracefulRestart.RestartTime
+			}
+			out[p.Conf.NeighborAddress] = r
+		}))
+		return out
+	}
+
+	before := read(t)
+	require.Equal(t, resolved{"v1", 90, 100}, before[inherits], "inherited at AddPeer")
+	require.Equal(t, resolved{"mine", 30, 42}, before[owns], "its own at AddPeer")
+
+	_, err := s.UpdatePeerGroup(ctx, &api.UpdatePeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:            &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, Description: "v2"},
+		Timers:          &api.Timers{Config: &api.TimersConfig{HoldTime: 240, KeepaliveInterval: 80}},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 200},
+	}})
+	require.NoError(t, err)
+
+	after := read(t)
+	assert.Equal(t, resolved{"v2", 240, 200}, after[inherits],
+		"a member that stated nothing of its own must follow the group it belongs to")
+	assert.Equal(t, resolved{"mine", 30, 42}, after[owns],
+		"a member that stated its own settings must not lose them when the group changes")
+}

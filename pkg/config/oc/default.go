@@ -197,12 +197,6 @@ func defaultAfiSafi(typ AfiSafiType, enable bool) AfiSafi {
 }
 
 func SetDefaultNeighborConfigValues(n *Neighbor, pg *PeerGroup, g *Global) error {
-	// Determines this function is called against the same Neighbor struct,
-	// and if already called, returns immediately.
-	if n.State.LocalAs != 0 {
-		return nil
-	}
-
 	return setDefaultNeighborConfigValuesWithViper(nil, n, g, pg)
 }
 
