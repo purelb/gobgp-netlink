@@ -1122,13 +1122,18 @@ func readUseMultiplePathsFromAPIStruct(c *oc.UseMultiplePaths, a *api.UseMultipl
 	}
 }
 
-func readRouteTargetMembershipFromAPIStruct(c *oc.RouteTargetMembership, a *api.RouteTargetMembership) {
+func readRouteTargetMembershipFromAPIStruct(c *oc.RouteTargetMembership, a *api.RouteTargetMembership) error {
 	if c == nil || a == nil {
-		return
+		return nil
 	}
 	if a.Config != nil {
-		c.Config.DeferralTime = uint16(a.Config.DeferralTime)
+		v, err := narrowUint16("route_target_membership.deferral_time", a.Config.DeferralTime)
+		if err != nil {
+			return err
+		}
+		c.Config.DeferralTime = v
 	}
+	return nil
 }
 
 func readLongLivedGracefulRestartFromAPIStruct(c *oc.LongLivedGracefulRestart, a *api.LongLivedGracefulRestart) {
@@ -1141,14 +1146,19 @@ func readLongLivedGracefulRestartFromAPIStruct(c *oc.LongLivedGracefulRestart, a
 	}
 }
 
-func readAddPathsFromAPIStruct(c *oc.AddPaths, a *api.AddPaths) {
+func readAddPathsFromAPIStruct(c *oc.AddPaths, a *api.AddPaths) error {
 	if c == nil || a == nil {
-		return
+		return nil
 	}
 	if a.Config != nil {
 		c.Config.Receive = a.Config.Receive
-		c.Config.SendMax = uint8(a.Config.SendMax)
+		v, err := narrowUint8("add_paths.send_max", a.Config.SendMax)
+		if err != nil {
+			return err
+		}
+		c.Config.SendMax = v
 	}
+	return nil
 }
 
 func PeerTypeFromApi(a api.PeerType) (oc.PeerType, error) {
@@ -1414,10 +1424,34 @@ func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 	oc.RegisterConfiguredFields(key, presence)
 }
 
+// narrowUint8 and narrowUint16 convert an API-supplied integer to the narrower
+// type the configuration structs use, rejecting anything that would wrap.
+//
+// A plain conversion is silent and non-monotonic: ttl_min 257 became 1, which
+// reports GTSM as enabled while accepting from any hop count, and
+// multihop_ttl 256 became 0. The failure is always in the dangerous direction -
+// the operator asks for a strict value and gets a permissive one - and nothing
+// in the response says so.
+func narrowUint8(field string, v uint32) (uint8, error) {
+	if v > math.MaxUint8 {
+		return 0, fmt.Errorf("%s is out of range: %d", field, v)
+	}
+	return uint8(v), nil
+}
+
+func narrowUint16(field string, v uint32) (uint16, error) {
+	if v > math.MaxUint16 {
+		return 0, fmt.Errorf("%s is out of range: %d", field, v)
+	}
+	return uint16(v), nil
+}
+
 func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	pconf := &oc.Neighbor{}
+	// Function-scoped: the range-checked conversions below sit outside the
+	// a.Conf block and share it.
+	var err error
 	if a.Conf != nil {
-		var err error
 		pconf.Config.PeerAs = a.Conf.PeerAsn
 		pconf.Config.LocalAs = a.Conf.GetLocalAsn()
 		pconf.Config.AuthPassword = a.Conf.GetAuthPassword()
@@ -1481,9 +1515,13 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 			readRouteSelectionOptionsFromAPIStruct(&afiSafi.RouteSelectionOptions, af.RouteSelectionOptions)
 			readUseMultiplePathsFromAPIStruct(&afiSafi.UseMultiplePaths, af.UseMultiplePaths)
 			readPrefixLimitFromAPIStruct(&afiSafi.PrefixLimit, af.PrefixLimits)
-			readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership)
+			if err := readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership); err != nil {
+				return nil, err
+			}
 			readLongLivedGracefulRestartFromAPIStruct(&afiSafi.LongLivedGracefulRestart, af.LongLivedGracefulRestart)
-			readAddPathsFromAPIStruct(&afiSafi.AddPaths, af.AddPaths)
+			if err := readAddPathsFromAPIStruct(&afiSafi.AddPaths, af.AddPaths); err != nil {
+				return nil, err
+			}
 			pconf.AfiSafis = append(pconf.AfiSafis, afiSafi)
 		}
 	}
@@ -1513,9 +1551,13 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	}
 	if a.GracefulRestart != nil {
 		pconf.GracefulRestart.Config.Enabled = a.GracefulRestart.Enabled
-		pconf.GracefulRestart.Config.RestartTime = uint16(a.GracefulRestart.RestartTime)
+		if pconf.GracefulRestart.Config.RestartTime, err = narrowUint16("graceful_restart.restart_time", a.GracefulRestart.RestartTime); err != nil {
+			return nil, err
+		}
 		pconf.GracefulRestart.Config.HelperOnly = a.GracefulRestart.HelperOnly
-		pconf.GracefulRestart.Config.DeferralTime = uint16(a.GracefulRestart.DeferralTime)
+		if pconf.GracefulRestart.Config.DeferralTime, err = narrowUint16("graceful_restart.deferral_time", a.GracefulRestart.DeferralTime); err != nil {
+			return nil, err
+		}
 		pconf.GracefulRestart.Config.StaleRoutesTime = float64(a.GracefulRestart.StaleRoutesTime)
 		pconf.GracefulRestart.Config.NotificationEnabled = a.GracefulRestart.NotificationEnabled
 		pconf.GracefulRestart.Config.LongLivedEnabled = a.GracefulRestart.LonglivedEnabled
@@ -1534,11 +1576,19 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		// warn that it does nothing. Dropping it silently was the worse option:
 		// the operator could not tell it had been ignored.
 		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
-		pconf.Transport.Config.RemotePort = uint16(a.Transport.RemotePort)
-		pconf.Transport.Config.LocalPort = uint16(a.Transport.LocalPort)
+		if pconf.Transport.Config.RemotePort, err = narrowUint16("transport.remote_port", a.Transport.RemotePort); err != nil {
+			return nil, err
+		}
+		if pconf.Transport.Config.LocalPort, err = narrowUint16("transport.local_port", a.Transport.LocalPort); err != nil {
+			return nil, err
+		}
 		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
-		pconf.Transport.Config.TcpMss = uint16(a.Transport.TcpMss)
-		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
+		if pconf.Transport.Config.TcpMss, err = narrowUint16("transport.tcp_mss", a.Transport.TcpMss); err != nil {
+			return nil, err
+		}
+		if pconf.Transport.Config.IpTos, err = narrowUint8("transport.ip_tos", a.Transport.IpTos); err != nil {
+			return nil, err
+		}
 	}
 	if a.EbgpMultihop != nil {
 		if a.EbgpMultihop.MultihopTtl > math.MaxUint8 {
@@ -1626,6 +1676,7 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 
 func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 	pconf := &oc.PeerGroup{}
+	var err error
 	if a.Conf != nil {
 		pconf.Config.PeerAs = a.Conf.PeerAsn
 		pconf.Config.LocalAs = a.Conf.LocalAsn
@@ -1658,9 +1709,13 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 			readRouteSelectionOptionsFromAPIStruct(&afiSafi.RouteSelectionOptions, af.RouteSelectionOptions)
 			readUseMultiplePathsFromAPIStruct(&afiSafi.UseMultiplePaths, af.UseMultiplePaths)
 			readPrefixLimitFromAPIStruct(&afiSafi.PrefixLimit, af.PrefixLimits)
-			readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership)
+			if err := readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership); err != nil {
+				return nil, err
+			}
 			readLongLivedGracefulRestartFromAPIStruct(&afiSafi.LongLivedGracefulRestart, af.LongLivedGracefulRestart)
-			readAddPathsFromAPIStruct(&afiSafi.AddPaths, af.AddPaths)
+			if err := readAddPathsFromAPIStruct(&afiSafi.AddPaths, af.AddPaths); err != nil {
+				return nil, err
+			}
 			pconf.AfiSafis = append(pconf.AfiSafis, afiSafi)
 		}
 	}
@@ -1690,9 +1745,13 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 	}
 	if a.GracefulRestart != nil {
 		pconf.GracefulRestart.Config.Enabled = a.GracefulRestart.Enabled
-		pconf.GracefulRestart.Config.RestartTime = uint16(a.GracefulRestart.RestartTime)
+		if pconf.GracefulRestart.Config.RestartTime, err = narrowUint16("graceful_restart.restart_time", a.GracefulRestart.RestartTime); err != nil {
+			return nil, err
+		}
 		pconf.GracefulRestart.Config.HelperOnly = a.GracefulRestart.HelperOnly
-		pconf.GracefulRestart.Config.DeferralTime = uint16(a.GracefulRestart.DeferralTime)
+		if pconf.GracefulRestart.Config.DeferralTime, err = narrowUint16("graceful_restart.deferral_time", a.GracefulRestart.DeferralTime); err != nil {
+			return nil, err
+		}
 		pconf.GracefulRestart.Config.StaleRoutesTime = float64(a.GracefulRestart.StaleRoutesTime)
 		pconf.GracefulRestart.Config.NotificationEnabled = a.GracefulRestart.NotificationEnabled
 		pconf.GracefulRestart.Config.LongLivedEnabled = a.GracefulRestart.LonglivedEnabled
@@ -1711,10 +1770,16 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		// warn that it does nothing. Dropping it silently was the worse option:
 		// the operator could not tell it had been ignored.
 		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
-		pconf.Transport.Config.RemotePort = uint16(a.Transport.RemotePort)
+		if pconf.Transport.Config.RemotePort, err = narrowUint16("transport.remote_port", a.Transport.RemotePort); err != nil {
+			return nil, err
+		}
 		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
-		pconf.Transport.Config.TcpMss = uint16(a.Transport.TcpMss)
-		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
+		if pconf.Transport.Config.TcpMss, err = narrowUint16("transport.tcp_mss", a.Transport.TcpMss); err != nil {
+			return nil, err
+		}
+		if pconf.Transport.Config.IpTos, err = narrowUint8("transport.ip_tos", a.Transport.IpTos); err != nil {
+			return nil, err
+		}
 	}
 	if a.EbgpMultihop != nil {
 		if a.EbgpMultihop.MultihopTtl > math.MaxUint8 {
@@ -1817,11 +1882,19 @@ func newPrefixFromApiStruct(a *api.Prefix) (*table.Prefix, error) {
 	default:
 		return nil, fmt.Errorf("prefix requires ip-prefix or rtc-prefix")
 	}
+	minLen, err := narrowUint8("prefix.mask_length_min", a.MaskLengthMin)
+	if err != nil {
+		return nil, err
+	}
+	maxLen, err := narrowUint8("prefix.mask_length_max", a.MaskLengthMax)
+	if err != nil {
+		return nil, err
+	}
 	return &table.Prefix{
 		Prefix:             prefix,
 		AddressFamily:      rf,
-		MasklengthRangeMin: uint8(a.MaskLengthMin),
-		MasklengthRangeMax: uint8(a.MaskLengthMax),
+		MasklengthRangeMin: minLen,
+		MasklengthRangeMax: maxLen,
 	}, nil
 }
 
@@ -2594,8 +2667,14 @@ func newAsPathPrependActionFromApiStruct(a *api.AsPrependAction) (*table.AsPathP
 	if a == nil {
 		return nil, nil
 	}
+	// 256 repeats became 0, which is "do not prepend at all" - the opposite of
+	// a very long prepend, and invisible in the response.
+	repeat, err := narrowUint8("as_prepend.repeat", a.Repeat)
+	if err != nil {
+		return nil, err
+	}
 	return table.NewAsPathPrependAction(oc.SetAsPathPrepend{
-		RepeatN: uint8(a.Repeat),
+		RepeatN: repeat,
 		As: func() string {
 			if a.UseLeftMost {
 				return "last-as"
@@ -3003,10 +3082,18 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 		}
 	}
 	if a.DefaultRouteDistance != nil {
+		extDist, err := narrowUint8("default_route_distance.external_route_distance", a.DefaultRouteDistance.ExternalRouteDistance)
+		if err != nil {
+			return nil, err
+		}
+		intDist, err := narrowUint8("default_route_distance.internal_route_distance", a.DefaultRouteDistance.InternalRouteDistance)
+		if err != nil {
+			return nil, err
+		}
 		global.DefaultRouteDistance = oc.DefaultRouteDistance{
 			Config: oc.DefaultRouteDistanceConfig{
-				ExternalRouteDistance: uint8(a.DefaultRouteDistance.ExternalRouteDistance),
-				InternalRouteDistance: uint8(a.DefaultRouteDistance.InternalRouteDistance),
+				ExternalRouteDistance: extDist,
+				InternalRouteDistance: intDist,
 			},
 		}
 	}
@@ -3020,13 +3107,21 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 		}
 	}
 	if a.GracefulRestart != nil {
+		gRestart, err := narrowUint16("graceful_restart.restart_time", a.GracefulRestart.RestartTime)
+		if err != nil {
+			return nil, err
+		}
+		gDeferral, err := narrowUint16("graceful_restart.deferral_time", a.GracefulRestart.DeferralTime)
+		if err != nil {
+			return nil, err
+		}
 		global.GracefulRestart = oc.GracefulRestart{
 			Config: oc.GracefulRestartConfig{
 				Enabled:             a.GracefulRestart.Enabled,
-				RestartTime:         uint16(a.GracefulRestart.RestartTime),
+				RestartTime:         gRestart,
 				StaleRoutesTime:     float64(a.GracefulRestart.StaleRoutesTime),
 				HelperOnly:          a.GracefulRestart.HelperOnly,
-				DeferralTime:        uint16(a.GracefulRestart.DeferralTime),
+				DeferralTime:        gDeferral,
 				NotificationEnabled: a.GracefulRestart.NotificationEnabled,
 				LongLivedEnabled:    a.GracefulRestart.LonglivedEnabled,
 			},

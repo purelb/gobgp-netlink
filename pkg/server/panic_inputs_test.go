@@ -1085,3 +1085,71 @@ func TestNeighborKeepsItsOwnAfiSafis(t *testing.T) {
 	assert.Equal(t, []string{"AFI_IP/SAFI_UNICAST"}, families(t, inherits),
 		"a neighbor that stated no families must still take the group's")
 }
+
+// Out-of-range integers on the API input path must be refused, not wrapped.
+//
+// The configuration structs use uint8 and uint16 where the proto uses uint32,
+// and the conversions were plain casts. A wrap is silent, non-monotonic, and
+// always fails in the dangerous direction: the operator asks for a strict or
+// large value and gets a permissive or small one, with a success response.
+//
+// ttl_min 257 -> 1 was the case that made this concrete - GTSM reported as
+// enabled while accepting from any hop count. These are its siblings.
+func TestOutOfRangeIntegersAreRejectedNotWrapped(t *testing.T) {
+	const addr = "198.51.100.140"
+	base := func() *api.Peer {
+		return &api.Peer{Conf: &api.PeerConf{NeighborAddress: addr, PeerAsn: 65001}}
+	}
+
+	for name, mutate := range map[string]func(*api.Peer){
+		"graceful_restart.restart_time": func(p *api.Peer) {
+			p.GracefulRestart = &api.GracefulRestart{Enabled: true, RestartTime: 131072}
+		},
+		"graceful_restart.deferral_time": func(p *api.Peer) {
+			p.GracefulRestart = &api.GracefulRestart{Enabled: true, DeferralTime: 131072}
+		},
+		"transport.remote_port": func(p *api.Peer) {
+			p.Transport = &api.Transport{RemotePort: 131072}
+		},
+		"transport.tcp_mss": func(p *api.Peer) {
+			p.Transport = &api.Transport{TcpMss: 131072}
+		},
+		"transport.ip_tos": func(p *api.Peer) {
+			p.Transport = &api.Transport{IpTos: 256}
+		},
+		"ebgp_multihop.multihop_ttl": func(p *api.Peer) {
+			p.EbgpMultihop = &api.EbgpMultihop{Enabled: true, MultihopTtl: 256}
+		},
+		"bfd.detection_multiplier": func(p *api.Peer) {
+			p.Bfd = &api.BfdPeerConfig{Enabled: true, DetectionMultiplier: 256}
+		},
+		"add_paths.send_max": func(p *api.Peer) {
+			p.AfiSafis = []*api.AfiSafi{{
+				Config: &api.AfiSafiConfig{Family: &api.Family{
+					Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST,
+				}, Enabled: true},
+				AddPaths: &api.AddPaths{Config: &api.AddPathsConfig{SendMax: 256}},
+			}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := base()
+			mutate(p)
+			_, err := newNeighborFromAPIStruct(p)
+			require.Error(t, err, "an out-of-range %s must be refused", name)
+			// Wording varies - some of these had explicit checks already - but
+			// every one must name the offending value rather than wrap it.
+			assert.Regexp(t, `256|131072`, err.Error(),
+				"the error should name the value it refused: %v", err)
+		})
+	}
+
+	// The boundary is still accepted and not truncated.
+	p := base()
+	p.EbgpMultihop = &api.EbgpMultihop{Enabled: true, MultihopTtl: 255}
+	p.Transport = &api.Transport{TcpMss: 65535}
+	n, err := newNeighborFromAPIStruct(p)
+	require.NoError(t, err)
+	assert.EqualValues(t, 255, n.EbgpMultihop.Config.MultihopTtl)
+	assert.EqualValues(t, 65535, n.Transport.Config.TcpMss)
+}
