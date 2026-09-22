@@ -30,6 +30,8 @@ import (
 	"os"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -106,7 +108,7 @@ func TestConformanceGRPCRunningConfig(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := c.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
-		Conf:      &api.PeerConf{NeighborAddress: "10.71.0.1", PeerAsn: 65001, AuthPassword: "WIRESECRET"},
+		Conf:      &api.PeerConf{NeighborAddress: "10.71.0.1", PeerAsn: 65001, AuthPassword: proto.String("WIRESECRET")},
 		Transport: &api.Transport{PassiveMode: true},
 	}})
 	require.NoError(t, err)

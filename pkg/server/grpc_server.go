@@ -37,6 +37,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	tspb "google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/osrg/gobgp/v4/api"
@@ -545,7 +546,7 @@ func (s *server) watchEvent(ctx context.Context, r *api.WatchEventRequest, fn fu
 						Peer: &api.Peer{
 							Conf: &api.PeerConf{
 								PeerAsn:           p.Conf.PeerASN,
-								LocalAsn:          p.Conf.LocalASN,
+								LocalAsn:          proto.Uint32(p.Conf.LocalASN),
 								NeighborAddress:   p.Conf.NeighborAddress.String(),
 								NeighborInterface: p.Conf.NeighborInterface,
 								PeerGroup:         p.Conf.PeerGroup,
@@ -1186,7 +1187,8 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 }
 
 // neighborPresenceBlocks maps each configuration block that peer-group
-// inheritance can overwrite to the test for whether this request carried it.
+// inheritance can overwrite to the presence this request recorded for it, or
+// nil when the request did not carry the block.
 //
 // A table rather than a run of if-statements so that it can be checked against
 // the set of blocks OverwriteNeighborConfigWithPeerGroup actually touches. That
@@ -1194,36 +1196,157 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 // release, and a grouped neighbor's allow-own-as, replace-peer-as and
 // allow-aspath-loop-local were silently replaced by the group's zeros - the
 // graceful-restart defect again, in a block nobody had thought to look at.
-var neighborPresenceBlocks = map[string]func(*api.Peer) bool{
-	"timers":           func(a *api.Peer) bool { return a.Timers != nil },
-	"transport":        func(a *api.Peer) bool { return a.Transport != nil },
-	"ebgp-multihop":    func(a *api.Peer) bool { return a.EbgpMultihop != nil },
-	"route-reflector":  func(a *api.Peer) bool { return a.RouteReflector != nil },
-	"route-server":     func(a *api.Peer) bool { return a.RouteServer != nil },
-	"graceful-restart": func(a *api.Peer) bool { return a.GracefulRestart != nil },
-	"ttl-security":     func(a *api.Peer) bool { return a.TtlSecurity != nil },
-	"bfd":              func(a *api.Peer) bool { return a.Bfd != nil },
-	"apply-policy":     func(a *api.Peer) bool { return a.ApplyPolicy != nil },
+//
+// Each entry returns the presence value rather than a bool so that the block's
+// zero-valued config struct is written beside the test that needs it. It used
+// to live in a second switch keyed by the same names, which returned nil for a
+// block it did not know - and MarkBlockConfigured panics on nil. Two lists that
+// had to agree, with nothing making them.
+var neighborPresenceBlocks = map[string]func(*api.Peer) map[string]any{
+	"timers": func(a *api.Peer) map[string]any {
+		if a.Timers == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.TimersConfig{})
+	},
+	"transport": func(a *api.Peer) map[string]any {
+		if a.Transport == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.TransportConfig{})
+	},
+	"ebgp-multihop": func(a *api.Peer) map[string]any {
+		if a.EbgpMultihop == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.EbgpMultihopConfig{})
+	},
+	"route-reflector": func(a *api.Peer) map[string]any {
+		if a.RouteReflector == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.RouteReflectorConfig{})
+	},
+	"route-server": func(a *api.Peer) map[string]any {
+		if a.RouteServer == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.RouteServerConfig{})
+	},
+	"graceful-restart": func(a *api.Peer) map[string]any {
+		if a.GracefulRestart == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.GracefulRestartConfig{})
+	},
+	"ttl-security": func(a *api.Peer) map[string]any {
+		if a.TtlSecurity == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.TtlSecurityConfig{})
+	},
+	"bfd": func(a *api.Peer) map[string]any {
+		if a.Bfd == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.BfdConfig{})
+	},
+	"apply-policy": func(a *api.Peer) map[string]any {
+		if a.ApplyPolicy == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.ApplyPolicyConfig{})
+	},
 
 	// The one block that is not a sub-message. Its three fields live on
 	// api.PeerConf, which clients send on every request, so "the block was
 	// sent" is meaningless here and the fields carry explicit presence
 	// individually instead. Any one of them being present means the client is
 	// stating its as-path options, and the peer group does not override them.
-	"as-path-options": func(a *api.Peer) bool {
-		return a.Conf != nil && (a.Conf.AllowOwnAsn != nil ||
-			a.Conf.ReplacePeerAsn != nil ||
-			a.Conf.AllowAspathLoopLocal != nil)
+	"as-path-options": func(a *api.Peer) map[string]any {
+		if a.Conf == nil {
+			return nil
+		}
+		if a.Conf.AllowOwnAsn == nil && a.Conf.ReplacePeerAsn == nil && a.Conf.AllowAspathLoopLocal == nil {
+			return nil
+		}
+		return oc.MarkBlockConfigured(oc.AsPathOptionsConfig{})
 	},
+
+	// The NeighborConfig block. Like as-path-options it is not a sub-message,
+	// but unlike it the answer is not all-or-nothing: api.PeerConf carries the
+	// peer group name, so every request has one and "the block was sent" would
+	// mean no NeighborConfig field ever inherits. Presence is therefore taken
+	// per field, and flat - see configFieldsPresent.
+	configBlock: configFieldsPresent,
+}
+
+// configBlock is the NeighborConfig block's name, shared by the tables above
+// and the per-field ones below.
+const configBlock = "config"
+
+// neighborConfigFieldPresence is the per-field half of the "config" block,
+// keyed by the mapstructure tag overwriteConfig builds its viper key from.
+//
+// The tags come from PeerGroupConfig, because that is the struct
+// overwriteConfig iterates; a key spelled to match NeighborConfig instead
+// would never be consulted and would fail silently, which is the same shape as
+// the defect this fixes.
+var neighborConfigFieldPresence = map[string]func(*api.Peer) bool{
+	"description":           func(a *api.Peer) bool { return a.Conf.Description != nil },
+	"local-as":              func(a *api.Peer) bool { return a.Conf.LocalAsn != nil },
+	"auth-password":         func(a *api.Peer) bool { return a.Conf.AuthPassword != nil },
+	"remove-private-as":     func(a *api.Peer) bool { return a.Conf.RemovePrivate != nil },
+	"route-flap-damping":    func(a *api.Peer) bool { return a.Conf.RouteFlapDamping != nil },
+	"send-software-version": func(a *api.Peer) bool { return a.Conf.SendSoftwareVersion != nil },
+
+	// send_community has carried presence since it was added, for its own
+	// reason - 0 means "standard", not "unset" - but nothing ever consulted it
+	// for inheritance, so a grouped neighbor's choice was replaced by the
+	// group's anyway. The pointer was already there; only the wiring was
+	// missing.
+	"send-community": func(a *api.Peer) bool { return a.Conf.SendCommunity != nil },
+}
+
+// neighborConfigFieldsWithNothingToRecord are the remaining PeerGroupConfig
+// fields that reach a NeighborConfig field, and why presence would not change
+// what they do.
+var neighborConfigFieldsWithNothingToRecord = map[string]string{
+	"peer-as": "neighbor.config.peer-as is in oc's forcedOverwrittenConfig, so overwriteConfig copies the " +
+		"peer group's value whether or not the field was configured. Presence would be recorded and then " +
+		"ignored, and the proto pointer would be a source break for consumers that buys no behaviour. " +
+		"Whether a peer group should own its members' remote AS is a separate question from presence.",
+	"peer-type": "derived by getConfigPeerType from peer-as and local-as after inheritance resolves, so " +
+		"whatever a client sends is overwritten either way.",
+}
+
+// configFieldsPresent returns the presence map for the "config" block: which
+// NeighborConfig fields this request actually stated.
+//
+// Flat, deliberately. overwriteConfig is called for this block with the prefix
+// "neighbor.config", so the keys it looks up are neighbor.config.<tag> and the
+// map under "config" must be the tags themselves. Every other block sits a
+// level deeper - "neighbor.timers.config" - which is why MarkBlockConfigured
+// wraps its result in another "config". Passing that wrapped shape here would
+// build neighbor.config.config.<tag>, which nothing looks up, so every field
+// would silently keep inheriting and this fix would appear to do nothing.
+func configFieldsPresent(a *api.Peer) map[string]any {
+	if a.Conf == nil {
+		return nil
+	}
+	fields := map[string]any{}
+	for tag, sent := range neighborConfigFieldPresence {
+		if sent(a) {
+			fields[tag] = true
+		}
+	}
+	return fields
 }
 
 // neighborBlocksWithNothingToRecord are the blocks inheritance touches that
 // have no presence signal to take, with the reason. Each is here because the
 // API cannot express the block, not because nobody got to it.
 var neighborBlocksWithNothingToRecord = map[string]string{
-	"config": "api.PeerConf is sent on every request - it carries the peer group name - so treating it as " +
-		"'the client owns this block' would stop every NeighborConfig field inheriting. The config file path " +
-		"still has real per-field presence for it; the API path does not.",
 	"add-paths": "add_paths exists only on api.AfiSafi, not on api.Peer, and readAddPathsFromAPIStruct is only " +
 		"called per family. Nothing can set the neighbor-level block over the API, so there is nothing to record.",
 	"error-handling":     "no field on api.Peer; nothing can set it over the API",
@@ -1251,9 +1374,9 @@ func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 		return
 	}
 	presence := map[string]any{}
-	for block, sent := range neighborPresenceBlocks {
-		if sent(a) {
-			presence[block] = oc.MarkBlockConfigured(blockConfigZero(block))
+	for block, presenceOf := range neighborPresenceBlocks {
+		if v := presenceOf(a); len(v) > 0 {
+			presence[block] = v
 		}
 	}
 	if len(presence) == 0 {
@@ -1262,44 +1385,16 @@ func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 	oc.RegisterConfiguredFields(key, presence)
 }
 
-// blockConfigZero returns a zero value of the oc config struct for a block, so
-// MarkBlockConfigured can read its mapstructure tags.
-func blockConfigZero(block string) any {
-	switch block {
-	case "timers":
-		return oc.TimersConfig{}
-	case "transport":
-		return oc.TransportConfig{}
-	case "ebgp-multihop":
-		return oc.EbgpMultihopConfig{}
-	case "route-reflector":
-		return oc.RouteReflectorConfig{}
-	case "route-server":
-		return oc.RouteServerConfig{}
-	case "graceful-restart":
-		return oc.GracefulRestartConfig{}
-	case "ttl-security":
-		return oc.TtlSecurityConfig{}
-	case "bfd":
-		return oc.BfdConfig{}
-	case "apply-policy":
-		return oc.ApplyPolicyConfig{}
-	case "as-path-options":
-		return oc.AsPathOptionsConfig{}
-	}
-	return nil
-}
-
 func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	pconf := &oc.Neighbor{}
 	if a.Conf != nil {
 		var err error
 		pconf.Config.PeerAs = a.Conf.PeerAsn
-		pconf.Config.LocalAs = a.Conf.LocalAsn
-		pconf.Config.AuthPassword = a.Conf.AuthPassword
-		pconf.Config.RouteFlapDamping = a.Conf.RouteFlapDamping
+		pconf.Config.LocalAs = a.Conf.GetLocalAsn()
+		pconf.Config.AuthPassword = a.Conf.GetAuthPassword()
+		pconf.Config.RouteFlapDamping = a.Conf.GetRouteFlapDamping()
 		pconf.Config.SendCommunity = oc.SendCommunityFromAPI(a.Conf.SendCommunity)
-		pconf.Config.Description = a.Conf.Description
+		pconf.Config.Description = a.Conf.GetDescription()
 		pconf.Config.PeerGroup = a.Conf.PeerGroup
 		pconf.Config.PeerType, err = PeerTypeFromApi(a.Conf.Type)
 		if err != nil {
@@ -1322,9 +1417,9 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.AsPathOptions.Config.AllowOwnAs = uint8(a.Conf.GetAllowOwnAsn())
 		pconf.AsPathOptions.Config.ReplacePeerAs = a.Conf.GetReplacePeerAsn()
 		pconf.AsPathOptions.Config.AllowAsPathLoopLocal = a.Conf.GetAllowAspathLoopLocal()
-		pconf.Config.SendSoftwareVersion = a.Conf.SendSoftwareVersion
+		pconf.Config.SendSoftwareVersion = a.Conf.GetSendSoftwareVersion()
 
-		switch a.Conf.RemovePrivate {
+		switch a.Conf.GetRemovePrivate() {
 		case api.RemovePrivate_REMOVE_PRIVATE_ALL:
 			pconf.Config.RemovePrivateAs = oc.REMOVE_PRIVATE_AS_OPTION_ALL
 		case api.RemovePrivate_REMOVE_PRIVATE_REPLACE:

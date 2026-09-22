@@ -103,3 +103,79 @@ func inheritableBlocks() []string {
 	}
 	return out
 }
+
+// The same property one level down, for the fields of the "config" block.
+//
+// "config" is the one block whose presence is per field, because api.PeerConf
+// is sent on every request and block-level presence would mean no
+// NeighborConfig field ever inherits. That makes it the one block where a
+// field can go undecided without the block-level check above noticing: the
+// block is recorded, and the field inside it is simply absent from the table
+// and inherits the peer group's zero for ever.
+//
+// So the fields are derived from PeerGroupConfig - the struct overwriteConfig
+// actually iterates - rather than listed. A field added to it by an upstream
+// catch-up merge arrives here as a failure.
+func TestEveryInheritedConfigFieldHasAPresenceDecision(t *testing.T) {
+	for _, tag := range inheritableConfigFields() {
+		_, recorded := neighborConfigFieldPresence[tag]
+		reason, excused := neighborConfigFieldsWithNothingToRecord[tag]
+
+		assert.True(t, recorded || excused,
+			"NeighborConfig field %q is overwritten by peer-group inheritance but has no presence decision. "+
+				"Either give the api.PeerConf field explicit presence and record it in "+
+				"neighborConfigFieldPresence, or add it to neighborConfigFieldsWithNothingToRecord saying why "+
+				"presence would not change what it does. Left undecided, a grouped neighbor's value for this "+
+				"field is silently replaced by the peer group's - including by a peer group that never set it.",
+			tag)
+		assert.False(t, recorded && excused, "field %q is in both maps", tag)
+		if excused {
+			assert.NotEmpty(t, reason, "field %q needs a reason, not an empty string", tag)
+		}
+	}
+}
+
+// And nothing recorded that inheritance does not reach.
+func TestNoPresenceRecordedForConfigFieldsInheritanceIgnores(t *testing.T) {
+	inheritable := map[string]bool{}
+	for _, tag := range inheritableConfigFields() {
+		inheritable[tag] = true
+	}
+	for tag := range neighborConfigFieldPresence {
+		assert.True(t, inheritable[tag],
+			"presence is recorded for config field %q, but peer-group inheritance does not overwrite it", tag)
+	}
+	for tag := range neighborConfigFieldsWithNothingToRecord {
+		assert.True(t, inheritable[tag],
+			"config field %q is excused from presence, but inheritance does not overwrite it either", tag)
+	}
+}
+
+// The presence keys have to be spelled the way overwriteConfig looks them up,
+// and it looks them up by PeerGroupConfig's mapstructure tags. A key spelled
+// to match NeighborConfig's own tag instead - "peer-group" where the group
+// says "peer-group-name" - is never consulted and fails silently, which is
+// indistinguishable from the defect. inheritableConfigFields is derived from
+// PeerGroupConfig for that reason; this asserts the derivation is the one
+// overwriteConfig performs, counterpart lookup included.
+func inheritableConfigFields() []string {
+	ng := reflect.TypeOf(oc.NeighborConfig{})
+	pg := reflect.TypeOf(oc.PeerGroupConfig{})
+
+	var out []string
+	for i := range pg.NumField() {
+		f := pg.Field(i)
+		tag := f.Tag.Get("mapstructure")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		// overwriteConfig resolves the counterpart by Go field name and skips
+		// it when NeighborConfig has none - which is how PeerGroupName, whose
+		// neighbor-side field is called PeerGroup, is already excluded.
+		if _, ok := ng.FieldByName(f.Name); !ok {
+			continue
+		}
+		out = append(out, tag)
+	}
+	return out
+}

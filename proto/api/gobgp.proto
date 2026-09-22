@@ -1017,15 +1017,37 @@ enum RemovePrivate {
 }
 
 message PeerConf {
-  string auth_password = 1;
-  string description = 2;
-  uint32 local_asn = 3;
+  // auth_password, description, local_asn, remove_private,
+  // route_flap_damping and send_software_version carry explicit presence for
+  // the reason send_community and the as-path-options fields below do: they
+  // are the NeighborConfig block, peer-group inheritance decides per field
+  // whether a neighbor keeps its own value, and it decides by asking whether
+  // the field was configured. The config file answers that per field. This
+  // message could not, because a bare proto3 scalar cannot tell "unset" from
+  // the zero value - so a grouped neighbor lost its description, local AS,
+  // MD5 password, remove-private-as setting, flap damping and software
+  // version advertisement to the peer group, including to a peer group that
+  // never configured them and supplied zeros.
+  //
+  // Presence is also what makes an explicit opt-out expressible:
+  // route_flap_damping = false against a group that sets it true has no other
+  // way to be said.
+  //
+  // Three fields in this message deliberately do not have presence.
+  // peer_asn is in forcedOverwrittenConfig, so the peer group owns a member's
+  // remote AS unconditionally and presence would be read and then ignored.
+  // type is derived from peer_asn and local_asn after inheritance resolves, so
+  // whatever a client sends is overwritten either way. peer_group itself is
+  // the thing being inherited from.
+  optional string auth_password = 1;
+  optional string description = 2;
+  optional uint32 local_asn = 3;
   string neighbor_address = 4;
   uint32 peer_asn = 5;
   string peer_group = 6;
   PeerType type = 7;
-  RemovePrivate remove_private = 8;
-  bool route_flap_damping = 9;
+  optional RemovePrivate remove_private = 8;
+  optional bool route_flap_damping = 9;
   // Which community types to send to this peer: standard=0, extended=1,
   // both=2, none=3. Not a bitmask, and there is no "large" or "all".
   //
@@ -1058,7 +1080,7 @@ message PeerConf {
   optional uint32 allow_own_asn = 13;
   optional bool replace_peer_asn = 14;
   bool admin_down = 15;
-  bool send_software_version = 16;
+  optional bool send_software_version = 16;
   optional bool allow_aspath_loop_local = 17;
 }
 

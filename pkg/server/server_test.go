@@ -4177,7 +4177,7 @@ func TestUpdatePeer(t *testing.T) {
 	p := &api.Peer{
 		Conf: &api.PeerConf{
 			NeighborAddress: "2.2.2.2",
-			LocalAsn:        65000,
+			LocalAsn:        proto.Uint32(65000),
 			PeerAsn:         65001,
 			Type:            api.PeerType_PEER_TYPE_EXTERNAL,
 			ReplacePeerAsn:  proto.Bool(false),
@@ -5558,7 +5558,7 @@ func TestGetRunningConfigComposesLivePeersAndGroups(t *testing.T) {
 		}},
 	}))
 	assert.NoError(s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
-		Conf:      &api.PeerConf{NeighborAddress: "10.9.0.1", PeerAsn: 65001, AuthPassword: "PEERSECRET"},
+		Conf:      &api.PeerConf{NeighborAddress: "10.9.0.1", PeerAsn: 65001, AuthPassword: proto.String("PEERSECRET")},
 		Transport: &api.Transport{PassiveMode: true},
 	}}))
 

@@ -218,7 +218,7 @@ func TestEffectSendCommunityUnsetSendsEverything(t *testing.T) {
 func TestEffectRemovePrivateAs(t *testing.T) {
 	const prefix = "10.62.0.0/24"
 	a, b := effectPeers(t, 10621, &api.PeerConf{
-		RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL,
+		RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
 	})
 	advertise(t, a, prefix)
 
@@ -349,4 +349,56 @@ func TestRegisteredWireEffectsAllRun(t *testing.T) {
 	for name, fn := range wireEffectFields {
 		t.Run(name, func(t *testing.T) { fn(t) })
 	}
+}
+
+// Changing an egress transform on a session that is already up.
+//
+// The tests above set the field before the session exists, so the transform is
+// applied to every advertisement from the start. That leaves the harder half
+// unproven: a change made to a live peer applies only to routes advertised
+// after it unless the already-advertised ones are re-sent.
+//
+// This is the half that cannot be observed without a real session, which is why
+// it went untested. NeedsResendOpenMessage excludes send-community and
+// remove-private-as, so neither change rebuilds the session - and a rebuild is
+// what would otherwise have re-advertised everything as a side effect. Deleting
+// the softResetOut call in updateNeighbor breaks nothing in a test that has no
+// peer attached.
+func TestEffectRemovePrivateAsAppliesToAlreadyAdvertisedRoutes(t *testing.T) {
+	const prefix = "10.64.0.0/24"
+	// No remove-private to begin with: the private ASN must arrive first, or
+	// there is nothing to prove was re-sent.
+	a, b := effectPeers(t, 10641, &api.PeerConf{})
+
+	// 64700 is private (64512-65534) and must go; 1000 is public and must stay,
+	// so the assertion distinguishes "the transform ran" from "the AS_PATH was
+	// mangled". 65100 would not do for the public one - it is private too.
+	advertise(t, a, prefix, bgp.NewPathAttributeAsPath([]bgp.AsPathParamInterface{
+		bgp.NewAs4PathParam(bgp.BGP_ASPATH_ATTR_TYPE_SEQ, []uint32{64700, 1000}),
+	}))
+
+	before := adjInOf(t, b, prefix)
+	require.True(t, before.found, "the route must reach the peer at all")
+	require.Contains(t, before.asPath, uint32(64700),
+		"the private ASN has to be there before the change, or this proves nothing: %s", before)
+
+	// Change it on the live peer. Everything else is identical, so this is the
+	// only difference the daemon sees.
+	_, err := a.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "127.0.0.1",
+			PeerAsn:         65002,
+			RemovePrivate:   api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+		},
+		Transport: &api.Transport{PassiveMode: true},
+	}})
+	require.NoError(t, err)
+	time.Sleep(2 * time.Second)
+
+	after := adjInOf(t, b, prefix)
+	require.True(t, after.found, "the route must still be there after the change")
+	assert.NotContains(t, after.asPath, uint32(64700),
+		"the route advertised before the change was never re-sent under it: %s", after)
+	assert.Contains(t, after.asPath, uint32(1000),
+		"only the private ASNs should have gone: %s", after)
 }

@@ -18,15 +18,17 @@ package server
 import (
 	"context"
 	"math"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/osrg/gobgp/v4/api"
-	"google.golang.org/protobuf/proto"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
 )
 
 // These inputs each used to reach a Must* call or an unbounded make() and take
@@ -496,4 +498,442 @@ func TestAsPathOptionsExplicitFalseOptsOut(t *testing.T) {
 		"an explicitly false as-path option must not be turned back on by the group")
 	assert.EqualValues(t, 0, got.Conf.GetAllowOwnAsn(),
 		"and stating one field of the block claims the block, as everywhere else")
+}
+
+// The same defect, one block over, and the half a controller actually sees.
+//
+// Graceful restart above is a sub-message, so proto3 message presence answered
+// "did the client send this block". The NeighborConfig fields are bare scalars
+// on api.PeerConf, which every request carries, so there was no signal at all
+// and the peer group won all of them - including a peer group that never
+// configured them and supplied zeros.
+//
+// The consequence is not only the lost setting. ListPeer reports the group's
+// value, so a controller diffing desired against observed never converges: it
+// re-issues UpdatePeer every reconcile, for ever, taking the server-wide
+// mgmtOperation lock each time and masking genuine edits behind the churn.
+// That is why this asserts the readback rather than the internal config.
+func TestNeighborConfigFieldsSurvivePeerGroupMembership(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	// A group that sets none of these. Its zeros are what used to land on the
+	// member.
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+	}}))
+
+	const addr = "198.51.100.41"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress:     addr,
+			PeerAsn:             65001,
+			PeerGroup:           "edge",
+			Description:         proto.String("Spine uplink 1"),
+			LocalAsn:            proto.Uint32(65002),
+			AuthPassword:        proto.String("correct-horse-battery-staple"),
+			RouteFlapDamping:    proto.Bool(true),
+			SendSoftwareVersion: proto.Bool(true),
+			RemovePrivate:       api.RemovePrivate_REMOVE_PRIVATE_REPLACE.Enum(),
+			SendCommunity:       proto.Uint32(1),
+		},
+	}}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	require.NotNil(t, got.Conf)
+
+	assert.Equal(t, "Spine uplink 1", got.Conf.GetDescription())
+	assert.EqualValues(t, 65002, got.Conf.GetLocalAsn())
+	assert.True(t, got.Conf.GetRouteFlapDamping())
+	assert.True(t, got.Conf.GetSendSoftwareVersion())
+	assert.Equal(t, api.RemovePrivate_REMOVE_PRIVATE_REPLACE, got.Conf.GetRemovePrivate())
+	assert.EqualValues(t, 1, got.Conf.GetSendCommunity())
+
+	// The password cannot be asserted directly: ListPeer blanks
+	// Conf.AuthPassword on the way out, so both "kept" and "erased" read back
+	// empty. PeerState.AuthPasswordSet is derived before the redaction and is
+	// the only observable difference - and the difference matters, because the
+	// erasure took MD5 off while leaving the session up.
+	require.NotNil(t, got.State)
+	assert.True(t, got.State.AuthPasswordSet,
+		"the neighbor's MD5 key must survive peer-group membership")
+	assert.Empty(t, got.Conf.GetAuthPassword(), "and must still not cross the wire")
+}
+
+// The configuration file was not exempt, which is the part the report of this
+// defect did not reach.
+//
+// ReadConfigFile records real per-field presence and resolves the neighbor
+// against its group correctly. But addNeighbors then hands the *resolved*
+// neighbor to AddPeer as an api.Peer, and inheritance runs a second time
+// inside the server - against whatever presence the API path recorded. With no
+// presence for the config block that second pass copied the group's values
+// over settings the operator had written in TOML and that had already been
+// applied once, correctly.
+//
+// So a TOML neighbor overriding its peer group's description or local-as came
+// up with the group's, and the config file it was started from said otherwise.
+// Pinned end to end, because neither half is wrong on its own.
+func TestTOMLNeighborOverrideSurvivesTheSecondInheritancePass(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	pg := &oc.PeerGroup{}
+	pg.Config.PeerGroupName = "edge"
+	pg.Config.PeerAs = 65001
+	pg.Config.Description = "Spine fabric"
+	pg.Config.LocalAs = 65001
+
+	n := &oc.Neighbor{}
+	n.Config.NeighborAddress = netip.MustParseAddr("198.51.100.42")
+	n.Config.PeerGroup = "edge"
+	n.Config.PeerAs = 65001
+	n.Config.Description = "TOML override"
+	n.Config.LocalAs = 65002
+
+	// What the TOML loader registers: the decoded map for this neighbor, whose
+	// "config" level is flat.
+	key := oc.NeighborPresenceKey(n)
+	oc.RegisterConfiguredFields(key, map[string]any{"config": map[string]any{
+		"description": true,
+		"local-as":    true,
+	}})
+	t.Cleanup(func() { oc.UnregisterConfiguredFields(key) })
+
+	require.NoError(t, oc.SetDefaultNeighborConfigValues(n, pg, &oc.Global{}))
+	require.Equal(t, "TOML override", n.Config.Description, "the config read itself was never wrong")
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{
+		PeerGroup: oc.NewPeerGroupFromConfigStruct(pg),
+	}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{
+		Peer: oc.NewPeerFromConfigStruct(n),
+	}))
+
+	var got *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+	require.NotNil(t, got)
+	assert.Equal(t, "TOML override", got.Conf.GetDescription(),
+		"the peer group overwrote a value the configuration file set explicitly")
+	assert.EqualValues(t, 65002, got.Conf.GetLocalAsn())
+}
+
+// A peer group keeps a copy of each member's resolved configuration, and
+// updatePeerGroup re-resolves every member from that copy when the group
+// changes. Only addNeighbor ever refreshed it.
+//
+// So any field that reaches a live peer without a session reset - everything
+// outside NeedsResendOpenMessage: send-community, timers, BFD, apply-policy -
+// was applied to the FSM and left stale in the member copy. The next touch of
+// the peer group, for any reason at all, re-resolved from the stale copy and
+// silently put the old value back:
+//
+//	AddPeer(send-community standard) -> UpdatePeer(both) -> UpdatePeerGroup()
+//	  reports standard again, with no error and no log
+//
+// The one field gobgp had already excluded from a session reset was the one
+// field that silently reverted. Measured the same way for hold-time, so this
+// is not specific to send-community - it is every field on that path.
+func TestUpdatesSurviveALaterPeerGroupUpdate(t *testing.T) {
+	setup := func(t *testing.T, addr string, peer *api.Peer) *BgpServer {
+		t.Helper()
+		s := newPanicTestServer(t)
+		ctx := context.Background()
+		require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+			Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+		}}))
+		require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: peer}))
+		return s
+	}
+	// Touch the peer group for an unrelated reason. Nothing here concerns the
+	// member's own settings.
+	touchGroup := func(t *testing.T, s *BgpServer) {
+		t.Helper()
+		_, err := s.UpdatePeerGroup(context.Background(), &api.UpdatePeerGroupRequest{
+			PeerGroup: &api.PeerGroup{Conf: &api.PeerGroupConf{
+				PeerGroupName: "edge", PeerAsn: 65001, Description: "unrelated edit",
+			}},
+		})
+		require.NoError(t, err)
+	}
+	read := func(t *testing.T, s *BgpServer) *api.Peer {
+		t.Helper()
+		var got *api.Peer
+		require.NoError(t, s.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(p *api.Peer) { got = p }))
+		require.NotNil(t, got)
+		return got
+	}
+
+	t.Run("send-community", func(t *testing.T) {
+		const addr = "198.51.100.43"
+		conf := func(sc uint32) *api.PeerConf {
+			return &api.PeerConf{
+				NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+				SendCommunity: proto.Uint32(sc),
+			}
+		}
+		s := setup(t, addr, &api.Peer{Conf: conf(0)}) // standard
+		_, err := s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{
+			Peer: &api.Peer{Conf: conf(2)}, // both
+		})
+		require.NoError(t, err)
+		require.EqualValues(t, 2, read(t, s).Conf.GetSendCommunity(), "the update must apply")
+
+		touchGroup(t, s)
+		assert.EqualValues(t, 2, read(t, s).Conf.GetSendCommunity(),
+			"touching the peer group reverted send-community to its AddPeer value")
+	})
+
+	t.Run("timers", func(t *testing.T) {
+		const addr = "198.51.100.44"
+		peer := func(hold uint64) *api.Peer {
+			return &api.Peer{
+				Conf:   &api.PeerConf{NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge"},
+				Timers: &api.Timers{Config: &api.TimersConfig{HoldTime: hold, KeepaliveInterval: hold / 3}},
+			}
+		}
+		s := setup(t, addr, peer(90))
+		_, err := s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: peer(180)})
+		require.NoError(t, err)
+		require.EqualValues(t, 180, read(t, s).Timers.Config.HoldTime, "the update must apply")
+
+		touchGroup(t, s)
+		assert.EqualValues(t, 180, read(t, s).Timers.Config.HoldTime,
+			"touching the peer group reverted hold-time to its AddPeer value")
+	})
+}
+
+// Editing a peer group did nothing to the peers already in it.
+//
+// updatePeerGroup re-resolves every member against the new group, but the
+// member copy it starts from has already been resolved once, and
+// SetDefaultNeighborConfigValues began with
+//
+//	if n.State.LocalAs != 0 { return nil }
+//
+// as a guard against being run twice over the same struct. State.LocalAs is set
+// by the first resolution, so for a member the guard always fired: inheritance
+// never re-ran, the member was compared against itself, and UpdatePeerGroup
+// returned success having changed nothing. Description, timers, graceful
+// restart - nothing reached an existing member. A peer group was a template
+// applied once at AddPeer and inert from then on.
+//
+// The guard could not simply be removed before now. Re-running inheritance
+// needs presence to tell a member's own value from one it inherited, and until
+// the API path recorded presence there was nothing to tell them apart with - so
+// re-resolving would have overwritten every member's own settings with the
+// group's. The guard suppressed propagation, but it also suppressed that. Now
+// that presence is recorded on both paths, re-resolution is correct and the
+// guard is what stands in the way.
+//
+// Both halves are asserted here because a fix that only propagates is as wrong
+// as one that never did.
+func TestPeerGroupChangesReachExistingMembers(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const inherits = "198.51.100.70" // states nothing of its own
+	const owns = "198.51.100.71"     // states all three
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:            &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, Description: "v1"},
+		Timers:          &api.Timers{Config: &api.TimersConfig{HoldTime: 90, KeepaliveInterval: 30}},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 100},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: inherits, PeerAsn: 65001, PeerGroup: "edge"},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: owns, PeerAsn: 65001, PeerGroup: "edge",
+			Description: proto.String("mine"),
+		},
+		Timers:          &api.Timers{Config: &api.TimersConfig{HoldTime: 30, KeepaliveInterval: 10}},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 42},
+	}}))
+
+	type resolved struct {
+		description string
+		holdTime    uint64
+		restartTime uint32
+	}
+	read := func(t *testing.T) map[string]resolved {
+		t.Helper()
+		out := map[string]resolved{}
+		require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) {
+			r := resolved{description: p.Conf.GetDescription()}
+			if p.Timers != nil && p.Timers.Config != nil {
+				r.holdTime = p.Timers.Config.HoldTime
+			}
+			if p.GracefulRestart != nil {
+				r.restartTime = p.GracefulRestart.RestartTime
+			}
+			out[p.Conf.NeighborAddress] = r
+		}))
+		return out
+	}
+
+	before := read(t)
+	require.Equal(t, resolved{"v1", 90, 100}, before[inherits], "inherited at AddPeer")
+	require.Equal(t, resolved{"mine", 30, 42}, before[owns], "its own at AddPeer")
+
+	_, err := s.UpdatePeerGroup(ctx, &api.UpdatePeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:            &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, Description: "v2"},
+		Timers:          &api.Timers{Config: &api.TimersConfig{HoldTime: 240, KeepaliveInterval: 80}},
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 200},
+	}})
+	require.NoError(t, err)
+
+	after := read(t)
+	assert.Equal(t, resolved{"v2", 240, 200}, after[inherits],
+		"a member that stated nothing of its own must follow the group it belongs to")
+	assert.Equal(t, resolved{"mine", 30, 42}, after[owns],
+		"a member that stated its own settings must not lose them when the group changes")
+}
+
+// A change to a field that never reaches the OPEN message must apply without
+// dropping the session, and a change that does reach it must still drop it.
+//
+// The reset path deletes and re-adds the neighbor, which constructs a fresh
+// *peer, so pointer identity is the direct observable for "was this session
+// rebuilt". Read through mgmtOperation because neighborMap belongs to the
+// Serve goroutine.
+func TestCarvedOutFieldsApplyWithoutResettingTheSession(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const addr = "198.51.100.45"
+
+	identity := func(t *testing.T) *peer {
+		t.Helper()
+		var p *peer
+		require.NoError(t, s.mgmtOperation(func() error {
+			p = s.neighborMap[netip.MustParseAddr(addr)]
+			return nil
+		}, false))
+		require.NotNil(t, p)
+		return p
+	}
+	description := func(t *testing.T) string {
+		t.Helper()
+		var got *api.Peer
+		require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+		require.NotNil(t, got)
+		return got.Conf.GetDescription()
+	}
+	update := func(t *testing.T, conf *api.PeerConf) {
+		t.Helper()
+		_, err := s.UpdatePeer(ctx, &api.UpdatePeerRequest{Peer: &api.Peer{Conf: conf}})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description: proto.String("before"),
+		},
+	}}))
+	before := identity(t)
+	require.Equal(t, "before", description(t))
+
+	t.Run("description alone keeps the session", func(t *testing.T) {
+		update(t, &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description: proto.String("after"),
+		})
+		assert.Same(t, before, identity(t),
+			"a description change tore the session down; it never reaches the wire")
+		assert.Equal(t, "after", description(t),
+			"carved out of the reset means updateNeighbor has to apply it in place")
+	})
+
+	t.Run("remove-private-as alone keeps the session", func(t *testing.T) {
+		// An egress AS_PATH rewrite, applied per advertisement from
+		// State.RemovePrivateAs - so it has to reach State as well as Config,
+		// and already-advertised routes have to be re-sent under the new
+		// setting. eBGP only; SetDefaultNeighborConfigValues rejects it on an
+		// iBGP peer, and this peer is 65000 -> 65001.
+		update(t, &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description:   proto.String("after"),
+			RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+		})
+		assert.Same(t, before, identity(t),
+			"stripping private ASNs changes what is advertised, not what is negotiated")
+
+		var got *api.Peer
+		require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { got = p }))
+		require.NotNil(t, got)
+		assert.Equal(t, api.RemovePrivate_REMOVE_PRIVATE_ALL, got.Conf.GetRemovePrivate(),
+			"carved out of the reset means updateNeighbor has to apply it in place")
+	})
+
+	t.Run("a change that reaches the OPEN still resets", func(t *testing.T) {
+		// The control. Without it, a carve-out that swallowed everything would
+		// pass the case above.
+		update(t, &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description:   proto.String("after"),
+			RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+			LocalAsn:      proto.Uint32(65042),
+		})
+		assert.NotSame(t, before, identity(t),
+			"local-as is carried in this speaker's OPEN; the session must be rebuilt")
+	})
+}
+
+// And the same through the peer group, which is where it multiplies: one edit
+// to a group runs updateNeighbor for every member, so before the carve-out
+// renaming a peer group dropped every session under it at once.
+func TestPeerGroupDescriptionChangeDoesNotResetMembers(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	addrs := []string{"198.51.100.46", "198.51.100.47", "198.51.100.48"}
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, Description: "Spine fabric"},
+	}}))
+	for _, a := range addrs {
+		// No description of their own, so they inherit the group's - the shape
+		// where a group edit actually changes the member's resolved config.
+		require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+			Conf: &api.PeerConf{NeighborAddress: a, PeerAsn: 65001, PeerGroup: "edge"},
+		}}))
+	}
+
+	identities := func(t *testing.T) map[string]*peer {
+		t.Helper()
+		out := map[string]*peer{}
+		require.NoError(t, s.mgmtOperation(func() error {
+			for _, a := range addrs {
+				out[a] = s.neighborMap[netip.MustParseAddr(a)]
+			}
+			return nil
+		}, false))
+		return out
+	}
+	before := identities(t)
+	for _, a := range addrs {
+		require.NotNil(t, before[a])
+	}
+
+	_, err := s.UpdatePeerGroup(ctx, &api.UpdatePeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, Description: "Spine fabric (renamed)"},
+	}})
+	require.NoError(t, err)
+
+	after := identities(t)
+	for _, a := range addrs {
+		assert.Same(t, before[a], after[a],
+			"renaming the peer group dropped member %s; a description reaches no peer", a)
+	}
+
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) {
+		assert.Equal(t, "Spine fabric (renamed)", p.Conf.GetDescription(),
+			"the inherited description still has to be applied, not merely not-reset")
+	}))
 }

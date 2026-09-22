@@ -543,18 +543,26 @@ func TestSendCommunityAPIRoundTrip(t *testing.T) {
 	assert.Nil(t, SendCommunityToAPI(CommunityType("all")))
 }
 
-// send-community is the only NeighborConfig field excluded from
-// NeedsResendOpenMessage, and therefore the only one that reaches a live peer
-// without a session teardown. That carve-out is the one piece of the
-// send-community work that changes behaviour for peers which never set the
-// field, so both directions are pinned here.
-func TestNeedsResendOpenMessageSendCommunityCarveOut(t *testing.T) {
+// NeedsResendOpenMessage decides whether a configuration change tears the
+// session down. It compares the whole NeighborConfig struct and neutralises the
+// few fields that do not belong in that comparison, rather than enumerating the
+// ones that do - so a field added by a future regeneration of bgp_configs.go
+// keeps resetting by default. Fail safe.
+//
+// Both directions are pinned here because both are expensive to get wrong. A
+// missing carve-out flaps every session on first adoption of a setting, which
+// for a service-VIP DaemonSet is traffic loss on every node - and through
+// updatePeerGroup, one edit to a group does it to every member at once. A
+// carve-out that should not be there leaves a peer running with a setting its
+// OPEN message never advertised.
+func TestNeedsResendOpenMessageCarveOuts(t *testing.T) {
 	base := func() *Neighbor {
 		n := &Neighbor{}
 		n.Config.NeighborAddress = netip.MustParseAddr("10.0.0.1")
 		n.Config.PeerAs = 65001
 		n.Config.AuthPassword = "secret"
 		n.Config.SendCommunity = COMMUNITY_TYPE_BOTH
+		n.Config.Description = "before"
 		return n
 	}
 
@@ -562,28 +570,46 @@ func TestNeedsResendOpenMessageSendCommunityCarveOut(t *testing.T) {
 		assert.False(t, base().NeedsResendOpenMessage(base()))
 	})
 
-	t.Run("send-community alone does not tear the session down", func(t *testing.T) {
-		// Before this carve-out, first-time adoption flapped every session -
-		// traffic loss on every node for a service-VIP DaemonSet.
-		for _, to := range []CommunityType{
-			"", COMMUNITY_TYPE_STANDARD, COMMUNITY_TYPE_EXTENDED, COMMUNITY_TYPE_NONE,
+	// Nothing here reaches the OPEN message, so nothing here justifies dropping
+	// an established session.
+	t.Run("changes that must not reset the session", func(t *testing.T) {
+		for name, mutate := range map[string]func(*Neighbor){
+			// An egress attribute filter, applied per advertisement.
+			"send-community/standard": func(n *Neighbor) { n.Config.SendCommunity = COMMUNITY_TYPE_STANDARD },
+			"send-community/extended": func(n *Neighbor) { n.Config.SendCommunity = COMMUNITY_TYPE_EXTENDED },
+			"send-community/none":     func(n *Neighbor) { n.Config.SendCommunity = COMMUNITY_TYPE_NONE },
+			"send-community/unset":    func(n *Neighbor) { n.Config.SendCommunity = "" },
+			// Copied to State and reported. It never reaches the wire at all.
+			"description": func(n *Neighbor) { n.Config.Description = "after" },
+			// An egress AS_PATH rewrite, read per advertisement from
+			// State.RemovePrivateAs. Same shape as send-community.
+			"remove-private-as": func(n *Neighbor) { n.Config.RemovePrivateAs = REMOVE_PRIVATE_AS_OPTION_ALL },
 		} {
 			n := base()
-			n.Config.SendCommunity = to
+			mutate(n)
 			assert.False(t, base().NeedsResendOpenMessage(n),
-				"changing send-community to %q must not require a resend", to)
+				"changing %s must not require a resend", name)
 		}
 	})
 
-	// The converse, and the reason the carve-out neutralises one field on copies
-	// rather than enumerating the fields that matter: everything else must still
-	// reset, including fields added by a future regeneration of this file.
-	t.Run("other config changes still reset", func(t *testing.T) {
+	// Each of these changes what this speaker puts in its OPEN message, or the
+	// socket the session runs on, so the session has to be rebuilt.
+	t.Run("changes that must still reset the session", func(t *testing.T) {
 		for name, mutate := range map[string]func(*Neighbor){
-			"peer-as":       func(n *Neighbor) { n.Config.PeerAs = 65002 },
+			// Validated against the peer's OPEN.
+			"peer-as": func(n *Neighbor) { n.Config.PeerAs = 65002 },
+			// Is My Autonomous System in the OPEN.
+			"local-as": func(n *Neighbor) { n.Config.LocalAs = 65003 },
+			// TCP-MD5 is a socket option; it needs a new connection.
 			"auth-password": func(n *Neighbor) { n.Config.AuthPassword = "different" },
-			"description":   func(n *Neighbor) { n.Config.Description = "changed" },
-			"admin-down":    func(n *Neighbor) { n.Config.AdminDown = true },
+			// Emits a capability in the OPEN.
+			"send-software-version": func(n *Neighbor) { n.Config.SendSoftwareVersion = true },
+			// Read by nothing in this tree today, so the reset buys nothing -
+			// but it is left in place deliberately rather than carved out,
+			// because a carve-out would have to be revisited the day damping
+			// is implemented.
+			"route-flap-damping": func(n *Neighbor) { n.Config.RouteFlapDamping = true },
+			"admin-down":         func(n *Neighbor) { n.Config.AdminDown = true },
 		} {
 			n := base()
 			mutate(n)
@@ -592,9 +618,13 @@ func TestNeedsResendOpenMessageSendCommunityCarveOut(t *testing.T) {
 		}
 	})
 
-	t.Run("send-community together with another change still resets", func(t *testing.T) {
+	// A carved-out field changing at the same time as a real one must not
+	// suppress the reset the real one needs.
+	t.Run("a carve-out alongside a real change still resets", func(t *testing.T) {
 		n := base()
 		n.Config.SendCommunity = COMMUNITY_TYPE_NONE
+		n.Config.Description = "after"
+		n.Config.RemovePrivateAs = REMOVE_PRIVATE_AS_OPTION_ALL
 		n.Config.PeerAs = 65002
 		assert.True(t, base().NeedsResendOpenMessage(n))
 	})
