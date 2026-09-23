@@ -1240,3 +1240,103 @@ func TestPeerGroupWithoutAnASNDoesNotZeroItsMembers(t *testing.T) {
 	assert.EqualValues(t, 64512, peerAs(t, overridden),
 		"a group that names an AS owns it; members peer with the AS the group names")
 }
+
+// Fields the daemon knows and never reported.
+//
+// Each of these is a value already present in the neighbor or peer-group
+// struct that the read path simply did not copy, so a controller diffing
+// desired against observed saw an empty field and could not converge on it.
+func TestStateFieldsAreReported(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const addr = "198.51.100.170"
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{
+			PeerGroupName: "edge",
+			PeerAsn:       65001,
+			LocalAsn:      65002,
+			Description:   "Spine fabric",
+		},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description:   proto.String("Spine uplink 1"),
+			RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+		},
+		Timers: &api.Timers{Config: &api.TimersConfig{
+			HoldTime: 90, KeepaliveInterval: 30, ConnectRetry: 7,
+		}},
+	}}))
+
+	var peer *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { peer = p }))
+	require.NotNil(t, peer)
+	require.NotNil(t, peer.State)
+
+	assert.Equal(t, "Spine uplink 1", peer.State.Description, "PeerState.description")
+	assert.Equal(t, "edge", peer.State.PeerGroup, "PeerState.peer_group")
+	assert.Equal(t, api.RemovePrivate_REMOVE_PRIVATE_ALL, peer.State.RemovePrivate,
+		"PeerState.remove_private")
+
+	require.NotNil(t, peer.Timers)
+	require.NotNil(t, peer.Timers.State)
+	assert.EqualValues(t, 90, peer.Timers.State.HoldTime, "TimersState.hold_time")
+	assert.EqualValues(t, 7, peer.Timers.State.ConnectRetry, "TimersState.connect_retry")
+
+	var group *api.PeerGroup
+	require.NoError(t, s.ListPeerGroup(ctx, &api.ListPeerGroupRequest{},
+		func(g *api.PeerGroup) { group = g }))
+	require.NotNil(t, group)
+	require.NotNil(t, group.Info)
+
+	assert.Equal(t, "edge", group.Info.PeerGroupName, "PeerGroupState.peer_group_name")
+	assert.Equal(t, "Spine fabric", group.Info.Description, "PeerGroupState.description")
+	assert.EqualValues(t, 65002, group.Info.LocalAsn, "PeerGroupState.local_asn")
+}
+
+// WatchEvent's peer-group filter matched nothing at all.
+//
+// WatchUpdate(current, peerAddress, peerGroup) filters by comparing the
+// requested group against ev.Neighbor.State.PeerGroup (server.go:5971 and
+// :6008). Nothing ever assigned that field, so the comparison was always
+// against "" and a client watching a peer group received no updates - not a
+// subset, none. The filter had no test, and an empty stream is indistinguishable
+// from an idle one, so it never looked broken.
+//
+// State.PeerGroup is now mirrored from Config.PeerGroup the way State.Description
+// already was, which fixes the filter and the reporting gap together.
+func TestWatchEventPeerGroupFilterMatches(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const addr = "198.51.100.171"
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge"},
+	}}))
+
+	// The filter is a pure function of the neighbor's resolved config, so it can
+	// be exercised directly - no session required, which is what makes this
+	// testable at all.
+	var opts watchOptions
+	WatchUpdate(false, "", "edge")(&opts)
+	require.NotNil(t, opts.preUpdateFilter)
+
+	var n *oc.Neighbor
+	require.NoError(t, s.mgmtOperation(func() error {
+		n = s.neighborMap[netip.MustParseAddr(addr)].fsm.pConf.ReadOnly()
+		return nil
+	}, false))
+
+	assert.True(t, opts.preUpdateFilter(&watchEventUpdate{Neighbor: n}),
+		"a member of the watched peer group must match the filter")
+
+	var other watchOptions
+	WatchUpdate(false, "", "not-edge")(&other)
+	assert.False(t, other.preUpdateFilter(&watchEventUpdate{Neighbor: n}),
+		"a different peer group must not match")
+}

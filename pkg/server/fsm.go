@@ -139,6 +139,11 @@ func (r fsmStateReason) String() string {
 		return "hard-reset"
 	case fsmBadPeerAS:
 		return "bad-peer-as"
+	case fsmDeConfigured:
+		// Reachable at fsm.go:2068 and classified by both bmp.go:437 and
+		// server.go:5625, but missing here - so a peer removed from the
+		// configuration reported its disconnect_message as "unknown".
+		return "deconfigured"
 	default:
 		return "unknown"
 	}
@@ -2225,6 +2230,15 @@ func (h *fsmHandler) loop(ctx context.Context, wg *sync.WaitGroup) {
 func (h *fsmHandler) changeadminState(s adminState) error {
 	fsm := h.fsm
 	old := fsm.adminState.Load()
+	// The guard below used to be the CompareAndSwap alone, which cannot detect
+	// this: old was just loaded, so CAS(old, s) succeeds even when s == old.
+	// "cannot change to the same state" therefore only ever fired on a
+	// concurrent writer, and two consecutive requests for the same state both
+	// "succeeded".
+	if old == s {
+		fsm.logger.Warn("cannot change to the same state", slog.String("State", fsm.state.String()))
+		return fmt.Errorf("cannot change to the same state")
+	}
 	if fsm.adminState.CompareAndSwap(old, s) {
 		fsm.logger.Debug("admin state changed",
 			slog.String("State", fsm.state.String()),
@@ -2232,7 +2246,15 @@ func (h *fsmHandler) changeadminState(s adminState) error {
 
 		h.fsm.lock.Lock()
 		conf := fsm.pConf.ReadCopy()
-		conf.State.AdminDown = !conf.State.AdminDown
+		// Derived from the new state, not toggled. Two transitions that both
+		// leave the peer down - adminStateDown then adminStatePfxCt - flipped
+		// it twice and left it claiming the peer was up.
+		//
+		// Internal only: nothing reads oc NeighborState.AdminDown. The API
+		// reports admin_state, derived from fsm.adminState, which was always
+		// correct. Fixed here because it is four lines in a function this
+		// branch edits anyway, not because it was visible.
+		conf.State.AdminDown = s != adminStateUp
 		fsm.pConf.Update(&conf)
 		h.fsm.lock.Unlock()
 

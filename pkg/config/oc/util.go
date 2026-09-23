@@ -676,6 +676,12 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			// and would carry the key straight out through ListPeer and
 			// `gobgp neighbor -j`.
 			AuthPasswordSet: pconf.Config.AuthPassword != "",
+			// Declared and reported by nothing. peer_group was worse than a
+			// reporting gap - see default.go, where State.PeerGroup is now
+			// populated because WatchEvent's peer-group filter reads it.
+			Description:   pconf.State.Description,
+			PeerGroup:     pconf.State.PeerGroup,
+			RemovePrivate: removePrivate,
 			Messages: &api.Messages{
 				Received: &api.Message{
 					Notification:   pconf.State.Messages.Received.Notification,
@@ -745,6 +751,13 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 				NegotiatedHoldTime: uint64(timer.State.NegotiatedHoldTime),
 				Uptime:             ProtoTimestamp(timer.State.Uptime),
 				Downtime:           ProtoTimestamp(timer.State.Downtime),
+				// Declared since the model was generated and reported by
+				// nothing, so a client asking for the timers in effect got two
+				// of the four. Neither has a negotiated form - the negotiated
+				// hold time is the separate field above - so the configured
+				// value is the operative one.
+				ConnectRetry: uint64(timer.Config.ConnectRetry),
+				HoldTime:     uint64(timer.Config.HoldTime),
 			},
 		},
 		RouteReflector: &api.RouteReflector{
@@ -895,6 +908,18 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			SendCommunity: SendCommunityToAPI(s.SendCommunity),
 			TotalPaths:    s.TotalPaths,
 			TotalPrefixes: s.TotalPrefixes,
+			// Declared and reported by nothing, so a client reading a peer
+			// group back got five of eleven fields. The values are all in
+			// pconf.State already.
+			//
+			// auth_password is deliberately left out and removed from the
+			// proto instead: ListPeer redacts the neighbor's copy, so
+			// reporting the group's here would hand out the key ListPeer
+			// exists to withhold.
+			LocalAsn:      s.LocalAs,
+			Description:   s.Description,
+			PeerGroupName: s.PeerGroupName,
+			RemovePrivate: removePrivateToAPI(s.RemovePrivateAs),
 		},
 		EbgpMultihop: &api.EbgpMultihop{
 			Enabled:     pconf.EbgpMultihop.Config.Enabled,
@@ -918,6 +943,13 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 				NegotiatedHoldTime: uint64(timer.State.NegotiatedHoldTime),
 				Uptime:             ProtoTimestamp(timer.State.Uptime),
 				Downtime:           ProtoTimestamp(timer.State.Downtime),
+				// Declared since the model was generated and reported by
+				// nothing, so a client asking for the timers in effect got two
+				// of the four. Neither has a negotiated form - the negotiated
+				// hold time is the separate field above - so the configured
+				// value is the operative one.
+				ConnectRetry: uint64(timer.Config.ConnectRetry),
+				HoldTime:     uint64(timer.Config.HoldTime),
 			},
 		},
 		RouteReflector: &api.RouteReflector{

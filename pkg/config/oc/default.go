@@ -433,6 +433,11 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 
 	n.State.Description = n.Config.Description
 	n.State.AdminDown = n.Config.AdminDown
+	// Never populated, and not only a reporting gap: WatchEvent's peer-group
+	// filter (server.go:5971, :6008) compares the requested group against this
+	// field, so it compared against "" and never matched. A client watching a
+	// peer group received nothing at all.
+	n.State.PeerGroup = n.Config.PeerGroup
 
 	if n.GracefulRestart.Config.Enabled {
 		if !v.IsSet("neighbor.graceful-restart.config.restart-time") && n.GracefulRestart.Config.RestartTime == 0 {
@@ -505,6 +510,12 @@ func SetPeerGroupStateValues(pg *PeerGroup, g *Global) error {
 		return err
 	}
 	pg.State.SendCommunity = pg.Config.SendCommunity
+	// Mirrored for the same reason as the four above: PeerGroupState is what
+	// ListPeerGroup reports, and these were declared there and populated by
+	// nothing, so a client read back five of eleven fields.
+	pg.State.PeerGroupName = pg.Config.PeerGroupName
+	pg.State.Description = pg.Config.Description
+	pg.State.RemovePrivateAs = pg.Config.RemovePrivateAs
 
 	if pg.RouteReflector.Config.RouteReflectorClient {
 		clusterId, err := getConfigClusterId(g, pg.RouteReflector.Config.RouteReflectorClusterId)
