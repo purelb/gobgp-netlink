@@ -104,6 +104,21 @@ func (m *roaManager) DeleteServer(host string) error {
 	return nil
 }
 
+// Stop tears down every ROA client. StopBgp closes listeners, deletes
+// neighbours and stops netlink, and left these running: their goroutines
+// outlived the server, holding TCP connections to the caches open and blocking
+// for ever on an event channel nobody drained.
+//
+// Serve-goroutine only, like DeleteServer - StopBgp calls it inside the same
+// mgmtOperation closure that does the netlink and neighbour teardown.
+func (m *roaManager) Stop() {
+	for host, client := range m.clientMap {
+		client.stop()
+		m.table.DeleteAll(host)
+		delete(m.clientMap, host)
+	}
+}
+
 func (m *roaManager) Enable(address string) error {
 	for network, client := range m.clientMap {
 		add, _, _ := net.SplitHostPort(network)
@@ -145,12 +160,31 @@ func (m *roaManager) ReceiveROA() chan *roaEvent {
 	return m.eventCh
 }
 
+// sendEvent delivers an event to the manager, or gives up if this client has
+// been stopped.
+//
+// eventCh is unbuffered and drained only by Serve. StopBgp tears down netlink,
+// neighbours, listeners and keychains and left the ROA clients running, so
+// after it returned nothing drained the channel and every one of these sends
+// blocked for ever: one leaked goroutine per RPKI server per StopBgp, holding
+// a TCP connection open. roaManager.Stop now cancels each client, and this is
+// what lets a send already in flight unblock instead of pinning the goroutine
+// to a channel nobody will ever read.
+func (c *roaClient) sendEvent(ev *roaEvent) bool {
+	select {
+	case c.eventCh <- ev:
+		return true
+	case <-c.ctx.Done():
+		return false
+	}
+}
+
 func (c *roaClient) lifetimeout() {
-	c.eventCh <- &roaEvent{
+	c.sendEvent(&roaEvent{
 		EventType: roaLifetimeout,
 		Src:       c.host,
 		timestamp: time.Now(),
-	}
+	})
 }
 
 func (m *roaManager) HandleROAEvent(ev *roaEvent) {
@@ -184,6 +218,17 @@ func (m *roaManager) HandleROAEvent(ev *roaEvent) {
 			slog.Any("Key", ev.Src))
 		client.conn = ev.conn
 		client.state.Uptime = time.Now().Unix()
+		// The opening Reset Query, sent here rather than from established()'s
+		// goroutine: softReset writes counters and cache state that Serve also
+		// owns, and two goroutines were writing them and the connection at
+		// once. A failure here is left to the read loop, which will see the
+		// dead connection and raise roaDisconnected as usual.
+		if err := client.softReset(); err != nil {
+			m.logger.Error("Failed to send the opening reset query",
+				slog.String("Topic", "rpki"),
+				slog.String("Host", client.host),
+				slog.String("Error", err.Error()))
+		}
 		go client.established()
 	case roaRTR:
 		m.handleRTRMsg(client, &client.state, ev.Data)
@@ -280,13 +325,29 @@ func (m *roaManager) handleRTRMsg(client *roaClient, state *oc.RpkiServerState, 
 			}
 			client.pendingROAs = make([]*table.ROA, 0)
 		case *rtr.RTRCacheReset:
-			if err := client.softReset(); err != nil {
-				m.logger.Error("Failed to send soft reset",
+			received.CacheReset++
+			// Answering every Cache Reset with a Reset Query hands the cache a
+			// write on the Serve goroutine, under shared.mu, once per PDU it
+			// chooses to send - so a cache that floods them stalls peer
+			// events, API calls and netlink for as long as it likes. The
+			// deadline on the write bounds each one; this bounds how many.
+			//
+			// Only the received path is throttled. An operator calling
+			// ResetRpki --soft is not the attacker and is never refused.
+			if now := time.Now(); now.Sub(client.lastCacheResetQuery) < cacheResetMinInterval {
+				m.logger.Warn("Ignoring a cache reset sent too soon after the last one",
 					slog.String("Topic", "rpki"),
 					slog.String("Host", client.host),
-					slog.String("Error", err.Error()))
+					slog.Duration("MinInterval", cacheResetMinInterval))
+			} else {
+				client.lastCacheResetQuery = now
+				if err := client.softReset(); err != nil {
+					m.logger.Error("Failed to send soft reset",
+						slog.String("Topic", "rpki"),
+						slog.String("Host", client.host),
+						slog.String("Error", err.Error()))
+				}
 			}
-			received.CacheReset++
 		case *rtr.RTRErrorReport:
 			received.Error++
 		}
@@ -361,8 +422,11 @@ type roaClient struct {
 	lifetime     int64
 	endOfData    bool
 	pendingROAs  []*table.ROA
-	cancelfnc    context.CancelFunc
-	ctx          context.Context
+	// When this client last answered a received Cache Reset with a Reset
+	// Query. Serve-goroutine only, like every other field here.
+	lastCacheResetQuery time.Time
+	cancelfnc           context.CancelFunc
+	ctx                 context.Context
 }
 
 func newRoaClient(address, port string, ch chan *roaEvent, lifetime int64) *roaClient {
@@ -379,10 +443,29 @@ func newRoaClient(address, port string, ch chan *roaEvent, lifetime int64) *roaC
 	return c
 }
 
+// rtrWriteTimeout bounds a write to an RPKI cache. Every one of these runs on
+// the Serve goroutine under shared.mu, so a cache that accepts the connection
+// and then stops reading would otherwise stall the whole daemon - no peer
+// events, no API calls, no netlink - for as long as it cared to. The value
+// matches the BGP notification write deadline in fsm.go.
+//
+// The deadline is set before each write rather than once on the connection,
+// because a deadline is a point in time and sticks: set once at connect, it
+// would expire and fail every later write.
+const rtrWriteTimeout = time.Second
+
+// cacheResetMinInterval is the shortest gap between two Reset Queries sent in
+// answer to a cache's own Cache Reset PDUs. A legitimate cache sends one when
+// it loses its state, which is rare; the pacing only bites on a flood.
+const cacheResetMinInterval = time.Second
+
 func (c *roaClient) enable(serial uint32) error {
 	if c.conn != nil {
 		r := rtr.NewRTRSerialQuery(c.sessionID, serial)
 		data, _ := r.Serialize()
+		if err := c.conn.SetWriteDeadline(time.Now().Add(rtrWriteTimeout)); err != nil {
+			return err
+		}
 		_, err := c.conn.Write(data)
 		if err != nil {
 			return err
@@ -396,6 +479,9 @@ func (c *roaClient) softReset() error {
 	if c.conn != nil {
 		r := rtr.NewRTRResetQuery()
 		data, _ := r.Serialize()
+		if err := c.conn.SetWriteDeadline(time.Now().Add(rtrWriteTimeout)); err != nil {
+			return err
+		}
 		_, err := c.conn.Write(data)
 		if err != nil {
 			return err
@@ -415,6 +501,14 @@ func (c *roaClient) reset() {
 
 func (c *roaClient) stop() {
 	c.cancelfnc()
+	// The lifetime timer is a time.AfterFunc whose callback sends on eventCh.
+	// Leaving it armed keeps a timer goroutine alive past the client and fires
+	// lifetimeout at a manager that has forgotten this host. Serve-goroutine
+	// only, like every other write to this field.
+	if c.timer != nil {
+		c.timer.Stop()
+		c.timer = nil
+	}
 	c.reset()
 }
 
@@ -429,11 +523,16 @@ func (c *roaClient) tryConnect() {
 			// better to use context with timeout
 			time.Sleep(connectRetryInterval * time.Second)
 		} else {
-			c.eventCh <- &roaEvent{
+			// The manager owns the connection once the event lands. If the
+			// client was stopped while we were dialling nobody will ever read
+			// it, so close it here rather than leaking the socket too.
+			if !c.sendEvent(&roaEvent{
 				EventType: roaConnected,
 				Src:       c.host,
 				conn:      conn.(*net.TCPConn),
 				timestamp: time.Now(),
+			}) {
+				conn.Close()
 			}
 			return
 		}
@@ -443,16 +542,20 @@ func (c *roaClient) tryConnect() {
 func (c *roaClient) established() (err error) {
 	defer func() {
 		c.conn.Close()
-		c.eventCh <- &roaEvent{
+		c.sendEvent(&roaEvent{
 			EventType: roaDisconnected,
 			Src:       c.host,
 			timestamp: time.Now(),
-		}
+		})
 	}()
 
-	if err := c.softReset(); err != nil {
-		return err
-	}
+	// The opening Reset Query used to be sent from here, on this goroutine,
+	// while softReset writes c.state.RpkiMessages, c.endOfData and
+	// c.pendingROAs - all of which the Serve goroutine reads and writes in
+	// handleRTRMsg. That was a data race on four fields and two concurrent
+	// writers on one TCP connection. It is sent from the roaConnected handler
+	// instead, so every write to a roaClient now happens on Serve and no lock
+	// is needed anywhere.
 
 	for {
 		header := make([]byte, rtr.RTR_MIN_LEN)
@@ -469,11 +572,13 @@ func (c *roaClient) established() (err error) {
 			return err
 		}
 
-		c.eventCh <- &roaEvent{
+		if !c.sendEvent(&roaEvent{
 			EventType: roaRTR,
 			Src:       c.host,
 			Data:      append(header, body...),
 			timestamp: time.Now(),
+		}) {
+			return nil
 		}
 	}
 }

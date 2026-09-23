@@ -17,7 +17,13 @@ package server
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net"
+	"os"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,6 +32,7 @@ import (
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/rtr"
 )
 
 func apiRD(t *testing.T, spec string) *api.RouteDistinguisher {
@@ -394,4 +401,149 @@ func TestObjectConformanceGapsAreRecorded(t *testing.T) {
 			assert.NotEmpty(t, reason, "%s needs a reason, not an empty string", object)
 		}
 	}
+}
+
+// The ROA clients stop when the server does, and a flood of Cache Resets
+// cannot pin the Serve goroutine.
+//
+// StopBgp tore down netlink, neighbours, listeners and keychains and left every
+// ROA client running: its goroutines outlived the server, holding a TCP
+// connection to the cache open and blocking for ever on an event channel that
+// only Serve drains. One leaked goroutine per RPKI server per StopBgp.
+//
+// The cache side of the connection is a plain listener here, so what the daemon
+// actually puts on the wire is what gets asserted.
+func TestRpkiClientLifecycleAndCacheResetPacing(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- c
+	}()
+
+	s := newObjConformanceServer(t)
+	ctx := context.Background()
+
+	host, portStr, err := net.SplitHostPort(ln.Addr().String())
+	require.NoError(t, err)
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	require.NoError(t, err)
+	require.NoError(t, s.AddRpki(ctx, &api.AddRpkiRequest{
+		Address: host, Port: uint32(port), Lifetime: 600,
+	}))
+
+	var conn net.Conn
+	select {
+	case conn = <-accepted:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the ROA client never connected to the cache")
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	readPDU := func(t *testing.T, within time.Duration) ([]byte, error) {
+		t.Helper()
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(within)))
+		buf := make([]byte, rtr.RTR_MIN_LEN)
+		_, err := io.ReadFull(conn, buf)
+		return buf, err
+	}
+
+	// The opening Reset Query. It is sent from the roaConnected handler on the
+	// Serve goroutine rather than from the client goroutine, which is what
+	// removed the concurrent writes to the connection and to the client's
+	// counters and cache state.
+	_, err = readPDU(t, 30*time.Second)
+	require.NoError(t, err, "the opening reset query must reach the cache")
+
+	// Two Cache Resets back to back. Answering both would mean two writes on
+	// the Serve goroutine under shared.mu at whatever rate the cache chooses;
+	// only the first is answered.
+	cacheReset, err := rtr.NewRTRCacheReset().Serialize()
+	require.NoError(t, err)
+	for range 2 {
+		_, err = conn.Write(cacheReset)
+		require.NoError(t, err)
+	}
+
+	_, err = readPDU(t, 30*time.Second)
+	require.NoError(t, err, "the first cache reset must be answered")
+
+	_, err = readPDU(t, 2*time.Second)
+	require.Error(t, err, "the second cache reset arrived within the pacing interval and must be ignored")
+	assert.True(t, errors.Is(err, os.ErrDeadlineExceeded),
+		"expected nothing to read, got %v", err)
+
+	// And the client goes away with the server.
+	require.NoError(t, s.StopBgp(ctx, &api.StopBgpRequest{}))
+
+	_, err = readPDU(t, 30*time.Second)
+	require.Error(t, err, "StopBgp must close the connection to the cache")
+	assert.True(t, errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF),
+		"expected the connection to be closed, got %v", err)
+
+	// Releasing the goroutines is asserted separately, in
+	// TestRoaClientStopReleasesItsGoroutines: whether the last disconnect event
+	// is drained before Serve returns is a race between two ready select cases,
+	// so an end-to-end assertion here would pass about half the time with the
+	// guards removed - a test that cannot be relied on to fail.
+}
+
+// A stopped ROA client does not block on the event channel, and its lifetime
+// timer does not fire.
+//
+// eventCh is unbuffered and only Serve drains it. Once Serve has returned,
+// established()'s deferred roaDisconnected send, tryConnect's roaConnected
+// send, the read loop's roaRTR send and the lifetime timer's lifetimeout all
+// blocked for ever - one leaked goroutine each, holding whatever they had.
+//
+// Asserted against the primitives rather than a live server, because the
+// blocking only happens once nothing is draining, and arranging that
+// end-to-end is inherently racy.
+func TestRoaClientStopReleasesItsGoroutines(t *testing.T) {
+	// Nobody ever reads this, which is the point.
+	ch := make(chan *roaEvent)
+
+	t.Run("a send on a stopped client gives up", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		c := &roaClient{host: "203.0.113.30:3323", eventCh: ch, ctx: ctx, cancelfnc: cancel}
+		c.cancelfnc()
+
+		done := make(chan bool, 1)
+		go func() { done <- c.sendEvent(&roaEvent{EventType: roaDisconnected, Src: c.host}) }()
+
+		select {
+		case sent := <-done:
+			assert.False(t, sent, "a stopped client must report that the event went nowhere")
+		case <-time.After(10 * time.Second):
+			t.Fatal("sendEvent blocked on a channel nobody drains")
+		}
+	})
+
+	t.Run("stop disarms the lifetime timer", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		c := &roaClient{host: "203.0.113.31:3323", eventCh: ch, ctx: ctx, cancelfnc: cancel}
+		// lifetimeout sends on ch, so if the timer fires at all its goroutine
+		// parks there for ever. Short enough that a missing Stop shows up
+		// immediately rather than on a timeout.
+		fired := make(chan struct{})
+		c.timer = time.AfterFunc(50*time.Millisecond, func() {
+			close(fired)
+			c.lifetimeout()
+		})
+
+		c.stop()
+		assert.Nil(t, c.timer, "stop must clear the timer as well as halt it")
+
+		select {
+		case <-fired:
+			t.Fatal("the lifetime timer fired after the client was stopped")
+		case <-time.After(500 * time.Millisecond):
+		}
+	})
 }

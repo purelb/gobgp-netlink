@@ -2681,6 +2681,12 @@ func (s *BgpServer) StopBgp(ctx context.Context, r *api.StopBgpRequest) error {
 			s.netlinkExportClient = nil
 		}
 
+		// Same reasoning, and it was missing: the ROA clients kept their
+		// goroutines, their TCP connections to the caches and an armed lifetime
+		// timer, all sending on an event channel that only Serve drains and that
+		// nothing drains once this closure returns.
+		s.roaManager.Stop()
+
 		for address, neighbor := range s.neighborMap {
 			c := &oc.Neighbor{Config: oc.NeighborConfig{
 				NeighborAddress: address,
