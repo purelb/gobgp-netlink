@@ -1039,6 +1039,23 @@ func (s *BgpServer) toConfig(peer *peer, getAdvertised bool) *oc.Neighbor {
 	conf.State.Messages.Sent.Discarded = atomic.LoadUint64(&peer.fsm.counterStats.Sent.Discarded)
 	conf.Timers.State.UpdateRecvTime = atomic.LoadInt64(&peer.fsm.timerStats.State.UpdateRecvTime)
 
+	// Queue depth. oc NeighborState.Queues was declared and written by nothing,
+	// so `gobgp neighbor` has always printed "BGP OutQ = 0" - it reads
+	// State.Queues.Output (cmd/gobgp/neighbor.go) - and PeerState.out_q was
+	// likewise always zero.
+	//
+	// Len() is a rendezvous with the channel's pump goroutine rather than a
+	// cached counter, but the pump's select always offers the length case so it
+	// cannot be starved, and it returns 0 promptly once the channel is closed.
+	// A hand-maintained counter would need six touch points - two enqueues, two
+	// dequeues and two bulk drains - and a counter that drifts reports a
+	// plausible wrong number, which is worse than reporting none.
+	//
+	// Input has no source: inbound messages are delivered by callback, not
+	// queued, so there is no receive queue to measure. Queues.input is removed
+	// from the proto rather than reported as a permanent zero.
+	conf.State.Queues.Output = uint32(peer.fsm.outgoingCh.Len())
+
 	if s.bfdServer != nil {
 		bfdPeer, err := s.bfdServer.GetPeerState(conf.State.NeighborAddress)
 		if err == nil {

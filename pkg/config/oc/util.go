@@ -702,17 +702,26 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 					Refresh:      pconf.State.Messages.Sent.Refresh,
 					Discarded:    pconf.State.Messages.Sent.Discarded,
 					Total:        pconf.State.Messages.Sent.Total,
+					// The Received literal above has carried these since it was
+					// written; this one did not, so even once the counters are
+					// incremented the sent side would still report zero.
+					WithdrawUpdate: uint64(pconf.State.Messages.Sent.WithdrawUpdate),
+					WithdrawPrefix: uint64(pconf.State.Messages.Sent.WithdrawPrefix),
 				},
 			},
 			PeerAsn:         s.PeerAs,
 			LocalAsn:        s.LocalAs,
 			Type:            toPeerType(s.PeerType),
 			NeighborAddress: pconf.State.NeighborAddress.String(),
-			Queues:          &api.Queues{},
-			RemoteCap:       remoteCap,
-			LocalCap:        localCap,
-			RouterId:        s.RemoteRouterId.String(),
-			Flops:           s.Flops,
+			// Output only. There is no receive queue to measure - inbound
+			// messages are delivered by callback - so Queues.input is removed
+			// from the proto rather than reported as a permanent zero.
+			Queues:    &api.Queues{Output: s.Queues.Output},
+			OutQ:      s.Queues.Output,
+			RemoteCap: remoteCap,
+			LocalCap:  localCap,
+			RouterId:  s.RemoteRouterId.String(),
+			Flops:     s.Flops,
 			BfdState: &api.BfdPeerState{
 				SessionState:                 bfdSessionStateToAPI(pconf.Bfd.State.SessionState),
 				RemoteSessionState:           bfdSessionStateToAPI(pconf.Bfd.State.RemoteSessionState),

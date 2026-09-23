@@ -1823,6 +1823,26 @@ func (h *fsmHandler) sendMessageloop(ctx context.Context, conn net.Conn, stateRe
 				slog.Any("nlri", update.NLRI),
 				slog.Any("withdrawals", update.WithdrawnRoutes),
 				slog.Any("attributes", update.PathAttributes))
+			// counterStats.Sent.Withdraw{Update,Prefix} existed, was zeroed on
+			// reset, was copied into oc by toConfig and was exported as
+			// bgp_sent_withdraw_update_total - and nothing ever incremented it.
+			// Only the received side was, via bmpStatsUpdate. So the sent
+			// metrics have always read zero.
+			//
+			// MP_UNREACH_NLRI counts too: for every family except IPv4 unicast
+			// the withdrawals are carried there, not in WithdrawnRoutes, so
+			// counting only the latter would leave EVPN, VPN and IPv6 sessions
+			// reporting zero exactly as before.
+			withdrawn := len(update.WithdrawnRoutes)
+			for _, attr := range update.PathAttributes {
+				if unreach, ok := attr.(*bgp.PathAttributeMpUnreachNLRI); ok {
+					withdrawn += len(unreach.Value)
+				}
+			}
+			if withdrawn > 0 {
+				atomic.AddUint32(&fsm.counterStats.Sent.WithdrawUpdate, 1)
+				atomic.AddUint32(&fsm.counterStats.Sent.WithdrawPrefix, uint32(withdrawn))
+			}
 		case bgp.BGP_MSG_KEEPALIVE:
 			// nothing to do
 		default:

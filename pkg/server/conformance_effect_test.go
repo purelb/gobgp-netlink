@@ -402,3 +402,76 @@ func TestEffectRemovePrivateAsAppliesToAlreadyAdvertisedRoutes(t *testing.T) {
 	assert.Contains(t, after.asPath, uint32(1000),
 		"only the private ASNs should have gone: %s", after)
 }
+
+// Sent withdrawal counters were two bugs stacked.
+//
+// counterStats.Sent.Withdraw{Update,Prefix} was declared, zeroed on reset,
+// copied into oc by toConfig and exported as bgp_sent_withdraw_update_total —
+// and incremented by nothing. Only the received side was, via bmpStatsUpdate.
+// The api literal for Sent then dropped both fields anyway, while the Received
+// literal beside it carried them.
+//
+// So the sent metrics read zero for the whole life of the fork, and would have
+// continued to read zero if only one of the two halves had been fixed.
+func TestEffectSentWithdrawCountersAreCounted(t *testing.T) {
+	const prefix = "10.67.0.0/24"
+	a, b := effectPeers(t, 10671, &api.PeerConf{})
+
+	advertise(t, a, prefix)
+	require.True(t, adjInOf(t, b, prefix).found, "the route must reach the peer first")
+
+	sentWithdraws := func(t *testing.T) (updates, prefixes uint64) {
+		t.Helper()
+		var p *api.Peer
+		require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }))
+		require.NotNil(t, p)
+		require.NotNil(t, p.State)
+		require.NotNil(t, p.State.Messages)
+		require.NotNil(t, p.State.Messages.Sent)
+		return p.State.Messages.Sent.WithdrawUpdate, p.State.Messages.Sent.WithdrawPrefix
+	}
+
+	u0, p0 := sentWithdraws(t)
+
+	// Delete the exact path that was advertised - DeletePath matches on the
+	// full path, so a bare NLRI is rejected with "nexthop not found".
+	var toDelete []*apiutil.Path
+	require.NoError(t, a.ListPath(apiutil.ListPathRequest{
+		TableType: api.TableType_TABLE_TYPE_GLOBAL,
+		Family:    bgp.RF_IPv4_UC,
+	}, func(n bgp.NLRI, paths []*apiutil.Path) {
+		if n.String() == prefix {
+			toDelete = append(toDelete, paths...)
+		}
+	}))
+	require.NotEmpty(t, toDelete, "the advertised path must be in the global RIB")
+	require.NoError(t, a.DeletePath(apiutil.DeletePathRequest{Paths: toDelete}))
+	time.Sleep(2 * time.Second)
+
+	u1, p1 := sentWithdraws(t)
+	assert.Greater(t, u1, u0, "withdrawing a route must count a sent withdraw UPDATE")
+	assert.Greater(t, p1, p0, "and the prefix it withdrew")
+}
+
+// The output queue depth is reported rather than hardcoded to zero.
+//
+// oc NeighborState.Queues was declared and written by nothing, so `gobgp
+// neighbor` printed "BGP OutQ = 0" for every peer forever, and PeerState.out_q
+// was likewise always zero.
+func TestEffectOutputQueueIsReported(t *testing.T) {
+	a, _ := effectPeers(t, 10681, &api.PeerConf{})
+
+	var p *api.Peer
+	require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+		func(x *api.Peer) { p = x }))
+	require.NotNil(t, p)
+	require.NotNil(t, p.State)
+
+	// An idle established session has an empty queue; what is asserted is that
+	// both fields are populated from the same source and agree, not that the
+	// depth is non-zero - a non-zero depth cannot be produced deterministically.
+	require.NotNil(t, p.State.Queues)
+	assert.Equal(t, p.State.Queues.Output, p.State.OutQ,
+		"out_q and queues.output are the same datum and must agree")
+}
