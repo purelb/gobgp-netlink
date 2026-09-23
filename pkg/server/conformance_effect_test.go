@@ -475,3 +475,109 @@ func TestEffectOutputQueueIsReported(t *testing.T) {
 	assert.Equal(t, p.State.Queues.Output, p.State.OutQ,
 		"out_q and queues.output are the same datum and must agree")
 }
+
+// PeerState's three netlink next-hop fields are reported.
+//
+// They have been declared since the netlink work landed and written by nothing,
+// because nothing populated table.PeerInfo either - which is the same reason
+// the RFC 2545 dual next hop this fork exists for was never emitted.
+func TestEffectNetlinkNexthopsAreReported(t *testing.T) {
+	a, _ := effectPeers(t, 10691, &api.PeerConf{})
+
+	var p *api.Peer
+	require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+		func(x *api.Peer) { p = x }))
+	require.NotNil(t, p)
+	require.NotNil(t, p.State)
+
+	// The session is over loopback, so the local address is 127.0.0.1 and the
+	// IPv4 next hop is that same address - which is exactly the invariant the
+	// preference for the local address is there to hold: a numbered session
+	// advertises the address it is sourced from, as it always did.
+	assert.Equal(t, "127.0.0.1", p.State.Ipv4Nexthop,
+		"the IPv4 next hop must be the session local address")
+
+	// lo carries no global or link-local IPv6, so these stay empty rather than
+	// reporting netip.Addr's zero value as the string "invalid IP".
+	assert.Empty(t, p.State.Ipv6Nexthop)
+	assert.Empty(t, p.State.Ipv6LinkLocalNexthop)
+}
+
+// And they survive a configuration change that rebuilds PeerInfo without
+// tearing the session down.
+//
+// updateNeighbor replaces the peer's PeerInfo snapshot wholesale when
+// remove-private-as changes on a live peer, and table.NewPeerInfo does not
+// carry the netlink next hops. Without carrying them over, an unrelated
+// configuration change silently reverts netlink-imported routes to the
+// fallback next hop and empties these three fields until the session flaps -
+// which is the same class of defect as never populating them at all, only
+// harder to notice.
+func TestEffectNetlinkNexthopsSurviveAConfigChange(t *testing.T) {
+	a, _ := effectPeers(t, 10711, &api.PeerConf{})
+
+	nexthop := func(t *testing.T) string {
+		t.Helper()
+		var p *api.Peer
+		require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }))
+		require.NotNil(t, p)
+		require.NotNil(t, p.State)
+		return p.State.Ipv4Nexthop
+	}
+
+	before := nexthop(t)
+	require.Equal(t, "127.0.0.1", before, "the next hop must be set before the change, or this proves nothing")
+
+	// remove-private-as is the one in-place change that rebuilds PeerInfo.
+	_, err := a.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "127.0.0.1",
+			PeerAsn:         65002,
+			RemovePrivate:   api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+		},
+		Transport: &api.Transport{PassiveMode: true},
+	}})
+	require.NoError(t, err)
+	time.Sleep(2 * time.Second)
+
+	assert.Equal(t, before, nexthop(t), "the next hop must survive an in-place configuration change")
+}
+
+// disconnect_reason and disconnect_message are reported by ListPeer.
+//
+// convertFSMStateReasonToAPI has existed since the fields were added, but its
+// only caller was the WatchEvent stream. A caller that polls ListPeer - which
+// is what k8gobgp does - got UNSPECIFIED and "" for every peer, up or down.
+func TestEffectDisconnectReasonIsReported(t *testing.T) {
+	a, _ := effectPeers(t, 10701, &api.PeerConf{})
+
+	peerState := func(t *testing.T) *api.PeerState {
+		t.Helper()
+		var p *api.Peer
+		require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }))
+		require.NotNil(t, p)
+		require.NotNil(t, p.State)
+		return p.State
+	}
+
+	// An established session has no disconnect to report. Asserting this is
+	// what stops the test passing on a constant.
+	st := peerState(t)
+	assert.Equal(t, api.PeerState_DISCONNECT_REASON_UNSPECIFIED, st.DisconnectReason,
+		"an established session reports no disconnect reason")
+	assert.Empty(t, st.DisconnectMessage)
+
+	require.NoError(t, a.ShutdownPeer(context.Background(),
+		&api.ShutdownPeerRequest{Address: "127.0.0.1", Communication: "test"}))
+
+	require.Eventually(t, func() bool {
+		return peerState(t).DisconnectReason != api.PeerState_DISCONNECT_REASON_UNSPECIFIED
+	}, 30*time.Second, 200*time.Millisecond, "the disconnect must be reported")
+
+	st = peerState(t)
+	assert.Equal(t, api.PeerState_DISCONNECT_REASON_NOTIFICATION_SENT, st.DisconnectReason)
+	assert.Contains(t, st.DisconnectMessage, "notification-sent",
+		"the message names the reason, not just the enum")
+}

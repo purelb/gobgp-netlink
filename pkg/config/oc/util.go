@@ -591,6 +591,15 @@ func removePrivateToAPI(o RemovePrivateAsOption) api.RemovePrivate {
 	return api.RemovePrivate_REMOVE_PRIVATE_UNSPECIFIED
 }
 
+// addrOrEmpty reports an optional address. netip.Addr.String() renders the zero
+// value as "invalid IP", which is worse than saying nothing.
+func addrOrEmpty(addr netip.Addr) string {
+	if !addr.IsValid() {
+		return ""
+	}
+	return addr.String()
+}
+
 func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 	afiSafis := make([]*api.AfiSafi, 0, len(pconf.AfiSafis))
 	for _, f := range pconf.AfiSafis {
@@ -722,6 +731,12 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			LocalCap:  localCap,
 			RouterId:  s.RemoteRouterId.String(),
 			Flops:     s.Flops,
+			// Next hops used for netlink-imported routes on this session,
+			// resolved when it came up. Declared since the netlink work landed
+			// and never written, because nothing populated PeerInfo either.
+			Ipv4Nexthop:          addrOrEmpty(s.Ipv4Nexthop),
+			Ipv6Nexthop:          addrOrEmpty(s.Ipv6Nexthop),
+			Ipv6LinkLocalNexthop: addrOrEmpty(s.Ipv6LinkLocalNexthop),
 			BfdState: &api.BfdPeerState{
 				SessionState:                 bfdSessionStateToAPI(pconf.Bfd.State.SessionState),
 				RemoteSessionState:           bfdSessionStateToAPI(pconf.Bfd.State.RemoteSessionState),

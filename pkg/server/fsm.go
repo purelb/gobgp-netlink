@@ -83,6 +83,29 @@ func newfsmStateReason(typ fsmStateReasonType, notif *bgp.BGPNotification, data 
 	}
 }
 
+// isDisconnect reports whether r answers "why is this session not up", as
+// opposed to naming a step on the way up.
+//
+// Written as the short exclusion list rather than the long inclusion list: a
+// reason added later is then reported by default instead of being silently
+// dropped, and the four excluded here are the only unambiguous ones. In
+// particular fsmIdleTimerExpired is the IDLE -> ACTIVE transition every session
+// makes while connecting, so treating it as a disconnect would have every
+// healthy peer reporting idle-hold-timer-expired.
+func (r *fsmStateReason) isDisconnect() bool {
+	if r == nil {
+		return false
+	}
+	switch r.Type {
+	case fsmNewConnection, fsmOpenMsgReceived, fsmOpenMsgNegotiated, fsmIdleTimerExpired:
+		return false
+	case fsmDying:
+		// Daemon shutdown - nothing to say about this peer.
+		return false
+	}
+	return true
+}
+
 // notificationBody returns the NOTIFICATION body of m, or nil when m is nil.
 // m must be a NOTIFICATION message.
 func notificationBody(m *bgp.BGPMessage) *bgp.BGPNotification {
@@ -443,6 +466,7 @@ type fsm struct {
 
 	// safe for concurrent access
 	state                    fsmState
+	lastStateReason          atomic.Pointer[fsmStateReason]
 	familyMap                atomic.Value // map[bgp.Family]bgp.BGPAddPathMode
 	rtcEORWait               atomic.Bool
 	logger                   *slog.Logger
@@ -642,6 +666,18 @@ func (fsm *fsm) stateChange(nextState bgp.FSMState, reason *fsmStateReason) {
 		slog.String("old", fsm.state.String()),
 		slog.String("new", nextState.String()),
 		slog.String("reason", reason.String()))
+
+	// Remember why the session last went down, so ListPeer can report it.
+	// disconnect_reason and disconnect_message have only ever been filled in on
+	// the WatchEvent stream; a caller that polls ListPeer - which is what
+	// k8gobgp does - saw UNSPECIFIED and "" for every peer, up or down.
+	//
+	// Only reasons that name an actual disconnect are kept: a session that is
+	// flapping passes through the way-up transitions on its way back, which
+	// would otherwise erase the reason it went down in the first place.
+	if reason.isDisconnect() {
+		fsm.lastStateReason.Store(reason)
+	}
 
 	switch nextState {
 	case bgp.BGP_FSM_ESTABLISHED:

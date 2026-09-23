@@ -5841,3 +5841,118 @@ func TestMtuDiscoveryIsWarnedAsUnimplemented(t *testing.T) {
 	}}))
 	assert.NotContains(t, buf.String(), "mtu-discovery")
 }
+
+// setNetlinkNexthops fills in the three next hops a netlink-imported route is
+// advertised with. Before this they were nil on every peer, so
+// table.setNetlinkNexthop logged a warning and fell back on every kernel route
+// and PeerState's three next-hop fields were always empty.
+//
+// The session local address is preferred wherever it is of the right family,
+// which is what keeps a numbered session advertising exactly what it always
+// did; only the values that were missing come from the interface.
+func TestSetNetlinkNexthops(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+
+	// A name no interface can have, so the interface half is a guaranteed
+	// miss and each case asserts only what the local address contributes.
+	const noSuchIface = "gobgp-test-absent0"
+
+	neighbor := func(local string) *oc.Neighbor {
+		n := &oc.Neighbor{}
+		n.Config.NeighborInterface = noSuchIface
+		if local != "" {
+			n.Transport.State.LocalAddress = netip.MustParseAddr(local)
+		}
+		return n
+	}
+
+	for _, tt := range []struct {
+		name              string
+		local             string
+		v4, v6, linkLocal string
+	}{
+		{
+			name:  "an IPv4 session advertises its own local address",
+			local: "10.1.2.3",
+			v4:    "10.1.2.3",
+		},
+		{
+			name:  "a global IPv6 session advertises its own local address",
+			local: "2001:db8::1",
+			v6:    "2001:db8::1",
+		},
+		{
+			// An unnumbered session's local address is not a next hop any
+			// peer can route to, so it must not be used as the global one.
+			name:  "a link-local session contributes nothing",
+			local: "fe80::1",
+		},
+		{
+			// A dual-stack listener hands back a 16-byte IPv4-mapped local
+			// address; it is still an IPv4 session and must set the IPv4
+			// next hop, not the IPv6 one.
+			name:  "an IPv4-mapped local address is an IPv4 session",
+			local: "::ffff:10.1.2.3",
+			v4:    "10.1.2.3",
+		},
+		{
+			name:  "no local address at all",
+			local: "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &table.PeerInfo{}
+			setNetlinkNexthops(logger, info, neighbor(tt.local))
+
+			check := func(field string, got net.IP, want string) {
+				t.Helper()
+				if want == "" {
+					assert.Nil(t, got, "%s must stay unset", field)
+					return
+				}
+				require.NotNil(t, got, "%s must be set", field)
+				assert.True(t, got.Equal(net.ParseIP(want)), "%s: got %s want %s", field, got, want)
+			}
+			check("IPv4Nexthop", info.IPv4Nexthop, tt.v4)
+			check("IPv6Nexthop", info.IPv6Nexthop, tt.v6)
+			check("IPv6LinkLocalNexthop", info.IPv6LinkLocalNexthop, tt.linkLocal)
+		})
+	}
+
+	// The interface half, against a real interface, so the two zero-caller
+	// netutils helpers are exercised rather than only stubbed out above.
+	t.Run("the interface supplies what the local address cannot", func(t *testing.T) {
+		iface, want := interfaceWithGlobalIPv4(t)
+		n := &oc.Neighbor{}
+		n.Config.NeighborInterface = iface
+
+		info := &table.PeerInfo{}
+		setNetlinkNexthops(logger, info, n)
+
+		require.NotNil(t, info.IPv4Nexthop, "a session with no local address takes the interface address")
+		assert.True(t, info.IPv4Nexthop.Equal(want), "got %s want %s", info.IPv4Nexthop, want)
+	})
+}
+
+// interfaceWithGlobalIPv4 returns an interface on this machine carrying a
+// global unicast IPv4 address, skipping the test when there is none.
+func interfaceWithGlobalIPv4(t *testing.T) (string, net.IP) {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	require.NoError(t, err)
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if !ok || ipnet.IP.To4() == nil || !ipnet.IP.IsGlobalUnicast() {
+				continue
+			}
+			return iface.Name, ipnet.IP
+		}
+	}
+	t.Skip("no interface with a global unicast IPv4 address")
+	return "", nil
+}

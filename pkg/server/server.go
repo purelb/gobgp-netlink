@@ -976,6 +976,89 @@ func (s *BgpServer) notifyBestWatcher(best []*table.Path, multipath [][]*table.P
 	s.notifyWatcher(watchEventTypeBestPath, w)
 }
 
+// setNetlinkNexthops fills in the three nexthop addresses used to advertise a
+// route this daemon imported from the kernel.
+//
+// NewNetlinkPeerInfo says of these fields that they are "populated separately
+// when the session comes up". They were not - nothing assigned them anywhere,
+// and netutils.GetIPv4Nexthop/GetIPv6Nexthops had no callers at all. So
+// setNetlinkNexthop (table/path.go) found them nil on every netlink-originated
+// route, logged "no usable nexthop for a netlink-originated route" and fell
+// back to the plain local-address behaviour, which is why the RFC 2545 dual
+// nexthop this fork was written for has never been emitted and PeerState's
+// three nexthop fields have always been empty.
+//
+// The session's own local address is preferred wherever it is of the right
+// family, because that is the address the peer already routes to and is
+// exactly what the fallback used. The interface facing the peer supplies the
+// rest: the link-local half of the dual nexthop, and, on an unnumbered session
+// whose local address is a link-local of the other family, the global half too.
+// So a numbered session keeps the nexthop it has always advertised, and the
+// only values that change are the ones that were missing.
+//
+// Best effort: anything that cannot be resolved stays nil and setNetlinkNexthop
+// falls back exactly as before. Runs once per session establishment on the
+// server goroutine. Resolving the interface from the local address enumerates
+// every interface and its addresses, so name it in the configuration
+// (neighbor-interface or bind-interface) on a node with very many interfaces.
+func setNetlinkNexthops(logger *slog.Logger, info *table.PeerInfo, conf *oc.Neighbor) {
+	// Unmap: a session accepted on a dual-stack listener has a 16-byte
+	// IPv4-mapped local address, for which Is4 is false - so without this an
+	// ordinary IPv4 session would take the IPv6 arm below and advertise
+	// ::ffff:10.0.0.1 as its IPv6 next hop while leaving the IPv4 one unset.
+	local := conf.Transport.State.LocalAddress.Unmap()
+	if local.IsValid() {
+		switch {
+		case local.Is4():
+			info.IPv4Nexthop = net.IP(local.AsSlice())
+		case local.Is6() && local.IsGlobalUnicast():
+			info.IPv6Nexthop = net.IP(local.AsSlice())
+		}
+	}
+
+	iface := conf.Config.NeighborInterface
+	if iface == "" {
+		iface = conf.Transport.Config.BindInterface
+	}
+	if iface == "" {
+		if !local.IsValid() {
+			return
+		}
+		name, err := netutils.GetInterfaceByIP(net.IP(local.AsSlice()))
+		if err != nil {
+			logger.Debug("no interface found for the session local address; netlink nexthops left unset",
+				slog.String("Topic", "Peer"),
+				slog.String("LocalAddress", local.String()),
+				slog.Any("Error", err))
+			return
+		}
+		iface = name
+	}
+
+	if info.IPv4Nexthop == nil {
+		if v4, err := netutils.GetIPv4Nexthop(iface, logger); err == nil {
+			info.IPv4Nexthop = v4
+		}
+	}
+	v6, err := netutils.GetIPv6Nexthops(iface, logger)
+	if err != nil || v6 == nil {
+		return
+	}
+	if info.IPv6Nexthop == nil {
+		info.IPv6Nexthop = v6.Global
+	}
+	info.IPv6LinkLocalNexthop = v6.LinkLocal
+}
+
+// nexthopAddr converts one of PeerInfo's next hops for reporting. Unmap matters
+// because iface.Addrs() can hand back an IPv4 address in 16-byte form, which
+// AddrFromSlice turns into a 4-in-6 address that prints as "::ffff:10.0.0.1".
+// An unset next hop stays the zero Addr, which reports as an empty string.
+func nexthopAddr(ip net.IP) netip.Addr {
+	addr, _ := netip.AddrFromSlice(ip)
+	return addr.Unmap()
+}
+
 func (s *BgpServer) toConfig(peer *peer, getAdvertised bool) *oc.Neighbor {
 	// create copy which can be accessed without mutex
 	conf := peer.fsm.pConf.ReadCopy()
@@ -1055,6 +1138,16 @@ func (s *BgpServer) toConfig(peer *peer, getAdvertised bool) *oc.Neighbor {
 	// queued, so there is no receive queue to measure. Queues.input is removed
 	// from the proto rather than reported as a permanent zero.
 	conf.State.Queues.Output = uint32(peer.fsm.outgoingCh.Len())
+
+	// The three next hops a netlink-imported route is advertised with, resolved
+	// once at session establishment by setNetlinkNexthops. Reported so an
+	// operator can see what this session will put in NEXT_HOP before a kernel
+	// route shows up, rather than having to read it off a received update.
+	if info := peer.peerInfo.Load(); info != nil {
+		conf.State.Ipv4Nexthop = nexthopAddr(info.IPv4Nexthop)
+		conf.State.Ipv6Nexthop = nexthopAddr(info.IPv6Nexthop)
+		conf.State.Ipv6LinkLocalNexthop = nexthopAddr(info.IPv6LinkLocalNexthop)
+	}
 
 	if s.bfdServer != nil {
 		bfdPeer, err := s.bfdServer.GetPeerState(conf.State.NeighborAddress)
@@ -2111,6 +2204,7 @@ func (s *BgpServer) handleFSMMessage(peer *peer, e *fsmMsg) {
 				conf.State.PeerAs, conf.Config.LocalAs,
 				conf.State.RemoteRouterId,
 				peer.fsm.gConf.Config.RouterId, conf.Transport.State.RemoteAddress, conf.Transport.State.LocalAddress)
+			setNetlinkNexthops(s.logger, peerInfo, conf)
 			peer.peerInfo.Store(peerInfo)
 
 			neighborAddress := conf.State.NeighborAddress
@@ -4138,6 +4232,13 @@ func (s *BgpServer) ListPeer(ctx context.Context, r *api.ListPeerRequest, fn fun
 			if p.Conf != nil {
 				p.Conf.AuthPassword = proto.String("")
 			}
+			// Why this session last went down. Recorded by fsm.stateChange;
+			// see the comment there for why only disconnect reasons are kept.
+			if p.State != nil {
+				reason, message := convertFSMStateReasonToAPI(peer.fsm.lastStateReason.Load())
+				p.State.DisconnectReason = reason
+				p.State.DisconnectMessage = message
+			}
 			for _, family := range peer.configuredRFlist() {
 				for i, afisafi := range p.AfiSafis {
 					if !afisafi.Config.Enabled {
@@ -4890,10 +4991,23 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 		// the new snapshot rather than the old one.
 		if removePrivateAsChanged && peer.State() == bgp.BGP_FSM_ESTABLISHED {
 			updated := peer.fsm.pConf.ReadOnly()
-			peer.peerInfo.Store(table.NewPeerInfo(peer.fsm.gConf, updated,
+			info := table.NewPeerInfo(peer.fsm.gConf, updated,
 				updated.State.PeerAs, updated.Config.LocalAs,
 				updated.State.RemoteRouterId, peer.fsm.gConf.Config.RouterId,
-				updated.Transport.State.RemoteAddress, updated.Transport.State.LocalAddress))
+				updated.Transport.State.RemoteAddress, updated.Transport.State.LocalAddress)
+			// NewPeerInfo does not carry the netlink next hops, so replacing
+			// the snapshot wholesale would blank them until the next flap -
+			// silently reverting netlink-imported routes to the fallback next
+			// hop and emptying PeerState's three fields. The session is the
+			// same one, so the values resolved when it came up still hold and
+			// are carried over rather than re-resolved: this path must not go
+			// enumerating interfaces.
+			if prev := peer.peerInfo.Load(); prev != nil {
+				info.IPv4Nexthop = prev.IPv4Nexthop
+				info.IPv6Nexthop = prev.IPv6Nexthop
+				info.IPv6LinkLocalNexthop = prev.IPv6LinkLocalNexthop
+			}
+			peer.peerInfo.Store(info)
 		}
 
 		// Already-advertised routes were built under the old setting, so they

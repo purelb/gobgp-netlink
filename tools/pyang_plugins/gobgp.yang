@@ -937,6 +937,34 @@ module gobgp {
     }
   }
 
+  augment "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:state" {
+    description
+      "Next hops used when advertising a route imported from the Linux
+       kernel to this neighbor. Taken from the session local address where
+       it is of the right family and from the interface facing the peer
+       otherwise, and resolved once when the session comes up.";
+
+    leaf ipv4-nexthop {
+      description "Next hop set on a netlink-imported IPv4 route.";
+      type inet:ipv4-address;
+    }
+
+    // inet:ip-address rather than inet:ipv6-address: the generator's type map
+    // knows inet:ip-address and inet:ipv4-address and not inet:ipv6-address,
+    // and fails with an AttributeError rather than a diagnosable error.
+    leaf ipv6-nexthop {
+      description "Global next hop set on a netlink-imported IPv6 route.";
+      type inet:ip-address;
+    }
+
+    leaf ipv6-link-local-nexthop {
+      description
+        "Link-local next hop sent alongside the global one, as RFC 2545
+         section 3 requires on a shared link.";
+      type inet:ip-address;
+    }
+  }
+
   augment "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:transport/bgp:config" {
     leaf local-port {
       description "Set the local port (if available) to use for the session.";

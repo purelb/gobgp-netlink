@@ -3831,6 +3831,19 @@ type NeighborState struct {
 	// original -> gobgp:remote-router-id
 	// gobgp:remote-router-id's original type is inet:ipv4-address.
 	RemoteRouterId netip.Addr `mapstructure:"remote-router-id" json:"remote-router-id,omitempty"`
+	// original -> gobgp:ipv4-nexthop
+	// gobgp:ipv4-nexthop's original type is inet:ipv4-address.
+	// Next hop set on a netlink-imported IPv4 route.
+	Ipv4Nexthop netip.Addr `mapstructure:"ipv4-nexthop" json:"ipv4-nexthop,omitempty"`
+	// original -> gobgp:ipv6-nexthop
+	// gobgp:ipv6-nexthop's original type is inet:ip-address.
+	// Global next hop set on a netlink-imported IPv6 route.
+	Ipv6Nexthop netip.Addr `mapstructure:"ipv6-nexthop" json:"ipv6-nexthop,omitempty"`
+	// original -> gobgp:ipv6-link-local-nexthop
+	// gobgp:ipv6-link-local-nexthop's original type is inet:ip-address.
+	// Link-local next hop sent alongside the global one, as RFC 2545
+	// section 3 requires on a shared link.
+	Ipv6LinkLocalNexthop netip.Addr `mapstructure:"ipv6-link-local-nexthop" json:"ipv6-link-local-nexthop,omitempty"`
 }
 
 // struct for container bgp:config.
