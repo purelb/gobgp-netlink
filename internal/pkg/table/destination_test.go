@@ -26,6 +26,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDestinationNewIPv4(t *testing.T) {
@@ -382,7 +383,6 @@ func TestMultipath(t *testing.T) {
 	assert.NotNil(t, best)
 	assert.Equal(t, len(multi), 2)
 	assert.Equal(t, len(d.GetKnownPathList(GLOBAL_RIB_NAME, 0)), 3)
-
 }
 
 func TestIdMap(t *testing.T) {
@@ -977,5 +977,90 @@ func saveSelectionGlobals(t *testing.T) {
 	so, ump := SelectionOptions, UseMultiplePaths
 	t.Cleanup(func() {
 		SelectionOptions, UseMultiplePaths = so, ump
+	})
+}
+
+// The multipath set is every path that ties with the best, and nothing else.
+//
+// getMultiBestPath used sort.Search over knownPathList with Path.Compare as
+// the predicate. That is only valid over a list sorted by the predicate, and
+// knownPathList is not: the insert chain compares MED only between paths from
+// the same neighbouring AS, while Path.Compare compares it always. Between
+// eBGP paths from different ASes the two disagree, and the binary search
+// answered wrongly in both directions.
+//
+// The lists are built by real inserts, not by hand, so the orderings asserted
+// are ones the RIB actually produces. Identical timestamps take age out of the
+// chain, so router ID orders the paths deterministically.
+func TestMultiBestPathIsTheTieSet(t *testing.T) {
+	saveSelectionGlobals(t)
+	UseMultiplePaths.Enabled = true
+
+	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.20.30.0/24"))
+	now := time.Now()
+
+	// Each path comes from a different neighbouring AS, so the insert chain
+	// never compares their MEDs, and router ID decides the order.
+	mkPath := func(t *testing.T, routerID string, neighbourAS, med uint32) *Path {
+		t.Helper()
+		id := netip.MustParseAddr(routerID)
+		nh, err := bgp.NewPathAttributeNextHop(id)
+		require.NoError(t, err)
+		attrs := []bgp.PathAttributeInterface{
+			bgp.NewPathAttributeOrigin(0),
+			bgp.NewPathAttributeAsPath([]bgp.AsPathParamInterface{
+				bgp.NewAs4PathParam(bgp.BGP_ASPATH_ATTR_TYPE_SEQ, []uint32{neighbourAS}),
+			}),
+			nh,
+			bgp.NewPathAttributeMultiExitDisc(med),
+		}
+		msg := bgp.NewBGPUpdateMessage(nil, attrs, []bgp.PathNLRI{{NLRI: nlri}})
+		peer := &PeerInfo{AS: neighbourAS, Address: id, ID: id}
+		return ProcessMessage(msg, peer, now, false)[0]
+	}
+
+	multiOf := func(t *testing.T, paths ...*Path) []*Path {
+		t.Helper()
+		d := newDestination(nlri, 0)
+		for _, p := range paths {
+			d.Calculate(logger, p)
+		}
+		known := d.GetKnownPathList(GLOBAL_RIB_NAME, 0)
+		require.Len(t, known, len(paths))
+		for i, p := range paths {
+			require.Same(t, p, known[i],
+				"the fixture relies on router ID ordering the paths as given; position %d differs", i)
+		}
+		return getMultiBestPath(GLOBAL_RIB_NAME, known)
+	}
+
+	t.Run("a worse path in the middle is not a tie", func(t *testing.T) {
+		x := mkPath(t, "10.0.0.1", 65001, 10)
+		y := mkPath(t, "10.0.0.2", 65002, 20)
+		z := mkPath(t, "10.0.0.3", 65003, 10)
+		w := mkPath(t, "10.0.0.4", 65004, 10)
+
+		got := multiOf(t, x, y, z, w)
+		assert.Equal(t, []*Path{x, z, w}, got,
+			"Y has a worse MED than the best path and must not be in the multipath set")
+	})
+
+	t.Run("a tie after a worse path is still a tie", func(t *testing.T) {
+		x := mkPath(t, "10.0.0.1", 65001, 10)
+		y := mkPath(t, "10.0.0.2", 65002, 20)
+		z := mkPath(t, "10.0.0.3", 65003, 10)
+
+		got := multiOf(t, x, y, z)
+		assert.Equal(t, []*Path{x, z}, got,
+			"Z ties with the best path and must be in the multipath set, though a worse path sorts between them")
+	})
+
+	t.Run("an unreachable path is never in the set", func(t *testing.T) {
+		x := mkPath(t, "10.0.0.1", 65001, 10)
+		z := mkPath(t, "10.0.0.3", 65003, 10)
+		z.IsNexthopInvalid = true
+
+		got := getMultiBestPath(GLOBAL_RIB_NAME, []*Path{x, z})
+		assert.Equal(t, []*Path{x}, got)
 	})
 }
