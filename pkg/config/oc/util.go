@@ -256,6 +256,41 @@ func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
 	lhs.Description, rhs.Description = "", ""
 	lhs.RemovePrivateAs, rhs.RemovePrivateAs = "", ""
 
+	// route-server and route-reflector were in neither list: not here, and not
+	// among the blocks updateNeighbor copies in place. So a change to either
+	// was accepted, reported back as the old value - correctly, since the old
+	// value was still the one in force - and did nothing at all.
+	//
+	// Both have to rebuild the session rather than apply in place, and for
+	// different reasons.
+	//
+	// route-server sets peer.tableId at peer construction (peer.go:148), which
+	// decides whether the peer's routes live in the global RIB or in its own.
+	// Flipping it in place would leave the routes already installed in the
+	// wrong table with nothing to move them.
+	//
+	// route-reflector does not touch tableId. RouteReflectorClient is stamped
+	// into the peer's PeerInfo snapshot, and UpdatePathAttrs reads it from
+	// there to decide whether ORIGINATOR_ID and CLUSTER_LIST survive
+	// (path.go:339) and whether to add them (path.go:400). An in-place change
+	// would leave the snapshot answering with the old value until the session
+	// happened to flap - silent iBGP routing loops, which is the failure mode
+	// route reflection's loop prevention exists to stop.
+	//
+	// deleteNeighbor/addNeighbor already does both correctly; only the
+	// classification was missing.
+	//
+	// error-handling is deliberately NOT here, though it is in neither list
+	// either. treat-as-withdraw is read once into fsm.isTreatAsWithdraw at
+	// session establishment, so a rebuild would apply it - but api.Peer has no
+	// error-handling block at all, so newNeighborFromAPIStruct cannot carry
+	// it, and SetDefaultNeighborConfigValues forces it to true whenever viper
+	// is absent, which it always is on the gRPC path. Adding it here would
+	// make any gRPC UpdatePeer against a TOML peer holding
+	// treat-as-withdraw = false bounce the session and silently flip the
+	// setting. Route-server and route-reflector have no such problem: both are
+	// api.Peer sub-messages, so a request states them or states that it does
+	// not, exactly like the blocks already listed below.
 	return !lhs.Equal(&rhs) ||
 		!n.Transport.Config.Equal(&new.Transport.Config) ||
 		!n.AddPaths.Config.Equal(&new.AddPaths.Config) ||
@@ -263,6 +298,8 @@ func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
 		!n.GracefulRestart.Config.Equal(&new.GracefulRestart.Config) ||
 		isAfiSafiChanged(n.AfiSafis, new.AfiSafis) ||
 		!n.EbgpMultihop.Config.Equal(&new.EbgpMultihop.Config) ||
+		!n.RouteServer.Config.Equal(&new.RouteServer.Config) ||
+		!n.RouteReflector.Config.Equal(&new.RouteReflector.Config) ||
 		!n.TtlSecurity.Config.Equal(&new.TtlSecurity.Config)
 }
 

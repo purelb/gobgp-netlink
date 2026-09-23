@@ -610,12 +610,48 @@ func TestNeedsResendOpenMessageCarveOuts(t *testing.T) {
 			// is implemented.
 			"route-flap-damping": func(n *Neighbor) { n.Config.RouteFlapDamping = true },
 			"admin-down":         func(n *Neighbor) { n.Config.AdminDown = true },
+			// Sets peer.tableId at peer construction, so the peer's routes
+			// live in the global RIB or in its own. Flipping it in place
+			// would strand the routes already installed in the wrong table.
+			"route-server-client": func(n *Neighbor) { n.RouteServer.Config.RouteServerClient = true },
+			"secondary-route":     func(n *Neighbor) { n.RouteServer.Config.SecondaryRoute = true },
+			// Stamped into the peer's PeerInfo snapshot, which UpdatePathAttrs
+			// reads to decide whether ORIGINATOR_ID and CLUSTER_LIST survive
+			// and whether to add them. An in-place change would leave the
+			// snapshot answering with the old value until the session flapped
+			// - silent iBGP routing loops.
+			"route-reflector-client": func(n *Neighbor) { n.RouteReflector.Config.RouteReflectorClient = true },
+			"route-reflector-cluster-id": func(n *Neighbor) {
+				n.RouteReflector.Config.RouteReflectorClusterId = netip.MustParseAddr("10.9.9.9")
+			},
 		} {
 			n := base()
 			mutate(n)
 			assert.True(t, base().NeedsResendOpenMessage(n),
 				"changing %s must still require a resend", name)
 		}
+	})
+
+	// error-handling is in neither list and stays that way, which is a
+	// decision rather than an oversight.
+	//
+	// treat-as-withdraw is read once into fsm.isTreatAsWithdraw at session
+	// establishment, so a rebuild would apply it. But api.Peer has no
+	// error-handling block, so newNeighborFromAPIStruct cannot carry one, and
+	// SetDefaultNeighborConfigValues forces the field to true whenever viper
+	// is absent - which it always is on the gRPC path. Listing it above would
+	// make any gRPC UpdatePeer against a TOML peer holding
+	// treat-as-withdraw = false bounce the session and silently flip the
+	// setting, which is worse than the change being ignored.
+	//
+	// route-server and route-reflector have no such problem: both are
+	// api.Peer sub-messages, so a request either states them or states that
+	// it does not, exactly like every other block listed above.
+	t.Run("error-handling must not reset the session", func(t *testing.T) {
+		n := base()
+		n.ErrorHandling.Config.TreatAsWithdraw = true
+		assert.False(t, base().NeedsResendOpenMessage(n),
+			"the gRPC path cannot express error-handling, so a rebuild would corrupt it")
 	})
 
 	// A carved-out field changing at the same time as a real one must not

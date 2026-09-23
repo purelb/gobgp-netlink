@@ -3734,13 +3734,20 @@ func (s *BgpServer) ListPath(r apiutil.ListPathRequest, fn func(prefix bgp.NLRI,
 				if validation := getValidation(v, path); validation != nil {
 					p.Validation = newValidationFromTableStruct(validation)
 				}
+				// Both reads below take the table globals. This site used to
+				// take use-multiple-paths from s.bgpConfig.Global instead -
+				// one knob with two readers, and the reader that decides which
+				// paths `gobgp global rib` flags Best. They are written only by
+				// StartBgp and so cannot disagree today, but disagreeing with
+				// the RIB about which paths are best is exactly the class of
+				// lie this branch exists to remove.
 				if !table.SelectionOptions.DisableBestPathSelection {
 					if i == 0 {
 						switch r.TableType {
 						case api.TableType_TABLE_TYPE_LOCAL, api.TableType_TABLE_TYPE_GLOBAL:
 							p.Best = true
 						}
-					} else if s.bgpConfig.Global.UseMultiplePaths.Config.Enabled && path.Compare(knownPathList[0]) == 0 {
+					} else if table.UseMultiplePaths.Enabled && path.Compare(knownPathList[0]) == 0 {
 						p.Best = true
 					}
 				}
