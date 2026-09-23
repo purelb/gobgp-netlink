@@ -380,10 +380,18 @@ class GoBGPContainer(BGPContainer):
 
         self._merge_dict(config, self.bgp_config)
 
+        # gobgpd refuses use-multiple-paths without a maximum-paths for at
+        # least one peer type. These scenarios test which paths reach zebra,
+        # not the cap, so the limit sits above anything they advertise.
+        multipath_limits = {
+            'ebgp': {'config': {'maximum-paths': 64}},
+            'ibgp': {'config': {'maximum-paths': 64}},
+        }
         if self.zebra and self.zapi_version == 2:
-            config['global']['use-multiple-paths'] = {'config': {'enabled': True}}
+            config['global']['use-multiple-paths'] = {'config': {'enabled': True}, **multipath_limits}
         else:
-            config['global']['use-multiple-paths'] = {'config': {'enabled': self.zebra_multipath_enabled}}
+            config['global']['use-multiple-paths'] = {
+                'config': {'enabled': self.zebra_multipath_enabled}, **multipath_limits}
 
         for peer, info in self.peers.items():
             afi_safi_list = []

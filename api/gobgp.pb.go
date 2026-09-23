@@ -13991,8 +13991,26 @@ type Global struct {
 	//
 	// Precedence is peer, then peer group, then this.
 	GracefulRestartInheritToNeighbors bool `protobuf:"varint,12,opt,name=graceful_restart_inherit_to_neighbors,json=gracefulRestartInheritToNeighbors,proto3" json:"graceful_restart_inherit_to_neighbors,omitempty"`
-	unknownFields                     protoimpl.UnknownFields
-	sizeCache                         protoimpl.SizeCache
+	// Fork-local fields live at 200+ so upstream keeps the low numbers.
+	//
+	// The most paths use_multiple_paths may select for one prefix, by the type
+	// of the best path: eBGP when it was learned from an external peer, iBGP
+	// when from an internal one. 0 means that type gets the single best path.
+	// The multipath set is capped to the most preferred paths, in route
+	// selection order. Locally originated best paths are not capped.
+	//
+	// With use_multiple_paths set, at least one of the two must be non-zero:
+	// StartBgp rejects the request otherwise, because multipath with no limit
+	// on either type selects nothing it would not select anyway. Both may be
+	// set.
+	//
+	// Read once, at StartBgp. Changing them needs a restart, as with every
+	// global setting: the multipath set of an existing destination is derived
+	// from them on every change to it.
+	EbgpMaximumPaths uint32 `protobuf:"varint,200,opt,name=ebgp_maximum_paths,json=ebgpMaximumPaths,proto3" json:"ebgp_maximum_paths,omitempty"`
+	IbgpMaximumPaths uint32 `protobuf:"varint,201,opt,name=ibgp_maximum_paths,json=ibgpMaximumPaths,proto3" json:"ibgp_maximum_paths,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Global) Reset() {
@@ -14107,6 +14125,20 @@ func (x *Global) GetGracefulRestartInheritToNeighbors() bool {
 		return x.GracefulRestartInheritToNeighbors
 	}
 	return false
+}
+
+func (x *Global) GetEbgpMaximumPaths() uint32 {
+	if x != nil {
+		return x.EbgpMaximumPaths
+	}
+	return 0
+}
+
+func (x *Global) GetIbgpMaximumPaths() uint32 {
+	if x != nil {
+		return x.IbgpMaximumPaths
+	}
+	return 0
 }
 
 type Confederation struct {
@@ -17185,7 +17217,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x11import_interfaces\x18\x02 \x03(\tR\x10importInterfaces\"\x86\x01\n" +
 	"\x14DefaultRouteDistance\x126\n" +
 	"\x17external_route_distance\x18\x01 \x01(\rR\x15externalRouteDistance\x126\n" +
-	"\x17internal_route_distance\x18\x02 \x01(\rR\x15internalRouteDistance\"\xeb\x04\n" +
+	"\x17internal_route_distance\x18\x02 \x01(\rR\x15internalRouteDistance\"\xc9\x05\n" +
 	"\x06Global\x12\x10\n" +
 	"\x03asn\x18\x01 \x01(\rR\x03asn\x12\x1b\n" +
 	"\trouter_id\x18\x02 \x01(\tR\brouterId\x12\x1f\n" +
@@ -17200,7 +17232,9 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x10graceful_restart\x18\n" +
 	" \x01(\v2\x14.api.GracefulRestartR\x0fgracefulRestart\x12$\n" +
 	"\x0ebind_to_device\x18\v \x01(\tR\fbindToDevice\x12P\n" +
-	"%graceful_restart_inherit_to_neighbors\x18\f \x01(\bR!gracefulRestartInheritToNeighbors\"o\n" +
+	"%graceful_restart_inherit_to_neighbors\x18\f \x01(\bR!gracefulRestartInheritToNeighbors\x12-\n" +
+	"\x12ebgp_maximum_paths\x18\xc8\x01 \x01(\rR\x10ebgpMaximumPaths\x12-\n" +
+	"\x12ibgp_maximum_paths\x18\xc9\x01 \x01(\rR\x10ibgpMaximumPaths\"o\n" +
 	"\rConfederation\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x1e\n" +
 	"\n" +

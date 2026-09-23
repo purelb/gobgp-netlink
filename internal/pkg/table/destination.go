@@ -33,6 +33,13 @@ import (
 var (
 	SelectionOptions oc.RouteSelectionOptionsConfig
 	UseMultiplePaths oc.UseMultiplePathsConfig
+	// The most paths getMultiBestPath returns, by the type of the best path.
+	// 0 means that type gets the single best path. Written once, by StartBgp,
+	// before any destination exists - like the two above, and for the same
+	// reason: a change would leave every existing destination's multipath set
+	// derived from the old value.
+	EbgpMaximumPaths uint32
+	IbgpMaximumPaths uint32
 )
 
 type BestPathReason uint8
@@ -641,6 +648,36 @@ func getMultiBestPath(id string, pathList []*Path) []*Path {
 		if !p.IsNexthopInvalid && p.Compare(best) == 0 {
 			multi = append(multi, p)
 		}
+	}
+	return capMultiPath(best, multi)
+}
+
+// capMultiPath trims the tie set to the configured maximum for the best
+// path's type, keeping the most preferred.
+//
+// The limit is chosen once, from the best path. Path.Compare puts eBGP ahead
+// of iBGP, so a tie set never mixes the two and judging each member
+// separately would give the same answer at more cost.
+//
+// A locally originated best path is not capped. IsIBGP is false for it -
+// its source AS is zero - so it would otherwise fall under the eBGP limit,
+// which is not a statement anyone made about local routes.
+//
+// Confederation peers are external to IsIBGP and so take the eBGP limit, the
+// same classification Path.Compare gives them.
+func capMultiPath(best *Path, multi []*Path) []*Path {
+	if best.IsLocal() {
+		return multi
+	}
+	limit := EbgpMaximumPaths
+	if best.IsIBGP() {
+		limit = IbgpMaximumPaths
+	}
+	if limit == 0 {
+		limit = 1
+	}
+	if uint32(len(multi)) > limit {
+		multi = multi[:limit]
 	}
 	return multi
 }

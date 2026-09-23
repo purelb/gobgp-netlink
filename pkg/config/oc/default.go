@@ -567,6 +567,17 @@ func SetDefaultGlobalConfigValues(g *Global) error {
 	if len(g.Config.LocalAddressList) == 0 {
 		g.Config.LocalAddressList = []netip.Addr{netip.IPv4Unspecified(), netip.IPv6Unspecified()}
 	}
+
+	// Multipath with no limit on either peer type selects nothing it would
+	// not select anyway: an unset limit gives that type the single best path.
+	// Accepting it would be a switch that reads as on and does nothing, so it
+	// is refused. Called from both the config-file loader and StartBgp, so a
+	// file fails when it is read and an API request fails when it is sent.
+	mp := &g.UseMultiplePaths
+	if mp.Config.Enabled && mp.Ebgp.Config.MaximumPaths == 0 && mp.Ibgp.Config.MaximumPaths == 0 {
+		return fmt.Errorf("use-multiple-paths is enabled but neither ebgp nor ibgp maximum-paths is set; " +
+			"set at least one, or multipath selects only the single best path")
+	}
 	return nil
 }
 

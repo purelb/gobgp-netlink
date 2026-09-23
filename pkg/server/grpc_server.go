@@ -3066,6 +3066,8 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 			Config: oc.UseMultiplePathsConfig{
 				Enabled: a.UseMultiplePaths,
 			},
+			Ebgp: oc.Ebgp{Config: oc.EbgpConfig{MaximumPaths: a.EbgpMaximumPaths}},
+			Ibgp: oc.Ibgp{Config: oc.IbgpConfig{MaximumPaths: a.IbgpMaximumPaths}},
 		},
 	}
 	if a.RouteSelectionOptions != nil {

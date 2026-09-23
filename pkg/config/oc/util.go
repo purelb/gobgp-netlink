@@ -1073,6 +1073,11 @@ func NewGlobalFromConfigStruct(c *Global) *api.Global {
 
 		GracefulRestartInheritToNeighbors: c.Config.GracefulRestartInheritToNeighbors,
 
+		// The config file reaches StartBgp through this struct, so a limit
+		// not carried here never reaches the daemon at all.
+		EbgpMaximumPaths: c.UseMultiplePaths.Ebgp.Config.MaximumPaths,
+		IbgpMaximumPaths: c.UseMultiplePaths.Ibgp.Config.MaximumPaths,
+
 		RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 			AlwaysCompareMed:         c.RouteSelectionOptions.Config.AlwaysCompareMed,
 			IgnoreAsPathLength:       c.RouteSelectionOptions.Config.IgnoreAsPathLength,

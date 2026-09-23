@@ -5,9 +5,11 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/server"
 	"github.com/stretchr/testify/assert"
@@ -271,3 +273,39 @@ func (h *settingCaptureHandler) Handle(_ context.Context, r slog.Record) error {
 
 func (h *settingCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *settingCaptureHandler) WithGroup(string) slog.Handler      { return h }
+
+// maximum-paths set in a config file reaches the daemon.
+//
+// The file is not handed to StartBgp directly: InitialConfig converts it to an
+// api.Global first. A setting that conversion does not carry is parsed,
+// validated and then dropped before the daemon sees it - which is exactly what
+// happened to three neighbor blocks. GetBgp reports what StartBgp stored, so
+// asserting on it is asserting on the far side of that conversion.
+func TestMaximumPathsFromAConfigFileReachesTheDaemon(t *testing.T) {
+	ctx := context.Background()
+	bgpServer, _ := newTestBgpServer(t)
+
+	cfg, err := oc.ReadConfig(strings.NewReader(`
+[global.config]
+  as = 65001
+  router-id = "10.0.0.1"
+  port = -1
+[global.use-multiple-paths.config]
+  enabled = true
+[global.use-multiple-paths.ebgp.config]
+  maximum-paths = 4
+[global.use-multiple-paths.ibgp.config]
+  maximum-paths = 2
+`), "toml")
+	require.NoError(t, err)
+
+	_, err = InitialConfig(ctx, bgpServer, cfg, false)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bgpServer.StopBgp(ctx, &api.StopBgpRequest{}) })
+
+	rsp, err := bgpServer.GetBgp(ctx, &api.GetBgpRequest{})
+	require.NoError(t, err)
+	assert.True(t, rsp.Global.UseMultiplePaths)
+	assert.EqualValues(t, 4, rsp.Global.EbgpMaximumPaths)
+	assert.EqualValues(t, 2, rsp.Global.IbgpMaximumPaths)
+}

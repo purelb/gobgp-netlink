@@ -1709,6 +1709,24 @@ message Global {
   //
   // Precedence is peer, then peer group, then this.
   bool graceful_restart_inherit_to_neighbors = 12;
+  // Fork-local fields live at 200+ so upstream keeps the low numbers.
+  //
+  // The most paths use_multiple_paths may select for one prefix, by the type
+  // of the best path: eBGP when it was learned from an external peer, iBGP
+  // when from an internal one. 0 means that type gets the single best path.
+  // The multipath set is capped to the most preferred paths, in route
+  // selection order. Locally originated best paths are not capped.
+  //
+  // With use_multiple_paths set, at least one of the two must be non-zero:
+  // StartBgp rejects the request otherwise, because multipath with no limit
+  // on either type selects nothing it would not select anyway. Both may be
+  // set.
+  //
+  // Read once, at StartBgp. Changing them needs a restart, as with every
+  // global setting: the multipath set of an existing destination is derived
+  // from them on every change to it.
+  uint32 ebgp_maximum_paths = 200;
+  uint32 ibgp_maximum_paths = 201;
 }
 
 message Confederation {

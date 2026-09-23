@@ -304,6 +304,9 @@ func updateMsgD3() *bgp.BGPMessage {
 func TestMultipath(t *testing.T) {
 	saveSelectionGlobals(t)
 	UseMultiplePaths.Enabled = true
+	// Every path here is eBGP. The limit sits above anything the test adds,
+	// because what it asserts is the tie set, not the cap.
+	EbgpMaximumPaths = 64
 	origin := bgp.NewPathAttributeOrigin(0)
 	aspathParam := []bgp.AsPathParamInterface{bgp.NewAs4PathParam(2, []uint32{65000})}
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
@@ -902,6 +905,11 @@ func makeDeltaTestPath(t *testing.T, prefix, nexthop, src string, srcAS uint32, 
 }
 
 func TestUpdateGetMultiBestPathDiff(t *testing.T) {
+	// The diff is over two-path multipath sets; the cap would otherwise trim
+	// each to the single best path.
+	saveSelectionGlobals(t)
+	EbgpMaximumPaths = 64
+	IbgpMaximumPaths = 64
 	oldA := makeDeltaTestPath(t, "10.10.0.0/24", "192.0.2.1", "198.51.100.1", 65001, 1)
 	oldB := makeDeltaTestPath(t, "10.10.0.0/24", "192.0.2.2", "198.51.100.2", 65002, 2)
 	newC := makeDeltaTestPath(t, "10.10.0.0/24", "192.0.2.3", "198.51.100.3", 65003, 3)
@@ -975,8 +983,10 @@ func TestGetChanges_NonKeyNlriOrNexthopOnlyChange(t *testing.T) {
 func saveSelectionGlobals(t *testing.T) {
 	t.Helper()
 	so, ump := SelectionOptions, UseMultiplePaths
+	ebgp, ibgp := EbgpMaximumPaths, IbgpMaximumPaths
 	t.Cleanup(func() {
 		SelectionOptions, UseMultiplePaths = so, ump
+		EbgpMaximumPaths, IbgpMaximumPaths = ebgp, ibgp
 	})
 }
 
@@ -995,6 +1005,9 @@ func saveSelectionGlobals(t *testing.T) {
 func TestMultiBestPathIsTheTieSet(t *testing.T) {
 	saveSelectionGlobals(t)
 	UseMultiplePaths.Enabled = true
+	// Every path here is eBGP. The limit sits above anything the test adds,
+	// because what it asserts is the tie set, not the cap.
+	EbgpMaximumPaths = 64
 
 	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.20.30.0/24"))
 	now := time.Now()
@@ -1062,5 +1075,90 @@ func TestMultiBestPathIsTheTieSet(t *testing.T) {
 
 		got := getMultiBestPath(GLOBAL_RIB_NAME, []*Path{x, z})
 		assert.Equal(t, []*Path{x}, got)
+	})
+}
+
+// maximum-paths caps the multipath set, per type of the best path, keeping
+// the most preferred.
+func TestMultiBestPathIsCapped(t *testing.T) {
+	saveSelectionGlobals(t)
+	UseMultiplePaths.Enabled = true
+
+	nlri, _ := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.40.0.0/24"))
+	now := time.Now()
+
+	// Four paths that tie on cost, ordered by router ID. localAS == as makes
+	// the source internal, so the same helper gives eBGP and iBGP sets.
+	tieSet := func(t *testing.T, localAS uint32) []*Path {
+		t.Helper()
+		var paths []*Path
+		for i, id := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"} {
+			addr := netip.MustParseAddr(id)
+			nh, err := bgp.NewPathAttributeNextHop(addr)
+			require.NoError(t, err)
+			as := uint32(65010)
+			if localAS == 0 {
+				as = 65010 + uint32(i) // distinct neighbouring ASes for eBGP
+			}
+			attrs := []bgp.PathAttributeInterface{
+				bgp.NewPathAttributeOrigin(0),
+				bgp.NewPathAttributeAsPath([]bgp.AsPathParamInterface{
+					bgp.NewAs4PathParam(bgp.BGP_ASPATH_ATTR_TYPE_SEQ, []uint32{65100}),
+				}),
+				nh,
+				bgp.NewPathAttributeMultiExitDisc(10),
+			}
+			if localAS != 0 {
+				attrs = append(attrs, bgp.NewPathAttributeLocalPref(100))
+			}
+			msg := bgp.NewBGPUpdateMessage(nil, attrs, []bgp.PathNLRI{{NLRI: nlri}})
+			peer := &PeerInfo{AS: as, LocalAS: localAS, Address: addr, ID: addr}
+			paths = append(paths, ProcessMessage(msg, peer, now, false)[0])
+		}
+		return paths
+	}
+
+	t.Run("eBGP limit keeps the most preferred", func(t *testing.T) {
+		EbgpMaximumPaths, IbgpMaximumPaths = 2, 0
+		paths := tieSet(t, 0)
+		require.False(t, paths[0].IsIBGP())
+		assert.Equal(t, paths[:2], getMultiBestPath(GLOBAL_RIB_NAME, paths))
+	})
+
+	t.Run("iBGP limit applies to an internal best path", func(t *testing.T) {
+		EbgpMaximumPaths, IbgpMaximumPaths = 1, 3
+		paths := tieSet(t, 65010)
+		require.True(t, paths[0].IsIBGP())
+		assert.Equal(t, paths[:3], getMultiBestPath(GLOBAL_RIB_NAME, paths),
+			"an internal best path takes the iBGP limit, not the eBGP one")
+	})
+
+	t.Run("an unset limit means the single best path", func(t *testing.T) {
+		EbgpMaximumPaths, IbgpMaximumPaths = 0, 4
+		paths := tieSet(t, 0)
+		assert.Equal(t, paths[:1], getMultiBestPath(GLOBAL_RIB_NAME, paths),
+			"eBGP multipath with no eBGP limit is the best path alone, whatever the iBGP limit")
+	})
+
+	t.Run("a limit above the tie set changes nothing", func(t *testing.T) {
+		EbgpMaximumPaths, IbgpMaximumPaths = 8, 0
+		paths := tieSet(t, 0)
+		assert.Equal(t, paths, getMultiBestPath(GLOBAL_RIB_NAME, paths))
+	})
+
+	// A locally originated best path has source AS 0, so IsIBGP is false and
+	// the eBGP limit would otherwise apply to it - a statement nobody made
+	// about local routes.
+	t.Run("a local best path is not capped", func(t *testing.T) {
+		EbgpMaximumPaths, IbgpMaximumPaths = 1, 1
+		local := func(nexthop string) *Path {
+			nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr(nexthop))
+			require.NoError(t, err)
+			return NewPath(bgp.RF_IPv4_UC, &PeerInfo{}, bgp.PathNLRI{NLRI: nlri}, false,
+				[]bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(0), nh}, now, false)
+		}
+		paths := []*Path{local("192.0.2.1"), local("192.0.2.2")}
+		require.True(t, paths[0].IsLocal())
+		assert.Equal(t, paths, getMultiBestPath(GLOBAL_RIB_NAME, paths))
 	})
 }

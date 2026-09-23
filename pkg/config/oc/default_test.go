@@ -17,6 +17,7 @@ package oc
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -361,4 +362,34 @@ func Test_ConfiguredFields_ConcurrentRegisterAndLookup(t *testing.T) {
 	UnregisterConfiguredFields("203.0.113.1")
 	_, ok := lookupConfiguredFields("203.0.113.1")
 	assert.False(t, ok, "unregister must remove the entry, or a re-added peer inherits stale presence")
+}
+
+// Multipath enabled with no limit on either peer type is refused. An unset
+// limit gives that type the single best path, so such a setting reads as on
+// and selects nothing it would not select anyway.
+func TestUseMultiplePathsRequiresALimit(t *testing.T) {
+	global := func(enabled bool, ebgp, ibgp uint32) *Global {
+		g := &Global{Config: GlobalConfig{As: 65001, RouterId: netip.MustParseAddr("10.0.0.1")}}
+		g.UseMultiplePaths.Config.Enabled = enabled
+		g.UseMultiplePaths.Ebgp.Config.MaximumPaths = ebgp
+		g.UseMultiplePaths.Ibgp.Config.MaximumPaths = ibgp
+		return g
+	}
+
+	assert.Error(t, SetDefaultGlobalConfigValues(global(true, 0, 0)),
+		"enabled with neither limit must be refused")
+	assert.NoError(t, SetDefaultGlobalConfigValues(global(true, 4, 0)), "an eBGP limit alone is enough")
+	assert.NoError(t, SetDefaultGlobalConfigValues(global(true, 0, 2)), "an iBGP limit alone is enough")
+	assert.NoError(t, SetDefaultGlobalConfigValues(global(true, 4, 2)), "both may be set")
+	assert.NoError(t, SetDefaultGlobalConfigValues(global(false, 0, 0)), "disabled needs no limit")
+
+	// And a config file saying so fails when it is read, not later.
+	_, err := ReadConfig(strings.NewReader(`
+[global.config]
+  as = 65001
+  router-id = "10.0.0.1"
+[global.use-multiple-paths.config]
+  enabled = true
+`), "toml")
+	assert.Error(t, err, "a config file enabling multipath without a limit must fail to load")
 }

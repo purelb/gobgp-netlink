@@ -3202,6 +3202,8 @@ func (s *BgpServer) StartBgp(ctx context.Context, r *api.StartBgpRequest) error 
 		// update route selection options
 		table.SelectionOptions = c.RouteSelectionOptions.Config
 		table.UseMultiplePaths = c.UseMultiplePaths.Config
+		table.EbgpMaximumPaths = c.UseMultiplePaths.Ebgp.Config.MaximumPaths
+		table.IbgpMaximumPaths = c.UseMultiplePaths.Ibgp.Config.MaximumPaths
 		if s.bfdServer != nil {
 			s.bfdServer.listenInterface = g.BindToDevice
 			if err := s.bfdServer.Start(ctx, oc.BfdConfig{Port: BfdServerPort}); err != nil {
@@ -3735,25 +3737,38 @@ func (s *BgpServer) ListPath(r apiutil.ListPathRequest, fn func(prefix bgp.NLRI,
 			knownPathList := dst.GetAllKnownPathList()
 			paths := make([]*apiutil.Path, len(knownPathList))
 
+			// The paths flagged Best beyond the first are the multipath set,
+			// taken from the function the RIB itself uses rather than
+			// re-derived here. This site used to test each path with
+			// Path.Compare against the best on its own, which disagreed with
+			// the RIB in two ways: it had no maximum-paths cap, so `gobgp
+			// global rib` would flag every tie Best while only the capped set
+			// was used; and it applied to every table type, so an adj-in view
+			// flagged tying paths Best beneath a first path that was not.
+			var multi map[*table.Path]bool
+			if table.UseMultiplePaths.Enabled {
+				switch r.TableType {
+				case api.TableType_TABLE_TYPE_LOCAL, api.TableType_TABLE_TYPE_GLOBAL:
+					set := dst.GetMultiBestPath(r.Name)
+					multi = make(map[*table.Path]bool, len(set))
+					for _, m := range set {
+						multi[m] = true
+					}
+				}
+			}
+
 			for i, path := range knownPathList {
 				p := toPathApiUtil(path)
 				if validation := getValidation(v, path); validation != nil {
 					p.Validation = newValidationFromTableStruct(validation)
 				}
-				// Both reads below take the table globals. This site used to
-				// take use-multiple-paths from s.bgpConfig.Global instead -
-				// one knob with two readers, and the reader that decides which
-				// paths `gobgp global rib` flags Best. They are written only by
-				// StartBgp and so cannot disagree today, but disagreeing with
-				// the RIB about which paths are best is exactly the class of
-				// lie this branch exists to remove.
 				if !table.SelectionOptions.DisableBestPathSelection {
 					if i == 0 {
 						switch r.TableType {
 						case api.TableType_TABLE_TYPE_LOCAL, api.TableType_TABLE_TYPE_GLOBAL:
 							p.Best = true
 						}
-					} else if table.UseMultiplePaths.Enabled && path.Compare(knownPathList[0]) == 0 {
+					} else if multi[path] {
 						p.Best = true
 					}
 				}
@@ -3940,6 +3955,8 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 
 				GracefulRestartInheritToNeighbors: g.Config.GracefulRestartInheritToNeighbors,
 				Families:                          families,
+				EbgpMaximumPaths:                  g.UseMultiplePaths.Ebgp.Config.MaximumPaths,
+				IbgpMaximumPaths:                  g.UseMultiplePaths.Ibgp.Config.MaximumPaths,
 				RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 					AlwaysCompareMed:         g.RouteSelectionOptions.Config.AlwaysCompareMed,
 					IgnoreAsPathLength:       g.RouteSelectionOptions.Config.IgnoreAsPathLength,

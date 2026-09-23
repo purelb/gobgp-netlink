@@ -1247,6 +1247,11 @@ func TestListPathEnableMultipath(t *testing.T) {
 					RouterId:         "1.1.1.1",
 					UseMultiplePaths: tt.useMultiPath,
 					ListenPort:       -1,
+					// Enabling multipath requires a limit. These tests are
+					// about which paths are flagged Best, not about the cap,
+					// so the limit is set above anything they add.
+					EbgpMaximumPaths: 64,
+					IbgpMaximumPaths: 64,
 				},
 			})
 			require.NoError(t, err)
@@ -1355,6 +1360,8 @@ func TestListPathEnableMultipath_DifferentLocalPref(t *testing.T) {
 			RouterId:         "1.1.1.1",
 			UseMultiplePaths: true,
 			ListenPort:       -1,
+			EbgpMaximumPaths: 64,
+			IbgpMaximumPaths: 64,
 		},
 	})
 	require.NoError(t, err)
@@ -5475,6 +5482,8 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 		RouterId:         "1.1.1.1",
 		ListenPort:       -1,
 		UseMultiplePaths: true,
+		EbgpMaximumPaths: 4,
+		IbgpMaximumPaths: 2,
 		Families:         []uint32{0, 1}, // ipv4-unicast, ipv6-unicast
 		RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 			AlwaysCompareMed:        true,
@@ -5509,6 +5518,8 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 	assert.Equal(sent.Asn, got.Asn)
 	assert.Equal(sent.RouterId, got.RouterId)
 	assert.Equal(sent.UseMultiplePaths, got.UseMultiplePaths)
+	assert.Equal(sent.EbgpMaximumPaths, got.EbgpMaximumPaths, "ebgp_maximum_paths")
+	assert.Equal(sent.IbgpMaximumPaths, got.IbgpMaximumPaths, "ibgp_maximum_paths")
 	assert.ElementsMatch(sent.Families, got.Families, "families")
 
 	if assert.NotNil(got.RouteSelectionOptions, "route_selection_options") {
@@ -5955,4 +5966,61 @@ func interfaceWithGlobalIPv4(t *testing.T) (string, net.IP) {
 	}
 	t.Skip("no interface with a global unicast IPv4 address")
 	return "", nil
+}
+
+// ListPath flags as Best exactly the multipath set the RIB uses - including
+// the maximum-paths cap.
+//
+// It used to test each path against the best with Path.Compare on its own, so
+// with a cap in force `gobgp global rib` would have flagged every tie Best
+// while only the capped set was selected.
+func TestListPathBestFlagsHonourMaximumPaths(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{
+			Asn:              65001,
+			RouterId:         "1.1.1.1",
+			ListenPort:       -1,
+			UseMultiplePaths: true,
+			EbgpMaximumPaths: 2,
+		},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	const prefix = "10.60.0.0/24"
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(prefix))
+	require.NoError(t, err)
+
+	// Three eBGP paths from three peers, equal on every cost attribute, so
+	// all three tie and the cap alone decides how many are selected.
+	for i, peer := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
+		nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr(fmt.Sprintf("192.168.60.%d", i+1)))
+		require.NoError(t, err)
+		addr := netip.MustParseAddr(peer)
+		p := table.NewPath(bgp.RF_IPv4_UC,
+			&table.PeerInfo{AS: 65002 + uint32(i), ID: addr, Address: addr},
+			bgp.PathNLRI{NLRI: nlri}, false,
+			[]bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), nh},
+			time.Now(), false)
+		require.NotNil(t, p)
+		require.False(t, p.IsLocal(), "the cap does not apply to local paths, so these must be peer-sourced")
+		s.shared.mu.Lock()
+		s.propagateUpdate(nil, []*table.Path{p})
+		s.shared.mu.Unlock()
+	}
+
+	var best []bool
+	require.NoError(t, s.ListPath(apiutil.ListPathRequest{
+		TableType: api.TableType_TABLE_TYPE_GLOBAL,
+		Family:    bgp.RF_IPv4_UC,
+	}, func(_ bgp.NLRI, paths []*apiutil.Path) {
+		for _, p := range paths {
+			best = append(best, p.Best)
+		}
+	}))
+
+	require.Len(t, best, 3, "all three paths are in the RIB")
+	assert.Equal(t, []bool{true, true, false}, best,
+		"the two most preferred ties are the multipath set; the third is capped out and must not be flagged Best")
 }
