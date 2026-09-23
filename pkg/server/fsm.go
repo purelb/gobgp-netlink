@@ -2191,7 +2191,24 @@ func (h *fsmHandler) established(ctx context.Context) (bgp.FSMState, *fsmStateRe
 					_ = fsm.sendNotification(fsm.conn, m)
 					return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmAdminDown, notificationBody(m), nil)
 				case adminStatePfxCt:
-					_ = fsm.sendNotification(fsm.conn, bgp.NewBGPNotificationMessage(bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_MAXIMUM_NUMBER_OF_PREFIXES_REACHED, nil))
+					// Return a state, as the adminStateDown arm does. This used
+					// to send the CEASE and fall through, and sendNotification
+					// closes the connection - so the session went down through
+					// whichever goroutine noticed first, usually the reader
+					// with fsmReadFailed, sometimes a writer. The reason
+					// reported was not this one, and was not even stable.
+					//
+					// fsmNotificationSent rather than fsmAdminDown, which would
+					// be wrong twice over: BMP maps fsmAdminDown to reason 2,
+					// LOCAL_NO_NOTIFICATION, which carries no PDU, so the
+					// maximum-prefixes CEASE would never reach the station; and
+					// the API would report ADMIN_DOWN beside an admin_state
+					// already saying PFX_CT. fsmNotificationSent is BMP reason
+					// 1, which carries the notification, and renders in
+					// disconnect_message as the CEASE subcode.
+					m := bgp.NewBGPNotificationMessage(bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_MAXIMUM_NUMBER_OF_PREFIXES_REACHED, nil)
+					_ = fsm.sendNotification(fsm.conn, m)
+					return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmNotificationSent, notificationBody(m), nil)
 				}
 			}
 		}

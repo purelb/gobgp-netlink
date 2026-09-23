@@ -581,3 +581,70 @@ func TestEffectDisconnectReasonIsReported(t *testing.T) {
 	assert.Contains(t, st.DisconnectMessage, "notification-sent",
 		"the message names the reason, not just the enum")
 }
+
+// A peer shut down for exceeding its prefix limit reports that as the reason.
+//
+// The adminStatePfxCt arm sent the CEASE and returned no state. sendNotification
+// closes the connection, so the session went down through whichever goroutine
+// noticed first - usually the reader, as read-failed - and the reason reported
+// was neither right nor stable. BMP saw the same wrong reason, so the
+// maximum-prefixes notification it should have carried to the station was
+// never attached.
+func TestEffectPrefixLimitShutdownIsReportedAsSuch(t *testing.T) {
+	const port = 10721
+
+	a := NewBgpServer()
+	go a.Serve()
+	require.NoError(t, a.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65001, RouterId: "1.1.1.1", ListenPort: port},
+	}))
+	t.Cleanup(func() { a.StopBgp(context.Background(), &api.StopBgpRequest{}) }) //nolint:errcheck
+
+	// One prefix allowed; the second one trips it.
+	require.NoError(t, a.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65002},
+		Transport: &api.Transport{PassiveMode: true},
+		AfiSafis: []*api.AfiSafi{{
+			Config: &api.AfiSafiConfig{
+				Family:  &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST},
+				Enabled: true,
+			},
+			PrefixLimits: &api.PrefixLimit{MaxPrefixes: 1},
+		}},
+	}}))
+
+	b := NewBgpServer()
+	go b.Serve()
+	require.NoError(t, b.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65002, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	t.Cleanup(func() { b.StopBgp(context.Background(), &api.StopBgpRequest{}) }) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(a, api.PeerState_SESSION_STATE_ESTABLISHED)
+	require.NoError(t, b.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65001},
+		Transport: &api.Transport{RemotePort: uint32(port)},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	advertise(t, b, "10.72.1.0/24")
+	advertise(t, b, "10.72.2.0/24")
+
+	var st *api.PeerState
+	require.Eventually(t, func() bool {
+		var p *api.Peer
+		if err := a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }); err != nil || p == nil || p.State == nil {
+			return false
+		}
+		st = p.State
+		return st.AdminState == api.PeerState_ADMIN_STATE_PFX_CT &&
+			st.DisconnectReason != api.PeerState_DISCONNECT_REASON_UNSPECIFIED
+	}, 30*time.Second, 200*time.Millisecond, "the prefix limit must shut the session down and say why")
+
+	assert.Equal(t, api.PeerState_DISCONNECT_REASON_NOTIFICATION_SENT, st.DisconnectReason,
+		"the session went down because this speaker sent a CEASE, not because a read or write failed")
+	assert.Contains(t, st.DisconnectMessage, "maximum number of prefixes reached",
+		"the message must name the CEASE subcode")
+}
