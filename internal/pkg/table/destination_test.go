@@ -184,6 +184,7 @@ func TestMedTieBreaker(t *testing.T) {
 }
 
 func TestTimeTieBreaker(t *testing.T) {
+	saveSelectionGlobals(t)
 	origin := bgp.NewPathAttributeOrigin(0)
 	aspathParam := []bgp.AsPathParamInterface{bgp.NewAs4PathParam(2, []uint32{65001})}
 	aspath := bgp.NewPathAttributeAsPath(aspathParam)
@@ -300,6 +301,7 @@ func updateMsgD3() *bgp.BGPMessage {
 }
 
 func TestMultipath(t *testing.T) {
+	saveSelectionGlobals(t)
 	UseMultiplePaths.Enabled = true
 	origin := bgp.NewPathAttributeOrigin(0)
 	aspathParam := []bgp.AsPathParamInterface{bgp.NewAs4PathParam(2, []uint32{65000})}
@@ -381,7 +383,6 @@ func TestMultipath(t *testing.T) {
 	assert.Equal(t, len(multi), 2)
 	assert.Equal(t, len(d.GetKnownPathList(GLOBAL_RIB_NAME, 0)), 3)
 
-	UseMultiplePaths.Enabled = false
 }
 
 func TestIdMap(t *testing.T) {
@@ -577,6 +578,7 @@ func TestCompareByLocalOrigin(t *testing.T) {
 }
 
 func TestCompareByASPath_IgnoreLength(t *testing.T) {
+	saveSelectionGlobals(t)
 	oldIgnoreAsPathLength := SelectionOptions.IgnoreAsPathLength
 	defer func() {
 		SelectionOptions.IgnoreAsPathLength = oldIgnoreAsPathLength
@@ -955,4 +957,25 @@ func TestGetChanges_NonKeyNlriOrNexthopOnlyChange(t *testing.T) {
 	u4, _ := d.Calculate(logger, p4)
 	best4, _, _ := u4.GetChanges(GLOBAL_RIB_NAME, 0, false)
 	assert.Nil(t, best4, "identical re-add should stay suppressed")
+}
+
+// saveSelectionGlobals restores the package-level route-selection globals when
+// the test ends.
+//
+// SelectionOptions and UseMultiplePaths (destination.go:33) are package-level
+// mutable state that production code writes exactly once, at StartBgp, before
+// any destination exists. Tests write them whenever they like, and several used
+// to write them and never put them back - so every later test in the package
+// ran with a tie-breaker disabled or multipath on, and could be passing for
+// that reason rather than its own.
+//
+// ExternalCompareRouterId was the worst: it switches off compareByAge
+// (destination.go:961), which is exactly the comparator the multipath tie-set
+// tests depend on.
+func saveSelectionGlobals(t *testing.T) {
+	t.Helper()
+	so, ump := SelectionOptions, UseMultiplePaths
+	t.Cleanup(func() {
+		SelectionOptions, UseMultiplePaths = so, ump
+	})
 }

@@ -1090,6 +1090,7 @@ func TestProcessBGPUpdate_6_select_ebgp_path_ipv6(t *testing.T) {
 
 // test: compare Router ID
 func TestProcessBGPUpdate_7_select_low_routerid_path_ipv4(t *testing.T) {
+	saveSelectionGlobals(t)
 	tm := NewTableManager(logger, []bgp.Family{bgp.RF_IPv4_UC})
 	SelectionOptions.ExternalCompareRouterId = true
 
