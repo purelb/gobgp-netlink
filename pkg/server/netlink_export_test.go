@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -313,11 +314,11 @@ func TestReEvaluateKeepsVrfRoutes(t *testing.T) {
 	e := vrfExportClient(t, f)
 	path := testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")
 
-	e.processUpdate(path)
+	e.processUpdate(pathUpdate(path))
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"), "the VRF route should be installed")
 
 	// Re-evaluating with unchanged configuration must be a no-op.
-	e.reEvaluateAllRoutes([]*table.Path{path})
+	e.reEvaluateAllRoutes([][]*table.Path{{path}})
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
 		"re-evaluation with unchanged rules must not withdraw VRF routes")
 }
@@ -330,7 +331,7 @@ func TestReEvaluateDoesNotLeakVpnIntoUnicastRules(t *testing.T) {
 	e := vrfExportClient(t, f)
 	e.rules = []*exportRule{{Name: "catch-all", TableId: 254, Metric: 20}}
 
-	e.reEvaluateAllRoutes([]*table.Path{testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")})
+	e.reEvaluateAllRoutes([][]*table.Path{{testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")}})
 
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"), "VPN path belongs in its VRF table")
 	assert.False(t, f.hasRoute(254, "10.0.0.0/24"),
@@ -343,12 +344,12 @@ func TestReEvaluateWithdrawsUnmatchedRoutes(t *testing.T) {
 	e := vrfExportClient(t, f)
 	path := testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")
 
-	e.processUpdate(path)
+	e.processUpdate(pathUpdate(path))
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"))
 
 	// The VRF is no longer exported, so its route should go.
 	e.vrfRules = map[string]*vrfExportConfig{}
-	e.reEvaluateAllRoutes([]*table.Path{path})
+	e.reEvaluateAllRoutes([][]*table.Path{{path}})
 	assert.False(t, f.hasRoute(100, "10.0.0.0/24"),
 		"a route no longer matching any rule should be withdrawn")
 }
@@ -366,7 +367,7 @@ func TestTwoGlobalRulesBothTracked(t *testing.T) {
 		&exportRule{Name: "b", TableId: 200, Metric: 20},
 	)
 
-	e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"))
+	e.processUpdate(pathUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")))
 
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"))
 	assert.True(t, f.hasRoute(200, "10.0.0.0/24"))
@@ -386,10 +387,10 @@ func TestWithdrawRemovesEveryRulesRoute(t *testing.T) {
 	)
 
 	path := testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")
-	e.processUpdate(path)
+	e.processUpdate(pathUpdate(path))
 	assert.Equal(t, 2, f.routeCount())
 
-	e.processUpdate(path.Clone(true))
+	e.processUpdate(pathUpdate(path.Clone(true)))
 	assert.Equal(t, 0, f.routeCount(), "withdrawal must remove every rule's route")
 }
 
@@ -403,11 +404,11 @@ func TestWithdrawDoesNotCrossVrfs(t *testing.T) {
 	f := newFakeNetlink()
 	e := vrfExportClient(t, f)
 
-	e.processUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1"))
+	e.processUpdate(pathUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")))
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"))
 
 	// Same prefix, an RD we have no mapping for.
-	e.processUpdate(testVpnPath(t, "999:1", "10.0.0.0/24", "192.168.1.1").Clone(true))
+	e.processUpdate(pathUpdate(testVpnPath(t, "999:1", "10.0.0.0/24", "192.168.1.1").Clone(true)))
 
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
 		"a withdrawal for an unmapped RD must not delete another VRF's route")
@@ -420,10 +421,10 @@ func TestUnicastWithdrawDoesNotTouchVrfBuckets(t *testing.T) {
 	e := vrfExportClient(t, f)
 	e.rules = []*exportRule{{Name: "global", TableId: 254, Metric: 20}}
 
-	e.processUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1"))
+	e.processUpdate(pathUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")))
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"))
 
-	e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1").Clone(true))
+	e.processUpdate(pathUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1").Clone(true)))
 
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
 		"a unicast withdrawal must not reach a VRF export bucket")
@@ -532,7 +533,7 @@ func TestVpnPathReachesExportForGrpcCreatedVrf(t *testing.T) {
 	assert.NoError(t, e.buildVrfMappings())
 	s.shared.mu.Unlock()
 
-	e.processUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1"))
+	e.processUpdate(pathUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")))
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
 		"a VPN path for a gRPC-created VRF should reach the kernel")
 }
@@ -563,7 +564,7 @@ func TestVrfExportFailsClosedOnBadCommunity(t *testing.T) {
 	assert.NoError(t, e.buildVrfMappings())
 	s.shared.mu.Unlock()
 
-	e.processUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1"))
+	e.processUpdate(pathUpdate(testVpnPath(t, "100:1", "10.0.0.0/24", "192.168.1.1")))
 
 	assert.Equal(t, 0, f.routeCount(),
 		"an unparseable community filter must export nothing, not everything")
@@ -610,7 +611,7 @@ func TestNexthopValidationWorksForVrfTable(t *testing.T) {
 		&exportRule{Name: "vrf", VrfName: "vrf-red", TableId: 100, Metric: 20, ValidateNexthop: true})
 	f.addLink("vrf-red", 7)
 
-	e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"))
+	e.processUpdate(pathUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")))
 	assert.True(t, f.hasRoute(100, "10.0.0.0/24"),
 		"a reachable nexthop in the VRF table should validate")
 }
@@ -626,7 +627,7 @@ func TestNexthopValidationRejectsUnreachableType(t *testing.T) {
 		&exportRule{Name: "vrf", VrfName: "vrf-red", TableId: 100, Metric: 20, ValidateNexthop: true})
 	f.addLink("vrf-red", 7)
 
-	e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"))
+	e.processUpdate(pathUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")))
 	assert.Equal(t, 0, f.routeCount(), "an unreachable route must not count as reachable")
 }
 
@@ -642,7 +643,7 @@ func TestLinkLocalNexthopGetsOutputInterface(t *testing.T) {
 	e := newTestExportClient(t, f,
 		&exportRule{Name: "global", TableId: 0, Metric: 20, ValidateNexthop: true})
 
-	e.processUpdate(netlinkSourcedPath(t, "2001:db8:1::/64", "fe80::1", "eth0"))
+	e.processUpdate(pathUpdate(netlinkSourcedPath(t, "2001:db8:1::/64", "fe80::1", "eth0")))
 
 	route := f.routeFor(0, "2001:db8:1::/64")
 	if assert.NotNil(t, route, "a link-local nexthop route should be installed") {
@@ -659,7 +660,7 @@ func TestLinkLocalNexthopWithoutInterfaceIsRejected(t *testing.T) {
 		&exportRule{Name: "global", TableId: 0, Metric: 20, ValidateNexthop: true})
 
 	// Source has no interface recorded.
-	err := e.exportRoute(testUnicastPath(t, "2001:db8:1::/64", "fe80::1"), e.rules[0])
+	err := e.exportRoute([]*table.Path{testUnicastPath(t, "2001:db8:1::/64", "fe80::1")}, e.rules[0])
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "output interface")
 	assert.Equal(t, 0, f.routeCount())
@@ -687,7 +688,7 @@ func TestOnlinkIsIndependentOfValidation(t *testing.T) {
 				Metric: 20, ValidateNexthop: tt.validate,
 			})
 
-			e.processUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"))
+			e.processUpdate(pathUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")))
 
 			route := f.routeFor(100, "10.0.0.0/24")
 			if assert.NotNil(t, route) {
@@ -843,7 +844,7 @@ func TestDampeningCapInstallsFlappingPrefix(t *testing.T) {
 			case <-stop:
 				return
 			case <-ticker.C:
-				e.scheduleUpdate(path)
+				e.scheduleUpdate(pathUpdate(path))
 			}
 		}
 	}()
@@ -865,7 +866,7 @@ func TestDampeningStillDefersBurst(t *testing.T) {
 
 	path := testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")
 	for range 10 {
-		e.scheduleUpdate(path)
+		e.scheduleUpdate(pathUpdate(path))
 	}
 
 	// Nothing written yet: the burst is still being collapsed.
@@ -942,7 +943,7 @@ func TestDampeningFlushIsBudgeted(t *testing.T) {
 
 	const total = dampenFlushBudget + 25
 	for i := range total {
-		e.scheduleUpdate(testUnicastPath(t, fmt.Sprintf("10.%d.%d.0/24", i/256, i%256), "192.168.1.1"))
+		e.scheduleUpdate(pathUpdate(testUnicastPath(t, fmt.Sprintf("10.%d.%d.0/24", i/256, i%256), "192.168.1.1")))
 	}
 
 	// One timer for the whole map, not one per prefix.
@@ -1026,7 +1027,7 @@ func benchmarkScheduleBurst(b *testing.B, n int) {
 		b.StartTimer()
 
 		for _, p := range paths {
-			e.scheduleUpdate(p)
+			e.scheduleUpdate(pathUpdate(p))
 		}
 
 		b.StopTimer()
@@ -1069,4 +1070,304 @@ func TestGetNetlinkEchoesExportSettings(t *testing.T) {
 	assert.True(t, got.ExportEnabled)
 	assert.Equal(t, uint32(250), got.DampeningInterval, "dampening_interval must be echoed back")
 	assert.Equal(t, int32(186), got.RouteProtocol, "route_protocol must be echoed back")
+}
+
+// pathUpdate is the export state for one path: installed through it, or for a
+// withdrawal, removed. It is what the export hook produces when
+// use-multiple-paths is off.
+func pathUpdate(p *table.Path) exportUpdate {
+	if p.IsWithdraw {
+		return exportUpdate{ref: p}
+	}
+	return exportUpdate{ref: p, paths: []*table.Path{p}}
+}
+
+// --- ECMP export ---
+
+// testPathWithCommunity is testUnicastPath carrying one standard community, for
+// the rule-filter cases.
+func testPathWithCommunity(t testing.TB, cidr, nexthop string, community uint32) *table.Path {
+	t.Helper()
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(cidr))
+	assert.NoError(t, err)
+	nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr(nexthop))
+	assert.NoError(t, err)
+	return table.NewPath(bgp.RF_IPv4_UC, nil, bgp.PathNLRI{NLRI: nlri}, false,
+		[]bgp.PathAttributeInterface{
+			bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), nh,
+			bgp.NewPathAttributeCommunities([]uint32{community}),
+		}, time.Now(), false)
+}
+
+func setUpdate(paths ...*table.Path) exportUpdate {
+	return exportUpdate{ref: paths[0], paths: paths}
+}
+
+// gateways lists the nexthops a kernel route forwards over, in route order.
+func gateways(r *go_netlink.Route) []string {
+	var out []string
+	for _, nh := range routeNexthopList(r) {
+		out = append(out, nh.Gw.String())
+	}
+	return out
+}
+
+// A multipath set installs one kernel route with a nexthop per path.
+//
+// The export took one path and installed one gateway, so a node running
+// use-multiple-paths selected and advertised several paths and forwarded over
+// one of them.
+func TestExportSetInstallsEveryNexthop(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f, &exportRule{Name: "global", TableId: 254, Metric: 20})
+
+	e.processUpdate(setUpdate(
+		testUnicastPath(t, "10.0.0.0/24", "192.168.1.2"),
+		testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"),
+	))
+
+	r := f.routeFor(254, "10.0.0.0/24")
+	require.NotNil(t, r)
+	assert.Nil(t, r.Gw, "an ECMP route carries its gateways in MultiPath")
+	assert.Equal(t, []string{"192.168.1.1", "192.168.1.2"}, gateways(r),
+		"one nexthop per path, in a stable order whatever the selection order")
+	assert.Equal(t, 1, f.routeCount(), "one kernel route for the prefix, not one per path")
+}
+
+// A set of one is the route this daemon always installed. A node that does not
+// run multipath must see no change at all in what reaches its FIB.
+func TestExportSingleNexthopKeepsTheSingleGatewayForm(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f, &exportRule{Name: "global", TableId: 254, Metric: 20})
+
+	e.processUpdate(setUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")))
+
+	r := f.routeFor(254, "10.0.0.0/24")
+	require.NotNil(t, r)
+	assert.Equal(t, "192.168.1.1", r.Gw.String())
+	assert.Empty(t, r.MultiPath)
+}
+
+// Two sessions to one router give two paths with one nexthop. Installing it
+// twice would weight the route toward that router.
+func TestExportSetInstallsADuplicateNexthopOnce(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f, &exportRule{Name: "global", TableId: 254, Metric: 20})
+
+	e.processUpdate(setUpdate(
+		testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"),
+		testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"),
+	))
+
+	r := f.routeFor(254, "10.0.0.0/24")
+	require.NotNil(t, r)
+	assert.Equal(t, "192.168.1.1", r.Gw.String(), "a single distinct nexthop is a single-gateway route")
+	assert.Empty(t, r.MultiPath)
+}
+
+// Losing one of several paths reprograms the route in place. It must not delete
+// it: that leaves the prefix with no route until the add lands, which for a
+// service VIP is dropped traffic on every peer flap.
+//
+// Any change of gateway used to be done as a delete followed by an add.
+func TestLosingOnePathReplacesTheRouteInPlace(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f, &exportRule{Name: "global", TableId: 254, Metric: 20})
+
+	a := testUnicastPath(t, "10.0.0.0/24", "192.168.1.1")
+	b := testUnicastPath(t, "10.0.0.0/24", "192.168.1.2")
+	e.processUpdate(setUpdate(a, b))
+	_, delBefore, _ := f.counts()
+
+	e.processUpdate(setUpdate(a))
+
+	r := f.routeFor(254, "10.0.0.0/24")
+	require.NotNil(t, r, "the prefix still has a path, so it must still have a route")
+	assert.Equal(t, []string{"192.168.1.1"}, gateways(r))
+	_, delAfter, _ := f.counts()
+	assert.Equal(t, delBefore, delAfter, "the route must be replaced, never deleted and re-added")
+}
+
+// A nexthop that fails validation is left out; the route keeps the others.
+// Before, one path's unreachable nexthop failed the whole export - fine when
+// there was only one path, wrong when there are several.
+func TestExportSetLeavesOutAnUnreachableNexthop(t *testing.T) {
+	f := newFakeNetlink()
+	f.setReachable("192.168.1.1", unix_RT_TABLE_MAIN, unix.RTN_UNICAST)
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "global", TableId: unix_RT_TABLE_MAIN, Metric: 20, ValidateNexthop: true})
+
+	e.processUpdate(setUpdate(
+		testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"),
+		testUnicastPath(t, "10.0.0.0/24", "192.168.1.2"), // not reachable
+	))
+
+	r := f.routeFor(unix_RT_TABLE_MAIN, "10.0.0.0/24")
+	require.NotNil(t, r)
+	assert.Equal(t, []string{"192.168.1.1"}, gateways(r))
+}
+
+// Rules match paths, so a rule installs the part of the set it matches. If three
+// paths tie and a rule's filter accepts two, that rule's route has two nexthops.
+func TestExportSetHonoursEachRulesFilter(t *testing.T) {
+	const tagged = 65000<<16 | 100
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "tagged", TableId: 100, Metric: 20, Communities: []uint32{tagged}})
+
+	e.processUpdate(setUpdate(
+		testPathWithCommunity(t, "10.0.0.0/24", "192.168.1.1", tagged),
+		testPathWithCommunity(t, "10.0.0.0/24", "192.168.1.2", tagged),
+		testUnicastPath(t, "10.0.0.0/24", "192.168.1.3"),
+	))
+
+	r := f.routeFor(100, "10.0.0.0/24")
+	require.NotNil(t, r)
+	assert.Equal(t, []string{"192.168.1.1", "192.168.1.2"}, gateways(r),
+		"only the paths the rule's filter accepts are its nexthops")
+}
+
+// A rule gives up its route when none of the selected paths match it any more.
+//
+// Export only ever added or replaced. When the best path moved from one
+// carrying a rule's community to one without it, that rule's route stayed in
+// the kernel pointing at the old path's nexthop - even once that path had been
+// withdrawn from BGP altogether.
+func TestRuleRouteIsRemovedWhenItsPathsLeaveTheSet(t *testing.T) {
+	const tagged = 65000<<16 | 100
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "tagged", TableId: 100, Metric: 20, Communities: []uint32{tagged}},
+		&exportRule{Name: "all", TableId: 200, Metric: 20})
+
+	e.processUpdate(setUpdate(testPathWithCommunity(t, "10.0.0.0/24", "192.168.1.1", tagged)))
+	require.True(t, f.hasRoute(100, "10.0.0.0/24"))
+	require.True(t, f.hasRoute(200, "10.0.0.0/24"))
+
+	e.processUpdate(setUpdate(testUnicastPath(t, "10.0.0.0/24", "192.168.1.2")))
+
+	assert.False(t, f.hasRoute(100, "10.0.0.0/24"),
+		"the tagged rule matches nothing selected now, so its route must go")
+	r := f.routeFor(200, "10.0.0.0/24")
+	require.NotNil(t, r, "the untagged rule still matches")
+	assert.Equal(t, "192.168.1.2", r.Gw.String())
+}
+
+// Withdrawing one rule's route during re-evaluation must not forget the other
+// rules' routes for the same prefix.
+//
+// It deleted the whole prefix from the tracking bucket, and every global rule
+// shares one bucket - so the surviving rule's route stayed in the kernel and
+// was never withdrawn again.
+func TestReEvaluationKeepsTheOtherRulesTracking(t *testing.T) {
+	const tagged = 65000<<16 | 100
+	f := newFakeNetlink()
+	tagRule := &exportRule{Name: "tagged", TableId: 100, Metric: 20, Communities: []uint32{tagged}}
+	allRule := &exportRule{Name: "all", TableId: 200, Metric: 20}
+	e := newTestExportClient(t, f, tagRule, allRule)
+
+	p := testPathWithCommunity(t, "10.0.0.0/24", "192.168.1.1", tagged)
+	e.processUpdate(setUpdate(p))
+	require.True(t, f.hasRoute(100, "10.0.0.0/24"))
+	require.True(t, f.hasRoute(200, "10.0.0.0/24"))
+
+	// Drop the tagged rule; re-evaluation withdraws its route and keeps the other.
+	e.setRules([]*exportRule{allRule})
+	e.reEvaluateAllRoutes([][]*table.Path{{p}})
+	require.False(t, f.hasRoute(100, "10.0.0.0/24"))
+	require.True(t, f.hasRoute(200, "10.0.0.0/24"))
+
+	// Now the prefix goes. The surviving route must go with it.
+	e.processUpdate(exportUpdate{ref: p.Clone(true)})
+	assert.False(t, f.hasRoute(200, "10.0.0.0/24"),
+		"the surviving rule's route leaked: re-evaluation had dropped its tracking")
+}
+
+// The export hook follows the multipath set, through the real RIB.
+//
+// It was driven by the best path alone, so a second peer advertising a tying
+// path - which changes the multipath set and not the best path - never reached
+// the kernel.
+func TestNetlinkExportFollowsTheMultipathSet(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{
+			Asn: 65001, RouterId: "1.1.1.1", ListenPort: -1,
+			UseMultiplePaths: true, EbgpMaximumPaths: 2,
+		},
+	}))
+	t.Cleanup(func() { assert.NoError(t, s.StopBgp(context.Background(), &api.StopBgpRequest{})) })
+
+	f := newFakeNetlink()
+	e, err := newNetlinkExportClientWithHandle(s, logger, f, RTPROT_BGP, 0)
+	require.NoError(t, err)
+	e.rules = []*exportRule{{Name: "global", TableId: 254, Metric: 20}}
+	s.shared.mu.Lock()
+	s.netlinkExportClient = e
+	s.shared.mu.Unlock()
+
+	const prefix = "10.70.0.0/24"
+	peerPath := func(i int) *table.Path {
+		nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(prefix))
+		require.NoError(t, err)
+		nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr(fmt.Sprintf("192.168.70.%d", i)))
+		require.NoError(t, err)
+		addr := netip.MustParseAddr(fmt.Sprintf("10.0.70.%d", i))
+		return table.NewPath(bgp.RF_IPv4_UC, &table.PeerInfo{AS: 65100 + uint32(i), ID: addr, Address: addr},
+			bgp.PathNLRI{NLRI: nlri}, false,
+			[]bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), nh},
+			time.Now(), false)
+	}
+	send := func(p *table.Path) {
+		s.shared.mu.Lock()
+		s.propagateUpdate(nil, []*table.Path{p})
+		s.shared.mu.Unlock()
+	}
+	kernel := func() []string {
+		r := f.routeFor(254, prefix)
+		if r == nil {
+			return nil
+		}
+		return gateways(r)
+	}
+
+	// Export is dampened, so each kernel write lands on a timer rather than
+	// inline. settled waits out more than one interval, for the assertions that
+	// something did NOT change.
+	becomes := func(want []string, msg string) {
+		t.Helper()
+		require.Eventually(t, func() bool { return slices.Equal(kernel(), want) },
+			5*time.Second, 5*time.Millisecond, "%s: kernel has %v", msg, kernel())
+	}
+	settled := func() { time.Sleep(3 * e.dampeningInterval) }
+
+	p1, p2, p3 := peerPath(1), peerPath(2), peerPath(3)
+
+	send(p1)
+	becomes([]string{"192.168.70.1"}, "the first path installs a single-gateway route")
+
+	// The best path does not change here; only the multipath set does.
+	send(p2)
+	becomes([]string{"192.168.70.1", "192.168.70.2"},
+		"a second tying path must reach the kernel as a second nexthop")
+
+	// A third tie is capped out by maximum-paths: nothing may change.
+	send(p3)
+	settled()
+	assert.Equal(t, []string{"192.168.70.1", "192.168.70.2"}, kernel(),
+		"maximum-paths caps the kernel route too")
+
+	// Withdrawing an installed path lets the capped-out one in, by replacement.
+	_, delBefore, _ := f.counts()
+	send(p1.Clone(true))
+	becomes([]string{"192.168.70.2", "192.168.70.3"}, "the capped-out tie takes the withdrawn path's place")
+	settled()
+	_, delAfter, _ := f.counts()
+	assert.Equal(t, delBefore, delAfter, "losing a path must replace the route, not delete it")
+
+	// And the prefix goes when its last path does.
+	send(p2.Clone(true))
+	send(p3.Clone(true))
+	becomes(nil, "no paths left, so no route")
 }

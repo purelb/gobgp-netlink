@@ -1696,17 +1696,10 @@ func (s *BgpServer) propagateUpdate(peer *peer, pathList []*table.Path) {
 				// and concurrent across prefixes. The export client carries its
 				// own locks (e.mu, dampenMu, statsMu); see docs/dev/locking.md.
 				if s.netlinkExportClient != nil && !rs {
-					bestList, _, _, _, _ := dstsToPaths(table.GLOBAL_RIB_NAME, 0, dsts)
-					for _, best := range bestList {
-						// nil means the best path did not change, so there is
-						// nothing to program. It does NOT mean "withdrawn": a
-						// real withdrawal arrives non-nil with IsWithdraw set.
-						// Treating nil as a withdrawal would delete the kernel
-						// route on every duplicate update.
-						if best == nil {
-							continue
+					for _, dst := range dsts {
+						if u, ok := netlinkExportUpdate(dst); ok {
+							s.netlinkExportClient.scheduleUpdate(u)
 						}
-						s.netlinkExportClient.scheduleUpdate(best)
 					}
 				}
 			}
@@ -1822,6 +1815,60 @@ func dstsToPaths(id string, as uint32, dsts []*table.Update) ([]*table.Path, []*
 		}
 	}
 	return bestList, oldList, mpathList, multipathUpdate, multipathWithdraw
+}
+
+// netlinkExportUpdate turns one destination's change into the state the kernel
+// route for it should be programmed to, or reports that there is nothing to do.
+//
+// Export used to be driven by the best path alone, so a change to the
+// multipath set that left the best path where it was - a second peer
+// advertising a tying path, or a non-best tie withdrawing - never reached the
+// kernel at all, and nor did anything but the best path's own gateway.
+//
+// With use-multiple-paths the state is the multipath set, which GetChanges
+// returns whenever it differs from before (already capped by maximum-paths).
+// Without it, the state is the best path alone, exactly as before. Either way
+// an empty set means remove the route.
+func netlinkExportUpdate(dst *table.Update) (exportUpdate, bool) {
+	best, _, multi := dst.GetChanges(table.GLOBAL_RIB_NAME, 0, false)
+
+	if table.UseMultiplePaths.Enabled {
+		// nil: the multipath set did not change. When the new set is empty,
+		// GetChanges hands back the withdrawn best path in its place.
+		if multi == nil {
+			return exportUpdate{}, false
+		}
+		var live []*table.Path
+		var ref *table.Path
+		for _, p := range multi {
+			if p == nil {
+				continue
+			}
+			if ref == nil {
+				ref = p
+			}
+			if !p.IsWithdraw {
+				live = append(live, p)
+			}
+		}
+		if ref == nil {
+			// No path now and none before: nothing was ever exported.
+			return exportUpdate{}, false
+		}
+		return exportUpdate{ref: ref, paths: live}, true
+	}
+
+	// nil means the best path did not change, so there is nothing to program.
+	// It does NOT mean "withdrawn": a real withdrawal arrives non-nil with
+	// IsWithdraw set. Treating nil as a withdrawal would delete the kernel
+	// route on every duplicate update.
+	if best == nil {
+		return exportUpdate{}, false
+	}
+	if best.IsWithdraw {
+		return exportUpdate{ref: best}, true
+	}
+	return exportUpdate{ref: best, paths: []*table.Path{best}}, true
 }
 
 func (s *BgpServer) propagateUpdateToNeighbors(rib *table.TableManager, source *peer, newPath *table.Path, dsts []*table.Update, needOld bool) {
@@ -7249,12 +7296,22 @@ func (s *BgpServer) startNetlink(ctx context.Context) error {
 		// Re-evaluate all existing RIB routes with the new rules
 		// This ensures routes are exported/withdrawn based on the updated configuration
 		if s.globalRib != nil {
-			pathList := s.globalRib.GetBestPathList(table.GLOBAL_RIB_NAME, 0, nil)
+			// The same selected sets steady-state export programs: the
+			// multipath set per prefix when use-multiple-paths is on, the best
+			// path alone otherwise.
+			var sets [][]*table.Path
+			if table.UseMultiplePaths.Enabled {
+				sets = s.globalRib.GetBestMultiPathList(table.GLOBAL_RIB_NAME, nil)
+			} else {
+				for _, best := range s.globalRib.GetBestPathList(table.GLOBAL_RIB_NAME, 0, nil) {
+					sets = append(sets, []*table.Path{best})
+				}
+			}
 			s.logger.Info("Triggering route re-evaluation after rule update",
 				slog.String("Topic", "netlink"),
-				slog.Int("PathCount", len(pathList)))
-			if len(pathList) > 0 {
-				s.netlinkExportClient.reEvaluateAllRoutes(pathList)
+				slog.Int("PrefixCount", len(sets)))
+			if len(sets) > 0 {
+				s.netlinkExportClient.reEvaluateAllRoutes(sets)
 			} else {
 				s.logger.Info("No routes in RIB to re-evaluate",
 					slog.String("Topic", "netlink"))
