@@ -1084,44 +1084,6 @@ func readApplyPolicyFromAPIStruct(c *oc.ApplyPolicy, a *api.ApplyPolicy) {
 	}
 }
 
-func readRouteSelectionOptionsFromAPIStruct(c *oc.RouteSelectionOptions, a *api.RouteSelectionOptions) {
-	if c == nil || a == nil {
-		return
-	}
-	if a.Config != nil {
-		c.Config.AlwaysCompareMed = a.Config.AlwaysCompareMed
-		c.Config.IgnoreAsPathLength = a.Config.IgnoreAsPathLength
-		c.Config.ExternalCompareRouterId = a.Config.ExternalCompareRouterId
-		c.Config.AdvertiseInactiveRoutes = a.Config.AdvertiseInactiveRoutes
-		c.Config.EnableAigp = a.Config.EnableAigp
-		c.Config.IgnoreNextHopIgpMetric = a.Config.IgnoreNextHopIgpMetric
-	}
-}
-
-func readUseMultiplePathsFromAPIStruct(c *oc.UseMultiplePaths, a *api.UseMultiplePaths) {
-	if c == nil || a == nil {
-		return
-	}
-	if a.Config != nil {
-		c.Config.Enabled = a.Config.Enabled
-	}
-	if a.Ebgp != nil && a.Ebgp.Config != nil {
-		c.Ebgp = oc.Ebgp{
-			Config: oc.EbgpConfig{
-				AllowMultipleAs: a.Ebgp.Config.AllowMultipleAsn,
-				MaximumPaths:    a.Ebgp.Config.MaximumPaths,
-			},
-		}
-	}
-	if a.Ibgp != nil && a.Ibgp.Config != nil {
-		c.Ibgp = oc.Ibgp{
-			Config: oc.IbgpConfig{
-				MaximumPaths: a.Ibgp.Config.MaximumPaths,
-			},
-		}
-	}
-}
-
 func readRouteTargetMembershipFromAPIStruct(c *oc.RouteTargetMembership, a *api.RouteTargetMembership) error {
 	if c == nil || a == nil {
 		return nil
@@ -1336,7 +1298,6 @@ var neighborConfigFieldPresence = map[string]func(*api.Peer) bool{
 	"local-as":              func(a *api.Peer) bool { return a.Conf.LocalAsn != nil },
 	"auth-password":         func(a *api.Peer) bool { return a.Conf.AuthPassword != nil },
 	"remove-private-as":     func(a *api.Peer) bool { return a.Conf.RemovePrivate != nil },
-	"route-flap-damping":    func(a *api.Peer) bool { return a.Conf.RouteFlapDamping != nil },
 	"send-software-version": func(a *api.Peer) bool { return a.Conf.SendSoftwareVersion != nil },
 
 	// send_community has carried presence since it was added, for its own
@@ -1357,6 +1318,8 @@ var neighborConfigFieldsWithNothingToRecord = map[string]string{
 		"Whether a peer group should own its members' remote AS is a separate question from presence.",
 	"peer-type": "derived by getConfigPeerType from peer-as and local-as after inheritance resolves, so " +
 		"whatever a client sends is overwritten either way.",
+	"route-flap-damping": "removed from the API in 1.3.5 - no route flap damping is implemented - so no " +
+		"request can state it. The model leaf goes with the YANG deletions.",
 }
 
 // configFieldsPresent returns the presence map for the "config" block: which
@@ -1455,7 +1418,6 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		pconf.Config.PeerAs = a.Conf.PeerAsn
 		pconf.Config.LocalAs = a.Conf.GetLocalAsn()
 		pconf.Config.AuthPassword = a.Conf.GetAuthPassword()
-		pconf.Config.RouteFlapDamping = a.Conf.GetRouteFlapDamping()
 		pconf.Config.SendCommunity = oc.SendCommunityFromAPI(a.Conf.SendCommunity)
 		pconf.Config.Description = a.Conf.GetDescription()
 		pconf.Config.PeerGroup = a.Conf.PeerGroup
@@ -1512,8 +1474,6 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 			readAfiSafiConfigFromAPIStruct(&afiSafi.Config, af.Config)
 			readAfiSafiStateFromAPIStruct(&afiSafi.State, af.Config)
 			readApplyPolicyFromAPIStruct(&afiSafi.ApplyPolicy, af.ApplyPolicy)
-			readRouteSelectionOptionsFromAPIStruct(&afiSafi.RouteSelectionOptions, af.RouteSelectionOptions)
-			readUseMultiplePathsFromAPIStruct(&afiSafi.UseMultiplePaths, af.UseMultiplePaths)
 			readPrefixLimitFromAPIStruct(&afiSafi.PrefixLimit, af.PrefixLimits)
 			if err := readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership); err != nil {
 				return nil, err
@@ -1531,7 +1491,6 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 			pconf.Timers.Config.ConnectRetry = float64(a.Timers.Config.ConnectRetry)
 			pconf.Timers.Config.HoldTime = float64(a.Timers.Config.HoldTime)
 			pconf.Timers.Config.KeepaliveInterval = float64(a.Timers.Config.KeepaliveInterval)
-			pconf.Timers.Config.MinimumAdvertisementInterval = float64(a.Timers.Config.MinimumAdvertisementInterval)
 			pconf.Timers.Config.IdleHoldTimeAfterReset = float64(a.Timers.Config.IdleHoldTimeAfterReset)
 		}
 		if a.Timers.State != nil {
@@ -1681,7 +1640,6 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		pconf.Config.PeerAs = a.Conf.PeerAsn
 		pconf.Config.LocalAs = a.Conf.LocalAsn
 		pconf.Config.AuthPassword = a.Conf.AuthPassword
-		pconf.Config.RouteFlapDamping = a.Conf.RouteFlapDamping
 		pconf.Config.SendCommunity = oc.SendCommunityFromAPI(a.Conf.SendCommunity)
 		pconf.Config.Description = a.Conf.Description
 		pconf.Config.PeerGroupName = a.Conf.PeerGroupName
@@ -1706,8 +1664,6 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 			readAfiSafiConfigFromAPIStruct(&afiSafi.Config, af.Config)
 			readAfiSafiStateFromAPIStruct(&afiSafi.State, af.Config)
 			readApplyPolicyFromAPIStruct(&afiSafi.ApplyPolicy, af.ApplyPolicy)
-			readRouteSelectionOptionsFromAPIStruct(&afiSafi.RouteSelectionOptions, af.RouteSelectionOptions)
-			readUseMultiplePathsFromAPIStruct(&afiSafi.UseMultiplePaths, af.UseMultiplePaths)
 			readPrefixLimitFromAPIStruct(&afiSafi.PrefixLimit, af.PrefixLimits)
 			if err := readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership); err != nil {
 				return nil, err
@@ -1725,7 +1681,6 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 			pconf.Timers.Config.ConnectRetry = float64(a.Timers.Config.ConnectRetry)
 			pconf.Timers.Config.HoldTime = float64(a.Timers.Config.HoldTime)
 			pconf.Timers.Config.KeepaliveInterval = float64(a.Timers.Config.KeepaliveInterval)
-			pconf.Timers.Config.MinimumAdvertisementInterval = float64(a.Timers.Config.MinimumAdvertisementInterval)
 			pconf.Timers.Config.IdleHoldTimeAfterReset = float64(a.Timers.Config.IdleHoldTimeAfterReset)
 		}
 		if a.Timers.State != nil {

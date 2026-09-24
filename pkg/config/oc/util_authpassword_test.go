@@ -67,9 +67,9 @@ func TestNewPeerFromConfigStructSetsAuthPasswordSetFlagOnly(t *testing.T) {
 
 	p := NewPeerFromConfigStruct(withPassword)
 	assert.NotNil(p)
+	// PeerState has no field that could carry the key: auth_password was
+	// removed from it, so the flag is the only thing State can say.
 	assert.True(p.GetState().GetAuthPasswordSet(), "an MD5-configured peer must report the flag")
-	assert.Empty(p.GetState().GetAuthPassword(),
-		"State carries the flag, never the password: nothing redacts State")
 
 	without := &Neighbor{}
 	without.Config.NeighborAddress = netip.MustParseAddr("10.0.0.2")
@@ -77,5 +77,4 @@ func TestNewPeerFromConfigStructSetsAuthPasswordSetFlagOnly(t *testing.T) {
 	q := NewPeerFromConfigStruct(without)
 	assert.NotNil(q)
 	assert.False(q.GetState().GetAuthPasswordSet(), "a peer with no password must report false")
-	assert.Empty(q.GetState().GetAuthPassword())
 }

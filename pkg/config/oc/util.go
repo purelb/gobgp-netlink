@@ -475,19 +475,6 @@ func newAddPathsFromConfigStruct(c *AddPaths) *api.AddPaths {
 	}
 }
 
-func newRouteSelectionOptionsFromConfigStruct(c *RouteSelectionOptions) *api.RouteSelectionOptions {
-	return &api.RouteSelectionOptions{
-		Config: &api.RouteSelectionOptionsConfig{
-			AlwaysCompareMed:        c.Config.AlwaysCompareMed,
-			IgnoreAsPathLength:      c.Config.IgnoreAsPathLength,
-			ExternalCompareRouterId: c.Config.ExternalCompareRouterId,
-			AdvertiseInactiveRoutes: c.Config.AdvertiseInactiveRoutes,
-			EnableAigp:              c.Config.EnableAigp,
-			IgnoreNextHopIgpMetric:  c.Config.IgnoreNextHopIgpMetric,
-		},
-	}
-}
-
 func newMpGracefulRestartFromConfigStruct(c *MpGracefulRestart) *api.MpGracefulRestart {
 	return &api.MpGracefulRestart{
 		Config: &api.MpGracefulRestartConfig{
@@ -504,32 +491,11 @@ func newMpGracefulRestartFromConfigStruct(c *MpGracefulRestart) *api.MpGracefulR
 	}
 }
 
-func newUseMultiplePathsFromConfigStruct(c *UseMultiplePaths) *api.UseMultiplePaths {
-	return &api.UseMultiplePaths{
-		Config: &api.UseMultiplePathsConfig{
-			Enabled: c.Config.Enabled,
-		},
-		Ebgp: &api.Ebgp{
-			Config: &api.EbgpConfig{
-				AllowMultipleAsn: c.Ebgp.Config.AllowMultipleAs,
-				MaximumPaths:     c.Ebgp.Config.MaximumPaths,
-			},
-		},
-		Ibgp: &api.Ibgp{
-			Config: &api.IbgpConfig{
-				MaximumPaths: c.Ibgp.Config.MaximumPaths,
-			},
-		},
-	}
-}
-
 func newAfiSafiFromConfigStruct(c *AfiSafi) *api.AfiSafi {
 	return &api.AfiSafi{
 		MpGracefulRestart:        newMpGracefulRestartFromConfigStruct(&c.MpGracefulRestart),
 		Config:                   newAfiSafiConfigFromConfigStruct(c),
 		ApplyPolicy:              newApplyPolicyFromConfigStruct(&c.ApplyPolicy),
-		RouteSelectionOptions:    newRouteSelectionOptionsFromConfigStruct(&c.RouteSelectionOptions),
-		UseMultiplePaths:         newUseMultiplePathsFromConfigStruct(&c.UseMultiplePaths),
 		PrefixLimits:             newPrefixLimitFromConfigStruct(c),
 		RouteTargetMembership:    newRouteTargetMembershipFromConfigStruct(&c.RouteTargetMembership),
 		LongLivedGracefulRestart: newLongLivedGracefulRestartFromConfigStruct(&c.LongLivedGracefulRestart),
@@ -705,7 +671,6 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			AdminDown:            pconf.Config.AdminDown,
 			LocalAsn:             proto.Uint32(pconf.Config.LocalAs),
 			AuthPassword:         proto.String(pconf.Config.AuthPassword),
-			RouteFlapDamping:     proto.Bool(pconf.Config.RouteFlapDamping),
 			Description:          proto.String(pconf.Config.Description),
 			SendSoftwareVersion:  proto.Bool(pconf.Config.SendSoftwareVersion),
 		},
@@ -804,8 +769,6 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 				HoldTime:               uint64(timer.Config.HoldTime),
 				KeepaliveInterval:      uint64(timer.Config.KeepaliveInterval),
 				IdleHoldTimeAfterReset: uint64(timer.Config.IdleHoldTimeAfterReset),
-				// Accepted by both converters and reported by neither until now.
-				MinimumAdvertisementInterval: uint64(timer.Config.MinimumAdvertisementInterval),
 			},
 			State: &api.TimersState{
 				KeepaliveInterval:  uint64(timer.State.KeepaliveInterval),
@@ -953,7 +916,6 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			LocalAsn:             pconf.Config.LocalAs,
 			Type:                 toPeerType(pconf.Config.PeerType),
 			AuthPassword:         pconf.Config.AuthPassword,
-			RouteFlapDamping:     pconf.Config.RouteFlapDamping,
 			SendCommunity:        SendCommunityToAPI(pconf.Config.SendCommunity),
 			RemovePrivate:        removePrivateToAPI(pconf.Config.RemovePrivateAs),
 			Description:          pconf.Config.Description,
@@ -996,8 +958,6 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 				HoldTime:               uint64(timer.Config.HoldTime),
 				KeepaliveInterval:      uint64(timer.Config.KeepaliveInterval),
 				IdleHoldTimeAfterReset: uint64(timer.Config.IdleHoldTimeAfterReset),
-				// Accepted by both converters and reported by neither until now.
-				MinimumAdvertisementInterval: uint64(timer.Config.MinimumAdvertisementInterval),
 			},
 			State: &api.TimersState{
 				KeepaliveInterval:  uint64(timer.State.KeepaliveInterval),

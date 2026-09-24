@@ -77,7 +77,6 @@ var noWireEffect = map[string]string{
 	"PeerConf.peer_asn":                "session identity",
 	"PeerConf.peer_group":              "inheritance mechanism; the inherited fields carry the effect",
 	"PeerConf.type":                    "derived from the ASNs, not an input",
-	"PeerConf.route_flap_damping":      "not implemented in this daemon",
 	"PeerConf.neighbor_interface":      "transport selection, not a path attribute",
 	"PeerConf.vrf":                     "table selection; VRF import/export is covered by the RTC and VRF tests",
 	"PeerConf.allow_own_asn":           "ingress acceptance, not egress: it decides what we take, not what we send",
