@@ -2182,22 +2182,10 @@ type RpkiServerConfig struct {
 	// original -> gobgp:port
 	// Reference to the port of the RPKI server.
 	Port uint32 `mapstructure:"port" json:"port,omitempty"`
-	// original -> gobgp:refresh-time
-	// Check interval for a configured RPKI server.
-	RefreshTime int64 `mapstructure:"refresh-time" json:"refresh-time,omitempty"`
-	// original -> gobgp:hold-time
-	// Specify the length of time in seconds that the session between
-	// the router and RPKI server is to be considered operational
-	// without any activity.
-	HoldTime int64 `mapstructure:"hold-time" json:"hold-time,omitempty"`
 	// original -> gobgp:record-lifetime
 	// Indicate the expiration date of the route validation recode
 	// received from RPKI server.
 	RecordLifetime int64 `mapstructure:"record-lifetime" json:"record-lifetime,omitempty"`
-	// original -> gobgp:preference
-	// RPKI server has a static preference.
-	// Higher the preference values indicates a higher priority RPKI server.
-	Preference uint8 `mapstructure:"preference" json:"preference,omitempty"`
 }
 
 func (lhs *RpkiServerConfig) Equal(rhs *RpkiServerConfig) bool {
@@ -2210,16 +2198,7 @@ func (lhs *RpkiServerConfig) Equal(rhs *RpkiServerConfig) bool {
 	if lhs.Port != rhs.Port {
 		return false
 	}
-	if lhs.RefreshTime != rhs.RefreshTime {
-		return false
-	}
-	if lhs.HoldTime != rhs.HoldTime {
-		return false
-	}
 	if lhs.RecordLifetime != rhs.RecordLifetime {
-		return false
-	}
-	if lhs.Preference != rhs.Preference {
 		return false
 	}
 	return true
@@ -2272,10 +2251,6 @@ type PeerGroupState struct {
 	// original -> bgp:remove-private-as
 	// Remove private AS numbers from updates sent to peers.
 	RemovePrivateAs RemovePrivateAsOption `mapstructure:"remove-private-as" json:"remove-private-as,omitempty"`
-	// original -> bgp:route-flap-damping
-	// bgp:route-flap-damping's original type is boolean.
-	// Enable route flap damping.
-	RouteFlapDamping bool `mapstructure:"route-flap-damping" json:"route-flap-damping,omitempty"`
 	// original -> bgp:send-community
 	// Specify which types of community should be sent to the
 	// neighbor or group. The default is to not send the
@@ -2322,10 +2297,6 @@ type PeerGroupConfig struct {
 	// original -> bgp:remove-private-as
 	// Remove private AS numbers from updates sent to peers.
 	RemovePrivateAs RemovePrivateAsOption `mapstructure:"remove-private-as" json:"remove-private-as,omitempty"`
-	// original -> bgp:route-flap-damping
-	// bgp:route-flap-damping's original type is boolean.
-	// Enable route flap damping.
-	RouteFlapDamping bool `mapstructure:"route-flap-damping" json:"route-flap-damping,omitempty"`
 	// original -> bgp:send-community
 	// Specify which types of community should be sent to the
 	// neighbor or group. The default is to not send the
@@ -2362,9 +2333,6 @@ func (lhs *PeerGroupConfig) Equal(rhs *PeerGroupConfig) bool {
 	if lhs.RemovePrivateAs != rhs.RemovePrivateAs {
 		return false
 	}
-	if lhs.RouteFlapDamping != rhs.RouteFlapDamping {
-		return false
-	}
 	if lhs.SendCommunity != rhs.SendCommunity {
 		return false
 	}
@@ -2398,14 +2366,6 @@ type PeerGroup struct {
 	// original -> bgp:transport
 	// Transport session parameters for the BGP neighbor or group.
 	Transport Transport `mapstructure:"transport" json:"transport,omitempty"`
-	// original -> bgp:error-handling
-	// Error handling parameters used for the BGP neighbor or
-	// group.
-	ErrorHandling ErrorHandling `mapstructure:"error-handling" json:"error-handling,omitempty"`
-	// original -> bgp:logging-options
-	// Logging options for events related to the BGP neighbor or
-	// group.
-	LoggingOptions LoggingOptions `mapstructure:"logging-options" json:"logging-options,omitempty"`
 	// original -> bgp:ebgp-multihop
 	// eBGP multi-hop parameters for the BGP neighbor or group.
 	EbgpMultihop EbgpMultihop `mapstructure:"ebgp-multihop" json:"ebgp-multihop,omitempty"`
@@ -2433,10 +2393,6 @@ type PeerGroup struct {
 	// routing table, i.e., export (send) and import (receive),
 	// depending on the context.
 	ApplyPolicy ApplyPolicy `mapstructure:"apply-policy" json:"apply-policy,omitempty"`
-	// original -> bgp-mp:use-multiple-paths
-	// Parameters related to the use of multiple paths for the
-	// same NLRI.
-	UseMultiplePaths UseMultiplePaths `mapstructure:"use-multiple-paths" json:"use-multiple-paths,omitempty"`
 	// original -> gobgp:route-server
 	// Configure the local router as a route server.
 	RouteServer RouteServer `mapstructure:"route-server" json:"route-server,omitempty"`
@@ -2459,12 +2415,6 @@ func (lhs *PeerGroup) Equal(rhs *PeerGroup) bool {
 		return false
 	}
 	if !lhs.Transport.Equal(&(rhs.Transport)) {
-		return false
-	}
-	if !lhs.ErrorHandling.Equal(&(rhs.ErrorHandling)) {
-		return false
-	}
-	if !lhs.LoggingOptions.Equal(&(rhs.LoggingOptions)) {
 		return false
 	}
 	if !lhs.EbgpMultihop.Equal(&(rhs.EbgpMultihop)) {
@@ -2491,9 +2441,6 @@ func (lhs *PeerGroup) Equal(rhs *PeerGroup) bool {
 		return false
 	}
 	if !lhs.ApplyPolicy.Equal(&(rhs.ApplyPolicy)) {
-		return false
-	}
-	if !lhs.UseMultiplePaths.Equal(&(rhs.UseMultiplePaths)) {
 		return false
 	}
 	if !lhs.RouteServer.Equal(&(rhs.RouteServer)) {
@@ -3106,127 +3053,6 @@ func (lhs *EbgpMultihop) Equal(rhs *EbgpMultihop) bool {
 }
 
 // struct for container bgp:state.
-// State information relating to logging for the BGP neighbor
-// or group.
-type LoggingOptionsState struct {
-	// original -> bgp:log-neighbor-state-changes
-	// bgp:log-neighbor-state-changes's original type is boolean.
-	// Configure logging of peer state changes.  Default is
-	// to enable logging of peer state changes.
-	LogNeighborStateChanges bool `mapstructure:"log-neighbor-state-changes" json:"log-neighbor-state-changes,omitempty"`
-}
-
-// struct for container bgp:config.
-// Configuration parameters enabling or modifying logging
-// for events relating to the BGP neighbor or group.
-type LoggingOptionsConfig struct {
-	// original -> bgp:log-neighbor-state-changes
-	// bgp:log-neighbor-state-changes's original type is boolean.
-	// Configure logging of peer state changes.  Default is
-	// to enable logging of peer state changes.
-	LogNeighborStateChanges bool `mapstructure:"log-neighbor-state-changes" json:"log-neighbor-state-changes,omitempty"`
-}
-
-func (lhs *LoggingOptionsConfig) Equal(rhs *LoggingOptionsConfig) bool {
-	if lhs == nil || rhs == nil {
-		return false
-	}
-	if lhs.LogNeighborStateChanges != rhs.LogNeighborStateChanges {
-		return false
-	}
-	return true
-}
-
-// struct for container bgp:logging-options.
-// Logging options for events related to the BGP neighbor or
-// group.
-type LoggingOptions struct {
-	// original -> bgp:logging-options-config
-	// Configuration parameters enabling or modifying logging
-	// for events relating to the BGP neighbor or group.
-	Config LoggingOptionsConfig `mapstructure:"config" json:"config,omitempty"`
-	// original -> bgp:logging-options-state
-	// State information relating to logging for the BGP neighbor
-	// or group.
-	State LoggingOptionsState `mapstructure:"state" json:"state,omitempty"`
-}
-
-func (lhs *LoggingOptions) Equal(rhs *LoggingOptions) bool {
-	if lhs == nil || rhs == nil {
-		return false
-	}
-	if !lhs.Config.Equal(&(rhs.Config)) {
-		return false
-	}
-	return true
-}
-
-// struct for container bgp:state.
-// State information relating to enhanced error handling
-// mechanisms for the BGP neighbor or group.
-type ErrorHandlingState struct {
-	// original -> bgp:treat-as-withdraw
-	// bgp:treat-as-withdraw's original type is boolean.
-	// Specify whether erroneous UPDATE messages for which the
-	// NLRI can be extracted are reated as though the NLRI is
-	// withdrawn - avoiding session reset.
-	TreatAsWithdraw bool `mapstructure:"treat-as-withdraw" json:"treat-as-withdraw,omitempty"`
-	// original -> bgp-op:erroneous-update-messages
-	// The number of BGP UPDATE messages for which the
-	// treat-as-withdraw mechanism has been applied based
-	// on erroneous message contents.
-	ErroneousUpdateMessages uint32 `mapstructure:"erroneous-update-messages" json:"erroneous-update-messages,omitempty"`
-}
-
-// struct for container bgp:config.
-// Configuration parameters enabling or modifying the
-// behavior or enhanced error handling mechanisms for the BGP
-// neighbor or group.
-type ErrorHandlingConfig struct {
-	// original -> bgp:treat-as-withdraw
-	// bgp:treat-as-withdraw's original type is boolean.
-	// Specify whether erroneous UPDATE messages for which the
-	// NLRI can be extracted are reated as though the NLRI is
-	// withdrawn - avoiding session reset.
-	TreatAsWithdraw bool `mapstructure:"treat-as-withdraw" json:"treat-as-withdraw,omitempty"`
-}
-
-func (lhs *ErrorHandlingConfig) Equal(rhs *ErrorHandlingConfig) bool {
-	if lhs == nil || rhs == nil {
-		return false
-	}
-	if lhs.TreatAsWithdraw != rhs.TreatAsWithdraw {
-		return false
-	}
-	return true
-}
-
-// struct for container bgp:error-handling.
-// Error handling parameters used for the BGP neighbor or
-// group.
-type ErrorHandling struct {
-	// original -> bgp:error-handling-config
-	// Configuration parameters enabling or modifying the
-	// behavior or enhanced error handling mechanisms for the BGP
-	// neighbor or group.
-	Config ErrorHandlingConfig `mapstructure:"config" json:"config,omitempty"`
-	// original -> bgp:error-handling-state
-	// State information relating to enhanced error handling
-	// mechanisms for the BGP neighbor or group.
-	State ErrorHandlingState `mapstructure:"state" json:"state,omitempty"`
-}
-
-func (lhs *ErrorHandling) Equal(rhs *ErrorHandling) bool {
-	if lhs == nil || rhs == nil {
-		return false
-	}
-	if !lhs.Config.Equal(&(rhs.Config)) {
-		return false
-	}
-	return true
-}
-
-// struct for container bgp:state.
 // State information relating to the transport session(s)
 // used for the BGP neighbor or group.
 type TransportState struct {
@@ -3382,15 +3208,6 @@ type TimersState struct {
 	// messages to the neighbor.  Typically set to 1/3 the
 	// hold-time.
 	KeepaliveInterval float64 `mapstructure:"keepalive-interval" json:"keepalive-interval,omitempty"`
-	// original -> bgp:minimum-advertisement-interval
-	// bgp:minimum-advertisement-interval's original type is decimal64.
-	// Minimum time which must elapse between subsequent UPDATE
-	// messages relating to a common set of NLRI being transmitted
-	// to a peer. This timer is referred to as
-	// MinRouteAdvertisementIntervalTimer by RFC 4721 and serves to
-	// reduce the number of UPDATE messages transmitted when a
-	// particular set of NLRI exhibit instability.
-	MinimumAdvertisementInterval float64 `mapstructure:"minimum-advertisement-interval" json:"minimum-advertisement-interval,omitempty"`
 	// original -> bgp-op:uptime
 	// bgp-op:uptime's original type is yang:timeticks.
 	// This timer determines the amount of time since the
@@ -3439,15 +3256,6 @@ type TimersConfig struct {
 	// messages to the neighbor.  Typically set to 1/3 the
 	// hold-time.
 	KeepaliveInterval float64 `mapstructure:"keepalive-interval" json:"keepalive-interval,omitempty"`
-	// original -> bgp:minimum-advertisement-interval
-	// bgp:minimum-advertisement-interval's original type is decimal64.
-	// Minimum time which must elapse between subsequent UPDATE
-	// messages relating to a common set of NLRI being transmitted
-	// to a peer. This timer is referred to as
-	// MinRouteAdvertisementIntervalTimer by RFC 4721 and serves to
-	// reduce the number of UPDATE messages transmitted when a
-	// particular set of NLRI exhibit instability.
-	MinimumAdvertisementInterval float64 `mapstructure:"minimum-advertisement-interval" json:"minimum-advertisement-interval,omitempty"`
 	// original -> gobgp:idle-hold-time-after-reset
 	// gobgp:idle-hold-time-after-reset's original type is decimal64.
 	// Time interval in seconds that a BGP session will be
@@ -3466,9 +3274,6 @@ func (lhs *TimersConfig) Equal(rhs *TimersConfig) bool {
 		return false
 	}
 	if lhs.KeepaliveInterval != rhs.KeepaliveInterval {
-		return false
-	}
-	if lhs.MinimumAdvertisementInterval != rhs.MinimumAdvertisementInterval {
 		return false
 	}
 	if lhs.IdleHoldTimeAfterReset != rhs.IdleHoldTimeAfterReset {
@@ -3767,10 +3572,6 @@ type NeighborState struct {
 	// original -> bgp:remove-private-as
 	// Remove private AS numbers from updates sent to peers.
 	RemovePrivateAs RemovePrivateAsOption `mapstructure:"remove-private-as" json:"remove-private-as,omitempty"`
-	// original -> bgp:route-flap-damping
-	// bgp:route-flap-damping's original type is boolean.
-	// Enable route flap damping.
-	RouteFlapDamping bool `mapstructure:"route-flap-damping" json:"route-flap-damping,omitempty"`
 	// original -> bgp:send-community
 	// Specify which types of community should be sent to the
 	// neighbor or group. The default is to not send the
@@ -3872,10 +3673,6 @@ type NeighborConfig struct {
 	// original -> bgp:remove-private-as
 	// Remove private AS numbers from updates sent to peers.
 	RemovePrivateAs RemovePrivateAsOption `mapstructure:"remove-private-as" json:"remove-private-as,omitempty"`
-	// original -> bgp:route-flap-damping
-	// bgp:route-flap-damping's original type is boolean.
-	// Enable route flap damping.
-	RouteFlapDamping bool `mapstructure:"route-flap-damping" json:"route-flap-damping,omitempty"`
 	// original -> bgp:send-community
 	// Specify which types of community should be sent to the
 	// neighbor or group. The default is to not send the
@@ -3924,9 +3721,6 @@ func (lhs *NeighborConfig) Equal(rhs *NeighborConfig) bool {
 	if lhs.RemovePrivateAs != rhs.RemovePrivateAs {
 		return false
 	}
-	if lhs.RouteFlapDamping != rhs.RouteFlapDamping {
-		return false
-	}
 	if lhs.SendCommunity != rhs.SendCommunity {
 		return false
 	}
@@ -3972,14 +3766,6 @@ type Neighbor struct {
 	// original -> bgp:transport
 	// Transport session parameters for the BGP neighbor or group.
 	Transport Transport `mapstructure:"transport" json:"transport,omitempty"`
-	// original -> bgp:error-handling
-	// Error handling parameters used for the BGP neighbor or
-	// group.
-	ErrorHandling ErrorHandling `mapstructure:"error-handling" json:"error-handling,omitempty"`
-	// original -> bgp:logging-options
-	// Logging options for events related to the BGP neighbor or
-	// group.
-	LoggingOptions LoggingOptions `mapstructure:"logging-options" json:"logging-options,omitempty"`
 	// original -> bgp:ebgp-multihop
 	// eBGP multi-hop parameters for the BGP neighbor or group.
 	EbgpMultihop EbgpMultihop `mapstructure:"ebgp-multihop" json:"ebgp-multihop,omitempty"`
@@ -4007,10 +3793,6 @@ type Neighbor struct {
 	// routing table, i.e., export (send) and import (receive),
 	// depending on the context.
 	ApplyPolicy ApplyPolicy `mapstructure:"apply-policy" json:"apply-policy,omitempty"`
-	// original -> bgp-mp:use-multiple-paths
-	// Parameters related to the use of multiple-paths for the same
-	// NLRI when they are received only from this neighbor.
-	UseMultiplePaths UseMultiplePaths `mapstructure:"use-multiple-paths" json:"use-multiple-paths,omitempty"`
 	// original -> gobgp:route-server
 	// Configure the local router as a route server.
 	RouteServer RouteServer `mapstructure:"route-server" json:"route-server,omitempty"`
@@ -4033,12 +3815,6 @@ func (lhs *Neighbor) Equal(rhs *Neighbor) bool {
 		return false
 	}
 	if !lhs.Transport.Equal(&(rhs.Transport)) {
-		return false
-	}
-	if !lhs.ErrorHandling.Equal(&(rhs.ErrorHandling)) {
-		return false
-	}
-	if !lhs.LoggingOptions.Equal(&(rhs.LoggingOptions)) {
 		return false
 	}
 	if !lhs.EbgpMultihop.Equal(&(rhs.EbgpMultihop)) {
@@ -4065,9 +3841,6 @@ func (lhs *Neighbor) Equal(rhs *Neighbor) bool {
 		return false
 	}
 	if !lhs.ApplyPolicy.Equal(&(rhs.ApplyPolicy)) {
-		return false
-	}
-	if !lhs.UseMultiplePaths.Equal(&(rhs.UseMultiplePaths)) {
 		return false
 	}
 	if !lhs.RouteServer.Equal(&(rhs.RouteServer)) {
@@ -4339,27 +4112,16 @@ func (lhs *Ipv4LabelledUnicast) Equal(rhs *Ipv4LabelledUnicast) bool {
 // State information for common IPv4 and IPv6 unicast
 // parameters.
 type Ipv6UnicastState struct {
-	// original -> bgp-mp:send-default-route
-	// bgp-mp:send-default-route's original type is boolean.
-	// If set to true, send the default-route to the neighbour(s).
-	SendDefaultRoute bool `mapstructure:"send-default-route" json:"send-default-route,omitempty"`
 }
 
 // struct for container bgp-mp:config.
 // Configuration parameters for common IPv4 and IPv6 unicast
 // AFI-SAFI options.
 type Ipv6UnicastConfig struct {
-	// original -> bgp-mp:send-default-route
-	// bgp-mp:send-default-route's original type is boolean.
-	// If set to true, send the default-route to the neighbour(s).
-	SendDefaultRoute bool `mapstructure:"send-default-route" json:"send-default-route,omitempty"`
 }
 
 func (lhs *Ipv6UnicastConfig) Equal(rhs *Ipv6UnicastConfig) bool {
 	if lhs == nil || rhs == nil {
-		return false
-	}
-	if lhs.SendDefaultRoute != rhs.SendDefaultRoute {
 		return false
 	}
 	return true
@@ -4399,27 +4161,16 @@ func (lhs *Ipv6Unicast) Equal(rhs *Ipv6Unicast) bool {
 // State information for common IPv4 and IPv6 unicast
 // parameters.
 type Ipv4UnicastState struct {
-	// original -> bgp-mp:send-default-route
-	// bgp-mp:send-default-route's original type is boolean.
-	// If set to true, send the default-route to the neighbour(s).
-	SendDefaultRoute bool `mapstructure:"send-default-route" json:"send-default-route,omitempty"`
 }
 
 // struct for container bgp-mp:config.
 // Configuration parameters for common IPv4 and IPv6 unicast
 // AFI-SAFI options.
 type Ipv4UnicastConfig struct {
-	// original -> bgp-mp:send-default-route
-	// bgp-mp:send-default-route's original type is boolean.
-	// If set to true, send the default-route to the neighbour(s).
-	SendDefaultRoute bool `mapstructure:"send-default-route" json:"send-default-route,omitempty"`
 }
 
 func (lhs *Ipv4UnicastConfig) Equal(rhs *Ipv4UnicastConfig) bool {
 	if lhs == nil || rhs == nil {
-		return false
-	}
-	if lhs.SendDefaultRoute != rhs.SendDefaultRoute {
 		return false
 	}
 	return true
@@ -4439,12 +4190,6 @@ type PrefixLimitState struct {
 	// or log entries. Expressed as a percentage of
 	// max-prefixes.
 	ShutdownThresholdPct Percentage `mapstructure:"shutdown-threshold-pct" json:"shutdown-threshold-pct,omitempty"`
-	// original -> bgp-mp:restart-timer
-	// bgp-mp:restart-timer's original type is decimal64.
-	// Time interval in seconds after which the BGP session
-	// is re-established after being torn down due to exceeding
-	// the max-prefix limit.
-	RestartTimer float64 `mapstructure:"restart-timer" json:"restart-timer,omitempty"`
 }
 
 // struct for container bgp-mp:config.
@@ -4461,12 +4206,6 @@ type PrefixLimitConfig struct {
 	// or log entries. Expressed as a percentage of
 	// max-prefixes.
 	ShutdownThresholdPct Percentage `mapstructure:"shutdown-threshold-pct" json:"shutdown-threshold-pct,omitempty"`
-	// original -> bgp-mp:restart-timer
-	// bgp-mp:restart-timer's original type is decimal64.
-	// Time interval in seconds after which the BGP session
-	// is re-established after being torn down due to exceeding
-	// the max-prefix limit.
-	RestartTimer float64 `mapstructure:"restart-timer" json:"restart-timer,omitempty"`
 }
 
 func (lhs *PrefixLimitConfig) Equal(rhs *PrefixLimitConfig) bool {
@@ -4477,9 +4216,6 @@ func (lhs *PrefixLimitConfig) Equal(rhs *PrefixLimitConfig) bool {
 		return false
 	}
 	if lhs.ShutdownThresholdPct != rhs.ShutdownThresholdPct {
-		return false
-	}
-	if lhs.RestartTimer != rhs.RestartTimer {
 		return false
 	}
 	return true
@@ -4811,13 +4547,6 @@ type AfiSafi struct {
 	// original -> bgp-mp:l2vpn-evpn
 	// BGP EVPN configuration options.
 	L2vpnEvpn L2vpnEvpn `mapstructure:"l2vpn-evpn" json:"l2vpn-evpn,omitempty"`
-	// original -> bgp-mp:route-selection-options
-	// Parameters relating to options for route selection.
-	RouteSelectionOptions RouteSelectionOptions `mapstructure:"route-selection-options" json:"route-selection-options,omitempty"`
-	// original -> bgp-mp:use-multiple-paths
-	// Parameters related to the use of multiple paths for the
-	// same NLRI.
-	UseMultiplePaths UseMultiplePaths `mapstructure:"use-multiple-paths" json:"use-multiple-paths,omitempty"`
 	// original -> bgp-mp:prefix-limit
 	// Configure the maximum number of prefixes that will be
 	// accepted from a peer.
@@ -4872,12 +4601,6 @@ func (lhs *AfiSafi) Equal(rhs *AfiSafi) bool {
 		return false
 	}
 	if !lhs.L2vpnEvpn.Equal(&(rhs.L2vpnEvpn)) {
-		return false
-	}
-	if !lhs.RouteSelectionOptions.Equal(&(rhs.RouteSelectionOptions)) {
-		return false
-	}
-	if !lhs.UseMultiplePaths.Equal(&(rhs.UseMultiplePaths)) {
 		return false
 	}
 	if !lhs.PrefixLimit.Equal(&(rhs.PrefixLimit)) {
@@ -5100,12 +4823,6 @@ func (lhs *Ibgp) Equal(rhs *Ibgp) bool {
 // struct for container bgp-mp:state.
 // State information relating to eBGP multipath.
 type EbgpState struct {
-	// original -> bgp-mp:allow-multiple-as
-	// bgp-mp:allow-multiple-as's original type is boolean.
-	// Allow multipath to use paths from different neighbouring
-	// ASes.  The default is to only consider multiple paths from
-	// the same neighbouring AS.
-	AllowMultipleAs bool `mapstructure:"allow-multiple-as" json:"allow-multiple-as,omitempty"`
 	// original -> bgp-mp:maximum-paths
 	// Maximum number of parallel paths to consider when using
 	// BGP multipath. The default is use a single path.
@@ -5115,12 +4832,6 @@ type EbgpState struct {
 // struct for container bgp-mp:config.
 // Configuration parameters relating to eBGP multipath.
 type EbgpConfig struct {
-	// original -> bgp-mp:allow-multiple-as
-	// bgp-mp:allow-multiple-as's original type is boolean.
-	// Allow multipath to use paths from different neighbouring
-	// ASes.  The default is to only consider multiple paths from
-	// the same neighbouring AS.
-	AllowMultipleAs bool `mapstructure:"allow-multiple-as" json:"allow-multiple-as,omitempty"`
 	// original -> bgp-mp:maximum-paths
 	// Maximum number of parallel paths to consider when using
 	// BGP multipath. The default is use a single path.
@@ -5129,9 +4840,6 @@ type EbgpConfig struct {
 
 func (lhs *EbgpConfig) Equal(rhs *EbgpConfig) bool {
 	if lhs == nil || rhs == nil {
-		return false
-	}
-	if lhs.AllowMultipleAs != rhs.AllowMultipleAs {
 		return false
 	}
 	if lhs.MaximumPaths != rhs.MaximumPaths {

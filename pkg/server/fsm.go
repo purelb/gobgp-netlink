@@ -816,7 +816,13 @@ func (fsm *fsm) stateChange(nextState bgp.FSMState, reason *fsmStateReason) {
 
 		fsm.isEBGP = conf.IsEBGPPeer(fsm.gConf)
 		fsm.isConfed = fsm.gConf.IsConfederationMember(conf.Config.PeerAs)
-		fsm.isTreatAsWithdraw = conf.ErrorHandling.Config.TreatAsWithdraw
+		// RFC 7606 revised error handling, always. The error-handling block
+		// that appeared to switch it off was removed from the model in 1.3.5:
+		// api.Peer never had a field for it, so a config file's
+		// treat-as-withdraw = false was dropped on the way to the daemon and
+		// defaulting put true back on every path. This is the value every
+		// session has always run with.
+		fsm.isTreatAsWithdraw = true
 		// reset the state set by the previous session
 		fsm.twoByteAsTrans = false
 		if _, y := fsm.capMap[bgp.BGP_CAP_FOUR_OCTET_AS_NUMBER]; !y {

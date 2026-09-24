@@ -393,3 +393,163 @@ func TestUseMultiplePathsRequiresALimit(t *testing.T) {
 `), "toml")
 	assert.Error(t, err, "a config file enabling multipath without a limit must fail to load")
 }
+
+// A config file setting a removed leaf fails to load.
+//
+// Each of these was accepted, stored and acted on by nothing, so a file that
+// set one read as configured and changed nothing. They are removed from the
+// generated model, and the loader's UnmarshalExact rejects an unknown key - so
+// the operator hears about it at load time instead of never.
+//
+// Every case is one real instantiation of a removed leaf. The positive controls
+// at the end are what stop this passing because every file fails.
+func TestRemovedLeavesAreRejected(t *testing.T) {
+	const global = `
+[global.config]
+  as = 65001
+  router-id = "10.0.0.1"
+`
+	const neighbor = `
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "10.0.0.2"
+    peer-as = 65002
+`
+	const peerGroup = `
+[[peer-groups]]
+  [peer-groups.config]
+    peer-group-name = "g"
+    peer-as = 65002
+`
+	for name, body := range map[string]string{
+		"neighbor route-flap-damping": global + neighbor + `
+    route-flap-damping = true
+`,
+		"peer-group route-flap-damping": global + peerGroup + `
+    route-flap-damping = true
+`,
+		"neighbor minimum-advertisement-interval": global + neighbor + `
+  [neighbors.timers.config]
+    minimum-advertisement-interval = 30
+`,
+		"peer-group minimum-advertisement-interval": global + peerGroup + `
+  [peer-groups.timers.config]
+    minimum-advertisement-interval = 30
+`,
+		"neighbor error-handling": global + neighbor + `
+  [neighbors.error-handling.config]
+    treat-as-withdraw = false
+`,
+		"neighbor logging-options": global + neighbor + `
+  [neighbors.logging-options.config]
+    log-neighbor-state-changes = false
+`,
+		"neighbor use-multiple-paths": global + neighbor + `
+  [neighbors.use-multiple-paths.config]
+    enabled = true
+`,
+		"peer-group use-multiple-paths": global + peerGroup + `
+  [peer-groups.use-multiple-paths.config]
+    enabled = true
+`,
+		"global allow-multiple-as": global + `
+[global.use-multiple-paths.ebgp.config]
+  allow-multiple-as = true
+`,
+		"afi-safi use-multiple-paths": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.use-multiple-paths.config]
+      enabled = true
+`,
+		"afi-safi route-selection-options": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.route-selection-options.config]
+    always-compare-med = true
+`,
+		"send-default-route": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.ipv4-unicast.config]
+      send-default-route = true
+`,
+		"prefix-limit restart-timer": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.ipv4-unicast.prefix-limit.config]
+      max-prefixes = 100
+      restart-timer = 30
+`,
+		"rpki refresh-time": global + `
+[[rpki-servers]]
+  [rpki-servers.config]
+    address = "10.0.0.9"
+    port = 323
+    refresh-time = 30
+`,
+		"rpki hold-time": global + `
+[[rpki-servers]]
+  [rpki-servers.config]
+    address = "10.0.0.9"
+    port = 323
+    hold-time = 30
+`,
+		"rpki preference": global + `
+[[rpki-servers]]
+  [rpki-servers.config]
+    address = "10.0.0.9"
+    port = 323
+    preference = 5
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ReadConfig(strings.NewReader(body), "toml")
+			assert.Error(t, err, "a file setting a removed leaf must fail to load, not be silently accepted")
+		})
+	}
+
+	// Positive controls: what was kept still loads, including the siblings of
+	// every removed leaf.
+	for name, body := range map[string]string{
+		"global multipath with limits": global + `
+[global.use-multiple-paths.config]
+  enabled = true
+[global.use-multiple-paths.ebgp.config]
+  maximum-paths = 4
+[global.use-multiple-paths.ibgp.config]
+  maximum-paths = 2
+`,
+		"global route-selection-options": global + `
+[global.route-selection-options.config]
+  always-compare-med = true
+`,
+		"prefix-limit without restart-timer": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.ipv4-unicast.prefix-limit.config]
+      max-prefixes = 100
+`,
+		"neighbor timers without the interval": global + neighbor + `
+  [neighbors.timers.config]
+    hold-time = 90
+`,
+		"rpki server with record-lifetime": global + `
+[[rpki-servers]]
+  [rpki-servers.config]
+    address = "10.0.0.9"
+    port = 323
+    record-lifetime = 3600
+`,
+	} {
+		t.Run("kept: "+name, func(t *testing.T) {
+			_, err := ReadConfig(strings.NewReader(body), "toml")
+			assert.NoError(t, err)
+		})
+	}
+}

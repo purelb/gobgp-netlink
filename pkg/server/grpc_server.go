@@ -1318,8 +1318,6 @@ var neighborConfigFieldsWithNothingToRecord = map[string]string{
 		"Whether a peer group should own its members' remote AS is a separate question from presence.",
 	"peer-type": "derived by getConfigPeerType from peer-as and local-as after inheritance resolves, so " +
 		"whatever a client sends is overwritten either way.",
-	"route-flap-damping": "removed from the API in 1.3.5 - no route flap damping is implemented - so no " +
-		"request can state it. The model leaf goes with the YANG deletions.",
 }
 
 // configFieldsPresent returns the presence map for the "config" block: which
@@ -1351,9 +1349,6 @@ func configFieldsPresent(a *api.Peer) map[string]any {
 var neighborBlocksWithNothingToRecord = map[string]string{
 	"add-paths": "add_paths exists only on api.AfiSafi, not on api.Peer, and readAddPathsFromAPIStruct is only " +
 		"called per family. Nothing can set the neighbor-level block over the API, so there is nothing to record.",
-	"error-handling":     "no field on api.Peer; nothing can set it over the API",
-	"logging-options":    "no field on api.Peer; nothing can set it over the API",
-	"use-multiple-paths": "no field on api.Peer; nothing can set it over the API",
 }
 
 // recordNeighborPresence tells the peer-group inheritance which blocks this

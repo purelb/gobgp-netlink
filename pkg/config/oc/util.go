@@ -244,9 +244,7 @@ func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
 	// Everything else here does reach the wire or the socket and still resets:
 	// peer-as is validated against the peer's OPEN, local-as is carried in
 	// ours, auth-password is a TCP-MD5 socket option, send-software-version
-	// emits a capability. route-flap-damping is read by nothing in this tree
-	// and so resets for no benefit, but it is left alone deliberately - a
-	// carve-out would have to be revisited the day damping is implemented.
+	// emits a capability.
 	//
 	// Neutralise the fields on copies rather than enumerating the ones that do
 	// matter: NeighborConfig is generated, so a field added by a future
@@ -279,18 +277,6 @@ func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
 	//
 	// deleteNeighbor/addNeighbor already does both correctly; only the
 	// classification was missing.
-	//
-	// error-handling is deliberately NOT here, though it is in neither list
-	// either. treat-as-withdraw is read once into fsm.isTreatAsWithdraw at
-	// session establishment, so a rebuild would apply it - but api.Peer has no
-	// error-handling block at all, so newNeighborFromAPIStruct cannot carry
-	// it, and SetDefaultNeighborConfigValues forces it to true whenever viper
-	// is absent, which it always is on the gRPC path. Adding it here would
-	// make any gRPC UpdatePeer against a TOML peer holding
-	// treat-as-withdraw = false bounce the session and silently flip the
-	// setting. Route-server and route-reflector have no such problem: both are
-	// api.Peer sub-messages, so a request states them or states that it does
-	// not, exactly like the blocks already listed below.
 	return !lhs.Equal(&rhs) ||
 		!n.Transport.Config.Equal(&new.Transport.Config) ||
 		!n.AddPaths.Config.Equal(&new.AddPaths.Config) ||

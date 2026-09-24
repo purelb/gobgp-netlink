@@ -287,10 +287,6 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 	n.AsPathOptions.State.AllowOwnAs = n.AsPathOptions.Config.AllowOwnAs
 	n.AsPathOptions.State.AllowAsPathLoopLocal = n.AsPathOptions.Config.AllowAsPathLoopLocal
 
-	if !v.IsSet("neighbor.error-handling.config.treat-as-withdraw") {
-		n.ErrorHandling.Config.TreatAsWithdraw = true
-	}
-
 	if !v.IsSet("neighbor.timers.config.connect-retry") && n.Timers.Config.ConnectRetry == 0 {
 		n.Timers.Config.ConnectRetry = float64(DEFAULT_CONNECT_RETRY)
 	}
@@ -799,15 +795,12 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	overwriteConfig(&c.Config, &pg.Config, "neighbor.config", v)
 	overwriteConfig(&c.Timers.Config, &pg.Timers.Config, "neighbor.timers.config", v)
 	overwriteConfig(&c.Transport.Config, &pg.Transport.Config, "neighbor.transport.config", v)
-	overwriteConfig(&c.ErrorHandling.Config, &pg.ErrorHandling.Config, "neighbor.error-handling.config", v)
-	overwriteConfig(&c.LoggingOptions.Config, &pg.LoggingOptions.Config, "neighbor.logging-options.config", v)
 	overwriteConfig(&c.EbgpMultihop.Config, &pg.EbgpMultihop.Config, "neighbor.ebgp-multihop.config", v)
 	overwriteConfig(&c.RouteReflector.Config, &pg.RouteReflector.Config, "neighbor.route-reflector.config", v)
 	overwriteConfig(&c.AsPathOptions.Config, &pg.AsPathOptions.Config, "neighbor.as-path-options.config", v)
 	overwriteConfig(&c.AddPaths.Config, &pg.AddPaths.Config, "neighbor.add-paths.config", v)
 	overwriteConfig(&c.GracefulRestart.Config, &pg.GracefulRestart.Config, "neighbor.graceful-restart.config", v)
 	overwriteConfig(&c.ApplyPolicy.Config, &pg.ApplyPolicy.Config, "neighbor.apply-policy.config", v)
-	overwriteConfig(&c.UseMultiplePaths.Config, &pg.UseMultiplePaths.Config, "neighbor.use-multiple-paths.config", v)
 	overwriteConfig(&c.RouteServer.Config, &pg.RouteServer.Config, "neighbor.route-server.config", v)
 	overwriteConfig(&c.TtlSecurity.Config, &pg.TtlSecurity.Config, "neighbor.ttl-security.config", v)
 	// BFD is per-field like everything else again. It was gated on the
@@ -847,15 +840,12 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	}{
 		{"timers", c.Timers.Config},
 		{"transport", c.Transport.Config},
-		{"error-handling", c.ErrorHandling.Config},
-		{"logging-options", c.LoggingOptions.Config},
 		{"ebgp-multihop", c.EbgpMultihop.Config},
 		{"route-reflector", c.RouteReflector.Config},
 		{"as-path-options", c.AsPathOptions.Config},
 		{"add-paths", c.AddPaths.Config},
 		{"graceful-restart", c.GracefulRestart.Config},
 		{"apply-policy", c.ApplyPolicy.Config},
-		{"use-multiple-paths", c.UseMultiplePaths.Config},
 		{"route-server", c.RouteServer.Config},
 		{"ttl-security", c.TtlSecurity.Config},
 		{"bfd", c.Bfd.Config},
