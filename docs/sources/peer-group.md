@@ -167,7 +167,10 @@ is advertised does not, and is applied to the running session instead:
 | `route_server`, `route_reflector` | rebuilt (see below) |
 | `description` | kept |
 | `send_community`, `remove_private` | kept, and already-advertised routes are re-sent |
-| `timers`, `bfd`, `apply_policy` | kept |
+| `timers.hold_time`, `timers.keepalive_interval` | rebuilt (negotiated in the OPEN) |
+| `timers.connect_retry`, `timers.idle_hold_time_after_reset` | kept (read live) |
+| `bfd` | kept |
+| `apply_policy` | kept - route-server clients only; refused on any other peer |
 
 This matters most through a peer group, because one edit runs the same decision
 for every member. Renaming a group - changing only its `description` - leaves

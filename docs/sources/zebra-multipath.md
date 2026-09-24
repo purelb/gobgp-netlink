@@ -4,6 +4,10 @@ This page explains how GoBGP handles Equal Cost Multipath (ECMP) routes with
 Zebra daemon included in [Quagga](http://www.nongnu.org/quagga/) or
 [FRRouting](https://frrouting.org/).
 
+Zebra is not needed for ECMP: gobgpd's own netlink export installs the
+multipath set into the kernel directly. See
+[Multipath (ECMP) Export](netlink.md#multipath-ecmp-export).
+
 ## Prerequisites
 
 Assume you finished [Getting Started](getting-started.md) and
@@ -66,6 +70,10 @@ multipath routes to Zebra and Zebra will install them into Kernel routing table.
 
 [global.use-multiple-paths.config]
   enabled = true
+# Multipath needs a limit for at least one peer type, or gobgpd refuses to
+# start. R1's peers are internal, so the iBGP limit is the one that applies.
+[global.use-multiple-paths.ibgp.config]
+  maximum-paths = 2
 
 [[neighbors]]
   [neighbors.config]

@@ -58,7 +58,8 @@ The patch component increments once per fork release:
 | v1.3.1 | v4.900.1 (withdrawn, see below) |
 | v1.3.2 | v4.900.2 |
 | v1.3.3 | v4.900.3 |
-| next | v4.900.4 |
+| v1.3.4 | v4.900.4 |
+| next | v4.900.5 |
 
 Never reuse a number. `v4.900.1` was tagged, withdrawn, and is permanently
 spent: `sum.golang.org` had already notarised it against the v1.3.1 commit, and

@@ -215,6 +215,7 @@ The netlink export feature allows GoBGP to export BGP routes from the RIB to the
 - **Startup cleanup**: Stale routes from previous runs are cleaned up on startup
 - **Statistics and monitoring**: Track export operations, errors, and nexthop validation
 - **Multi-table support**: Single route can export to multiple tables if matching multiple rules
+- **ECMP**: With `use-multiple-paths`, every path in a prefix's multipath set becomes a nexthop of one kernel route (see [Multipath (ECMP) Export](#multipath-ecmp-export))
 
 ## Configuration
 
@@ -547,17 +548,27 @@ On startup, GoBGP:
 
 The export client tracks all exported routes to ensure:
 - Routes are not re-exported if already present with same parameters
-- Parameter changes (metric, table-id) trigger delete + re-add
+- A change of table or metric is a different kernel route, so the old one is
+  deleted and the new one added
+- A change of nexthops alone replaces the route in place with one
+  `RouteReplace()`, so the prefix is never without a route
 - Only changed routes trigger netlink syscalls
 - Efficient operation at scale
 
 ### Route Withdrawal
 
-When a BGP route is withdrawn:
-1. Path withdrawal is detected in export hook
-2. Route is looked up in export tracking map
-3. Route is deleted from Linux kernel via `RouteDel()`
+When the last path for a prefix is withdrawn:
+1. The empty selected set is detected in the export hook
+2. Every rule's route for the prefix is looked up in the export tracking map
+3. Each is deleted from the Linux kernel via `RouteDel()`
 4. Tracking metadata is cleaned up
+
+When a path is withdrawn and others remain, the route is replaced, not
+deleted - see [Multipath (ECMP) Export](#multipath-ecmp-export).
+
+When a rule's filter no longer matches any selected path - the best path moved
+to one without the rule's community - that rule's route is deleted, and the
+other rules' routes for the prefix are left alone.
 
 ### Dynamic Configuration Reload
 
@@ -586,6 +597,52 @@ Nexthop validation ensures that routes are only exported if the nexthop is reach
 - Using route servers where nexthops may not be directly reachable
 
 **Default behavior:** Enabled (recommended for most deployments)
+
+### Multipath (ECMP) Export
+
+With `use-multiple-paths` enabled, a prefix's selected set is its multipath
+set - every path that ties with the best path, capped by `maximum-paths` - and
+export installs one kernel route with a nexthop for each:
+
+```toml
+[global.use-multiple-paths.config]
+  enabled = true
+[global.use-multiple-paths.ebgp.config]
+  maximum-paths = 4
+[global.use-multiple-paths.ibgp.config]
+  maximum-paths = 2
+```
+
+```text
+$ ip route show 10.0.0.0/24
+10.0.0.0/24 proto 186 metric 20
+        nexthop via 192.168.1.2 dev eth0 weight 1
+        nexthop via 192.168.1.3 dev eth0 weight 1
+```
+
+Without `use-multiple-paths` the selected set is the best path alone, and the
+route is the single-gateway form it has always been.
+
+**How many nexthops.** At most `maximum-paths` for the best path's type - eBGP
+or iBGP. There is no separate netlink limit. A path whose nexthop cannot be
+used - unreachable when validation is on, or link-local with no interface - is
+left out and the others kept; if none is usable the export fails as it would
+for a single path. Two paths with the same nexthop (two sessions to one router)
+install it once.
+
+**Losing a path is a replace, not a delete.** When one of N paths is withdrawn
+the route is replaced in place with the remaining N-1 nexthops, in one
+netlink operation. It is deleted only when the last path goes. A service
+address therefore stays reachable through the paths that remain for the whole
+of a peer flap.
+
+**Each rule installs the part of the set it matches.** Export rules match
+paths, not prefixes: if three paths tie and a rule's community filter accepts
+two, that rule's route has two nexthops. Another rule without a filter, on the
+same prefix, has all three.
+
+**Nexthops are sorted**, so the same set always produces the same kernel route
+and a reordering among ties does not reprogram the FIB.
 
 ### Dampening
 
