@@ -259,7 +259,10 @@ func NewBgpServer(opt ...ServerOption) *BgpServer {
 		logger:       logger,
 		logLevelVar:  lvl,
 		timingHook:   opts.timingHook,
-		shutdownWG:   &sync.WaitGroup{},
+		// Dropped once by an upstream merge, which silently turned the
+		// startup sweep off in the real daemon.
+		staleRouteCleanup: opts.staleRouteCleanup,
+		shutdownWG:        &sync.WaitGroup{},
 	}
 	s.bmpManager = newBmpClientManager(s)
 	s.mrtManager = newMrtManager(s)

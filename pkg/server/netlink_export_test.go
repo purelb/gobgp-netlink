@@ -134,8 +134,6 @@ func TestCleanupStaleRoutesRunsOnce(t *testing.T) {
 	assert.True(t, e.sweptStaleRoutes)
 }
 
-// newTestExportClient builds an export client over a fake kernel. The server is
-// nil because none of the cleanup or export paths under test reach back into it.
 // newOnLinkFake is a fake whose test nexthops, 192.168.0.0/16, are on a
 // connected link. A rule built without ValidateNexthop installs its nexthops
 // ONLINK, which the kernel - and the fake - refuse without a device; export
@@ -146,6 +144,8 @@ func newOnLinkFake() *fakeNetlink {
 	return f
 }
 
+// newTestExportClient builds an export client over a fake kernel. The server is
+// nil because none of the cleanup or export paths under test reach back into it.
 func newTestExportClient(t testing.TB, f *fakeNetlink, rules ...*exportRule) *netlinkExportClient {
 	t.Helper()
 	e, err := newNetlinkExportClientWithHandle(nil, logger, f, RTPROT_BGP, 0)
@@ -168,6 +168,42 @@ func TestNewExportClientDoesNotSweep(t *testing.T) {
 	_, del, _ := f.counts()
 	assert.Equal(t, 0, del, "constructing the client must not delete routes")
 	assert.Equal(t, 1, f.routeCount())
+}
+
+// The sweep runs at startup when, and only when, the server was built with
+// StaleRouteCleanupOption(true), as gobgpd builds it.
+//
+// NewBgpServer stopped copying the option into the server in an upstream
+// merge. The sweep's own tests call it directly, so every one of them stayed
+// green while the real daemon never swept at all: a restarted gobgpd left the
+// previous run's routes in the kernel.
+func TestStaleRouteCleanupOptionSweepsAtStartup(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("enabled=%t", enabled), func(t *testing.T) {
+			s := NewBgpServer(StaleRouteCleanupOption(enabled))
+			go s.Serve()
+			require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+				Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+			}))
+			t.Cleanup(func() { assert.NoError(t, s.StopBgp(context.Background(), &api.StopBgpRequest{})) })
+
+			// A route a previous run left in the main table.
+			f := newFakeNetlink()
+			f.addRoute(go_netlink.Route{Table: 254, Dst: mustCIDR(t, "10.99.0.0/24"), Protocol: RTPROT_BGP})
+			e, err := newNetlinkExportClientWithHandle(s, logger, f, RTPROT_BGP, 0)
+			require.NoError(t, err)
+			s.shared.mu.Lock()
+			s.netlinkExportClient = e
+			s.bgpConfig.Netlink.Export.Enabled = true
+			s.bgpConfig.Netlink.Export.Rules = []oc.NetlinkExportRule{{Name: "main"}}
+			s.shared.mu.Unlock()
+
+			require.NoError(t, s.StartNetlink(context.Background()))
+
+			assert.Equal(t, !enabled, f.hasRoute(254, "10.99.0.0/24"),
+				"the previous run's route is swept exactly when the option is on")
+		})
+	}
 }
 
 // TestCleanupStaleRoutesOnlyTouchesConfiguredTables is the core of the sweep
