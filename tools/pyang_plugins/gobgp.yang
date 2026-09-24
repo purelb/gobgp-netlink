@@ -262,7 +262,6 @@ module gobgp {
     }
   }
 
-
   grouping gobgp-timer {
     description "additional timer";
 
@@ -276,7 +275,6 @@ module gobgp {
         in idle state after neighbor reset operation.";
     }
   }
-
 
   grouping gobgp-neighbor-timer {
     description "additional timer";
@@ -295,7 +293,6 @@ module gobgp {
         last time the BGP session received an UPDATE message";
     }
   }
-
 
   grouping gobgp-route-server-config {
     description
@@ -892,7 +889,6 @@ module gobgp {
         "The number of flip-flops";
     }
 
-
   }
 
   augment "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:config" {
@@ -1302,372 +1298,139 @@ module gobgp {
     deviate not-supported;
   }
 
-  // send-default-route: no default-route origination exists.
+  // Per-family containers under every afi-safi: nothing in this daemon reads
+  // them. Only the afi-safi's own prefix-limit is applied; the copies inside
+  // ipv4-unicast and the rest were accepted and ignored, as was send-default-
+  // route, which lived only here. api.AfiSafi never modelled them either.
   deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv4-unicast/bgp:config/bgp:send-default-route" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv4-unicast/bgp:state/bgp:send-default-route" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv6-unicast/bgp:config/bgp:send-default-route" {
+    "/bgp:ipv4-labelled-unicast" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv6-unicast/bgp:state/bgp:send-default-route" {
+    "/bgp:ipv4-unicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:ipv6-labelled-unicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:ipv6-unicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:l2vpn-evpn" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:l2vpn-vpls" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:l3vpn-ipv4-multicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:l3vpn-ipv4-unicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:l3vpn-ipv6-multicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:l3vpn-ipv6-unicast" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-unicast/bgp:config" +
-    "/bgp:send-default-route" {
+    "/bgp:afi-safi/bgp:ipv4-labelled-unicast" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-unicast/bgp:state" +
-    "/bgp:send-default-route" {
+    "/bgp:afi-safi/bgp:ipv4-unicast" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-unicast/bgp:config" +
-    "/bgp:send-default-route" {
+    "/bgp:afi-safi/bgp:ipv6-labelled-unicast" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-unicast/bgp:state" +
-    "/bgp:send-default-route" {
+    "/bgp:afi-safi/bgp:ipv6-unicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l2vpn-evpn" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l2vpn-vpls" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l3vpn-ipv4-multicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l3vpn-ipv4-unicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l3vpn-ipv6-multicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l3vpn-ipv6-unicast" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-unicast/bgp:config" +
-    "/bgp:send-default-route" {
+    "/bgp:afi-safi/bgp:ipv4-labelled-unicast" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-unicast/bgp:state" +
-    "/bgp:send-default-route" {
+    "/bgp:afi-safi/bgp:ipv4-unicast" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-unicast/bgp:config" +
-    "/bgp:send-default-route" {
+    "/bgp:afi-safi/bgp:ipv6-labelled-unicast" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-unicast/bgp:state" +
-    "/bgp:send-default-route" {
+    "/bgp:afi-safi/bgp:ipv6-unicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l2vpn-evpn" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l2vpn-vpls" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l3vpn-ipv4-multicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l3vpn-ipv4-unicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l3vpn-ipv6-multicast" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
+    "/bgp:afi-safi/bgp:l3vpn-ipv6-unicast" {
     deviate not-supported;
   }
 
   // restart-timer: nothing restarts a peer shut down for exceeding its prefix
   // limit.
   deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv4-labelled-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv4-labelled-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv4-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv4-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv6-labelled-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv6-labelled-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv6-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:ipv6-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l2vpn-evpn/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l2vpn-evpn/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l2vpn-vpls/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l2vpn-vpls/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l3vpn-ipv4-multicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l3vpn-ipv4-multicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l3vpn-ipv4-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l3vpn-ipv4-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l3vpn-ipv6-multicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l3vpn-ipv6-multicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l3vpn-ipv6-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
-    "/bgp:l3vpn-ipv6-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
     "/gobgp:prefix-limit/gobgp:config/gobgp:restart-timer" {
     deviate not-supported;
   }
   deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
     "/gobgp:prefix-limit/gobgp:state/gobgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-labelled-unicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-labelled-unicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-labelled-unicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-labelled-unicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l2vpn-evpn/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l2vpn-evpn/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l2vpn-vpls/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l2vpn-vpls/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv4-multicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv4-multicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv4-unicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv4-unicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv6-multicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv6-multicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv6-unicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv6-unicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-labelled-unicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-labelled-unicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv4-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-labelled-unicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-labelled-unicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-unicast/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:ipv6-unicast/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l2vpn-evpn/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l2vpn-evpn/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l2vpn-vpls/bgp:prefix-limit/bgp:config" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l2vpn-vpls/bgp:prefix-limit/bgp:state" +
-    "/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv4-multicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv4-multicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv4-unicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv4-unicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv6-multicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv6-multicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv6-unicast/bgp:prefix-limit" +
-    "/bgp:config/bgp:restart-timer" {
-    deviate not-supported;
-  }
-  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis" +
-    "/bgp:afi-safi/bgp:l3vpn-ipv6-unicast/bgp:prefix-limit" +
-    "/bgp:state/bgp:restart-timer" {
     deviate not-supported;
   }
 

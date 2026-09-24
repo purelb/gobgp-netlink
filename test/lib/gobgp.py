@@ -514,8 +514,11 @@ class GoBGPContainer(BGPContainer):
             for typ, d in info.get('default-policy', {}).items():
                 n['apply-policy']['config']['default-{0}-policy'.format(typ)] = _f(d)
 
-            if info['treat_as_withdraw']:
-                n['error-handling'] = {'config': {'treat-as-withdraw': True}}
+            # treat_as_withdraw needs nothing in the config: RFC 7606 revised
+            # error handling is always on in gobgpd, and the error-handling block
+            # that appeared to control it was removed from the model because it
+            # never reached the daemon. The option is still accepted so callers
+            # that ask for it keep working.
 
             config['neighbors'].append(n)
 

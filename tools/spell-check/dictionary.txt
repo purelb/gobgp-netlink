@@ -66,6 +66,7 @@ rpki
 rtprot
 sadb
 safi
+safis
 sockopt
 srgb
 srlg

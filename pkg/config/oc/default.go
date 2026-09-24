@@ -548,6 +548,57 @@ func getConfigClusterId(g *Global, configClusterId netip.Addr) (netip.Addr, erro
 	return configClusterId, nil
 }
 
+// validateGlobalAfiSafis refuses the parts of [[global.afi-safis]] that never
+// reach the daemon.
+//
+// InitialConfig hands the config file to StartBgp as an api.Global, and
+// api.Global carries the global address families as a list of family indexes
+// and nothing else. So each entry's afi-safi-name survives and every other
+// setting in it - prefix-limit, add-paths, graceful restart, apply-policy,
+// route-target membership - was parsed, stored and dropped on the way in.
+// config.enabled was dropped too: every listed family is enabled, so
+// enabled = false did nothing.
+//
+// The model cannot say this. AfiSafi is one generated Go type shared with the
+// neighbor and peer-group afi-safis, where all of these blocks work, so a
+// deviation at the global path leaves the fields on the type and the file keeps
+// accepting them. This check is how they are removed from the global level.
+//
+// enabled = true is let through: it states what happens anyway.
+func validateGlobalAfiSafis(v *viper.Viper) error {
+	list, err := extractArray(v.Get("global.afi-safis"))
+	if err != nil {
+		return err
+	}
+	for i, item := range list {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for key, val := range entry {
+			if key != "config" {
+				return fmt.Errorf("global.afi-safis[%d].%s is not supported: only afi-safi-name reaches the daemon at the "+
+					"global level; per-family settings belong under a neighbor or peer group", i, key)
+			}
+			cfg, _ := val.(map[string]any)
+			for ck, cv := range cfg {
+				switch ck {
+				case "afi-safi-name":
+				case "enabled":
+					if on, ok := cv.(bool); ok && on {
+						continue
+					}
+					return fmt.Errorf("global.afi-safis[%d].config.enabled = false is not supported: every listed family "+
+						"is enabled; remove the entry instead", i)
+				default:
+					return fmt.Errorf("global.afi-safis[%d].config.%s is not supported", i, ck)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func SetDefaultGlobalConfigValues(g *Global) error {
 	if len(g.AfiSafis) == 0 {
 		g.AfiSafis = []AfiSafi{}
@@ -638,6 +689,10 @@ func setDefaultPolicyConfigValuesWithViper(v *viper.Viper, p *PolicyDefinition) 
 func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 	if v == nil {
 		v = viper.New()
+	}
+
+	if err := validateGlobalAfiSafis(v); err != nil {
+		return err
 	}
 
 	if err := SetDefaultGlobalConfigValues(&b.Global); err != nil {

@@ -470,6 +470,9 @@ func TestRemovedLeavesAreRejected(t *testing.T) {
   [global.afi-safis.route-selection-options.config]
     always-compare-med = true
 `,
+		// The per-family containers inside an afi-safi were never read -
+		// send-default-route lived only there, and only the afi-safi's own
+		// prefix-limit is applied - so the containers themselves are gone.
 		"send-default-route": global + neighbor + `
   [[neighbors.afi-safis]]
     [neighbors.afi-safis.config]
@@ -477,11 +480,25 @@ func TestRemovedLeavesAreRejected(t *testing.T) {
     [neighbors.afi-safis.ipv4-unicast.config]
       send-default-route = true
 `,
-		"prefix-limit restart-timer": global + neighbor + `
+		"per-family prefix-limit": global + neighbor + `
   [[neighbors.afi-safis]]
     [neighbors.afi-safis.config]
       afi-safi-name = "ipv4-unicast"
     [neighbors.afi-safis.ipv4-unicast.prefix-limit.config]
+      max-prefixes = 100
+`,
+		"per-family l2vpn-evpn": global + peerGroup + `
+  [[peer-groups.afi-safis]]
+    [peer-groups.afi-safis.config]
+      afi-safi-name = "l2vpn-evpn"
+    [peer-groups.afi-safis.l2vpn-evpn.prefix-limit.config]
+      max-prefixes = 100
+`,
+		"prefix-limit restart-timer": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.prefix-limit.config]
       max-prefixes = 100
       restart-timer = 30
 `,
@@ -501,6 +518,54 @@ func TestRemovedLeavesAreRejected(t *testing.T) {
 [global.default-route-distance.config]
   external-route-distance = 20
   internal-route-distance = 200
+`,
+		"global afi-safi prefix-limit": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.prefix-limit.config]
+    max-prefixes = 100
+`,
+		"global afi-safi add-paths": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.add-paths.config]
+    send-max = 2
+`,
+		"global afi-safi mp-graceful-restart": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.mp-graceful-restart.config]
+    enabled = true
+`,
+		"global afi-safi long-lived-graceful-restart": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.long-lived-graceful-restart.config]
+    enabled = true
+`,
+		"global afi-safi apply-policy": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.apply-policy.config]
+    default-import-policy = "reject-route"
+`,
+		"global afi-safi route-target-membership": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.route-target-membership.config]
+    deferral-time = 10
+`,
+		"global afi-safi enabled = false": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+    enabled = false
 `,
 		"rpki refresh-time": global + `
 [[rpki-servers]]
@@ -545,16 +610,29 @@ func TestRemovedLeavesAreRejected(t *testing.T) {
 [global.route-selection-options.config]
   always-compare-med = true
 `,
+		// The afi-safi's own prefix-limit - the one updatePrefixLimitConfig
+		// actually applies.
 		"prefix-limit without restart-timer": global + neighbor + `
   [[neighbors.afi-safis]]
     [neighbors.afi-safis.config]
       afi-safi-name = "ipv4-unicast"
-    [neighbors.afi-safis.ipv4-unicast.prefix-limit.config]
+    [neighbors.afi-safis.prefix-limit.config]
       max-prefixes = 100
 `,
 		"neighbor timers without the interval": global + neighbor + `
   [neighbors.timers.config]
     hold-time = 90
+`,
+		"global afi-safi with only its name": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+`,
+		"global afi-safi with enabled = true": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+    enabled = true
 `,
 		"rpki server with record-lifetime": global + `
 [[rpki-servers]]
