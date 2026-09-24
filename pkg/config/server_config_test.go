@@ -309,3 +309,28 @@ func TestMaximumPathsFromAConfigFileReachesTheDaemon(t *testing.T) {
 	assert.EqualValues(t, 4, rsp.Global.EbgpMaximumPaths)
 	assert.EqualValues(t, 2, rsp.Global.IbgpMaximumPaths)
 }
+
+// A config file attaching a per-peer policy to an ordinary neighbor fails to
+// start rather than running with a policy that is never applied. The file
+// reaches the daemon through AddPeer, so this is the same refusal the API gets.
+func TestInitialConfigRefusesPolicyOnAnOrdinaryPeer(t *testing.T) {
+	cfg, err := oc.ReadConfig(strings.NewReader(`
+[global.config]
+  as = 65001
+  router-id = "10.0.0.1"
+  port = -1
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "10.0.0.2"
+    peer-as = 65002
+  [neighbors.apply-policy.config]
+    default-import-policy = "reject-route"
+`), "toml")
+	require.NoError(t, err, "the file itself is well formed")
+
+	bgpServer, _ := newTestBgpServer(t)
+	_, err = InitialConfig(context.Background(), bgpServer, cfg, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "route-server client")
+	t.Cleanup(func() { _ = bgpServer.StopBgp(context.Background(), &api.StopBgpRequest{}) })
+}

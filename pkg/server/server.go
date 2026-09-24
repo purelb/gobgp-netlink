@@ -4391,6 +4391,34 @@ func (s *BgpServer) setPeerPolicy(peer *peer, a oc.ApplyPolicy) error {
 	return s.policy.SetPeerPolicy(peer.ID(), a)
 }
 
+// refusePeerPolicy refuses a per-peer import or export policy on a peer that
+// would ignore it.
+//
+// setPeerPolicy installs per-peer policy only for route-server clients; every
+// other peer is governed by the global table's policy alone. That is GoBGP's
+// design, and it meant a policy attached to an ordinary neighbor or peer group
+// was accepted, stored, reported back by ListPeer, and never applied - an
+// import policy meant to filter a peer's routes filtered nothing.
+//
+// Checked on the resolved configuration, after peer-group inheritance. A
+// peer group is a template and may carry a policy for its route-server
+// members; the refusal lands on a member that would ignore it, not on the
+// group. "No policy" is an empty block: nothing defaults a per-peer policy,
+// and an absent one survives the config file's round trip through api.Peer as
+// empty.
+func refusePeerPolicy(routeServerClient bool, p oc.ApplyPolicyConfig) error {
+	if routeServerClient {
+		return nil
+	}
+	if len(p.ImportPolicyList) == 0 && len(p.ExportPolicyList) == 0 &&
+		p.DefaultImportPolicy == "" && p.DefaultExportPolicy == "" {
+		return nil
+	}
+	return fmt.Errorf("apply-policy is not supported on a peer that is not a route-server client: " +
+		"per-peer import and export policy is applied only to route-server clients, and would be ignored here; " +
+		"attach the policy to the global table instead")
+}
+
 func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 	// Resolve config defaults BEFORE extracting/validating the neighbor address.
 	// For an unnumbered (interface-only) neighbor added via the gRPC AddPeer API
@@ -4411,6 +4439,9 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 
 	if err := oc.SetDefaultNeighborConfigValues(c, pgConf, &s.bgpConfig.Global); err != nil {
 		return err
+	}
+	if err := refusePeerPolicy(c.RouteServer.Config.RouteServerClient, c.ApplyPolicy.Config); err != nil {
+		return fmt.Errorf("neighbor %s: %w", c.State.NeighborAddress, err)
 	}
 
 	addr, err := c.ExtractNeighborAddress()
@@ -4637,6 +4668,11 @@ func (s *BgpServer) AddDynamicNeighbor(ctx context.Context, r *api.AddDynamicNei
 		pg, ok := s.peerGroupMap[c.Config.PeerGroup]
 		if !ok {
 			return fmt.Errorf("no such peer-group: %s", c.Config.PeerGroup)
+		}
+		// Every peer this accepts is built from the group alone, so the group's
+		// policy is exactly what each of them would ignore.
+		if err := refusePeerPolicy(pg.Conf.RouteServer.Config.RouteServerClient, pg.Conf.ApplyPolicy.Config); err != nil {
+			return fmt.Errorf("dynamic neighbor %s through peer group %s: %w", c.Config.Prefix, c.Config.PeerGroup, err)
 		}
 		pg.AddDynamicNeighbor(c)
 
@@ -4888,6 +4924,9 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 	}
 	if err := oc.SetDefaultNeighborConfigValues(c, pgConf, &s.bgpConfig.Global); err != nil {
 		return needsSoftResetIn, err
+	}
+	if err := refusePeerPolicy(c.RouteServer.Config.RouteServerClient, c.ApplyPolicy.Config); err != nil {
+		return needsSoftResetIn, fmt.Errorf("neighbor %s: %w", c.State.NeighborAddress, err)
 	}
 
 	addr, err := c.ExtractNeighborAddress()

@@ -592,6 +592,13 @@ func TestRemovedLeavesAreRejected(t *testing.T) {
       afi-safi-name = "ipv4-unicast"
       enabled = false
 `,
+		"neighbor afi-safi apply-policy": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.apply-policy.config]
+      default-import-policy = "reject-route"
+`,
 		"rpki refresh-time": global + `
 [[rpki-servers]]
   [rpki-servers.config]

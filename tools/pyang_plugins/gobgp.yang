@@ -1218,6 +1218,21 @@ module gobgp {
     deviate not-supported;
   }
 
+  // afi-safi apply-policy: stored and never applied. Policy is attached to the
+  // global table, or per peer for route-server clients.
+  deviation "/bgp:bgp/bgp:global/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:apply-policy" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:apply-policy" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:afi-safis/bgp:afi-safi" +
+    "/bgp:apply-policy" {
+    deviate not-supported;
+  }
+
   // route-flap-damping: no route flap damping is implemented.
   deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:config/bgp:route-flap-damping" {
     deviate not-supported;

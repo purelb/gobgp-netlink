@@ -4862,64 +4862,72 @@ func TestRTCShouldNotAdvertiseVPNRouteWhenRTCIsNotPassImportPolicies(t *testing.
 		"VPN route should not appear at s2 adj-in from s1 after second VPN prefix is added")
 }
 
+// Per-peer import and export policy is applied only to route-server clients.
+// It used to be accepted on any peer and silently ignored on the rest - stored,
+// reported back by ListPeer, and never installed - so an import policy meant to
+// filter a peer's routes filtered nothing. It is now refused where it would be
+// ignored, over AddPeer and UpdatePeer alike; a route-server client still gets
+// it, and a peer that states no policy is unaffected.
 func TestPerPeerPolicyIsRouteServerOnly(t *testing.T) {
-	for _, rs := range []bool{false, true} {
-		name := "non-rs-client"
-		if rs {
-			name = "rs-client"
+	policy := func() *api.ApplyPolicy {
+		return &api.ApplyPolicy{
+			ImportPolicy: &api.PolicyAssignment{
+				Direction:     api.PolicyDirection_POLICY_DIRECTION_IMPORT,
+				DefaultAction: api.RouteAction_ROUTE_ACTION_ACCEPT,
+				Policies:      []*api.Policy{{Name: "p1"}},
+			},
 		}
-		t.Run(name, func(t *testing.T) {
-			assert := assert.New(t)
-
-			s := NewBgpServer()
-			go s.Serve()
-			err := s.StartBgp(context.Background(), &api.StartBgpRequest{
-				Global: &api.Global{
-					Asn:        1,
-					RouterId:   "1.1.1.1",
-					ListenPort: -1,
-				},
-			})
-			assert.NoError(err)
-			defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
-
-			err = s.AddPolicy(context.Background(),
-				&api.AddPolicyRequest{Policy: table.NewAPIPolicyFromTableStruct(&table.Policy{Name: "p1"})})
-			assert.NoError(err)
-
-			err = s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
-				Conf: &api.PeerConf{
-					NeighborAddress: "127.0.0.1",
-					PeerAsn:         2,
-				},
-				RouteServer: &api.RouteServer{
-					RouteServerClient: rs,
-				},
-				ApplyPolicy: &api.ApplyPolicy{
-					ImportPolicy: &api.PolicyAssignment{
-						Direction:     api.PolicyDirection_POLICY_DIRECTION_IMPORT,
-						DefaultAction: api.RouteAction_ROUTE_ACTION_ACCEPT,
-						Policies:      []*api.Policy{{Name: "p1"}},
-					},
-				},
-			}})
-			assert.NoError(err)
-
-			// A route server client keeps the policy in use. Any other peer
-			// never reads the assignment, so nothing holds the policy.
-			err = s.DeletePolicy(context.Background(), &api.DeletePolicyRequest{
-				Policy:             &api.Policy{Name: "p1"},
-				All:                true,
-				PreserveStatements: true,
-			})
-			if rs {
-				assert.Error(err)
-				assert.Contains(err.Error(), "in use")
-			} else {
-				assert.NoError(err)
-			}
-		})
 	}
+	newServer := func(t *testing.T) *BgpServer {
+		t.Helper()
+		s := NewBgpServer()
+		go s.Serve()
+		require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+			Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+		}))
+		t.Cleanup(func() { _ = s.StopBgp(context.Background(), &api.StopBgpRequest{}) })
+		require.NoError(t, s.AddPolicy(context.Background(),
+			&api.AddPolicyRequest{Policy: table.NewAPIPolicyFromTableStruct(&table.Policy{Name: "p1"})}))
+		return s
+	}
+
+	t.Run("rs-client keeps its policy", func(t *testing.T) {
+		s := newServer(t)
+		require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+			Conf:        &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+			RouteServer: &api.RouteServer{RouteServerClient: true},
+			ApplyPolicy: policy(),
+		}}))
+		// The policy is installed, so it is in use and cannot be deleted.
+		err := s.DeletePolicy(context.Background(), &api.DeletePolicyRequest{
+			Policy: &api.Policy{Name: "p1"}, All: true, PreserveStatements: true,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "in use")
+	})
+
+	t.Run("ordinary peer is refused rather than ignored", func(t *testing.T) {
+		s := newServer(t)
+		err := s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+			Conf:        &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+			ApplyPolicy: policy(),
+		}})
+		require.Error(t, err, "a policy the peer would ignore must be refused, not stored")
+		assert.Contains(t, err.Error(), "route-server client")
+
+		// Without a policy the same peer is accepted.
+		require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+			Conf: &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		}}))
+
+		// And attaching one later is refused too.
+		_, err = s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: &api.Peer{
+			Conf:        &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+			ApplyPolicy: policy(),
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "route-server client")
+	})
 }
 
 func TestDeletePeerDropsPolicyAssignment(t *testing.T) {
@@ -6002,4 +6010,43 @@ func TestListPathBestFlagsHonourMaximumPaths(t *testing.T) {
 	require.Len(t, best, 3, "all three paths are in the RIB")
 	assert.Equal(t, []bool{true, true, false}, best,
 		"the two most preferred ties are the multipath set; the third is capped out and must not be flagged Best")
+}
+
+// A peer group's policy is refused on the peers that would ignore it: an
+// ordinary member, and every dynamic neighbor built from the group. The group
+// itself is accepted - it is a template, and may serve route-server members.
+func TestPeerGroupPolicyIsRefusedWhereItWouldBeIgnored(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+	require.NoError(t, s.AddPolicy(context.Background(),
+		&api.AddPolicyRequest{Policy: table.NewAPIPolicyFromTableStruct(&table.Policy{Name: "p1"})}))
+
+	require.NoError(t, s.AddPeerGroup(context.Background(), &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "g", PeerAsn: 2},
+		ApplyPolicy: &api.ApplyPolicy{ImportPolicy: &api.PolicyAssignment{
+			Direction: api.PolicyDirection_POLICY_DIRECTION_IMPORT,
+			Policies:  []*api.Policy{{Name: "p1"}},
+		}},
+	}}), "the group is a template and must be accepted")
+
+	err := s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: "10.98.0.1", PeerGroup: "g"},
+	}})
+	require.Error(t, err, "an ordinary member would ignore the inherited policy")
+	assert.Contains(t, err.Error(), "route-server client")
+
+	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:        &api.PeerConf{NeighborAddress: "10.98.0.2", PeerGroup: "g"},
+		RouteServer: &api.RouteServer{RouteServerClient: true},
+	}}), "a route-server member applies the inherited policy")
+
+	err = s.AddDynamicNeighbor(context.Background(), &api.AddDynamicNeighborRequest{
+		DynamicNeighbor: &api.DynamicNeighbor{Prefix: "10.99.0.0/24", PeerGroup: "g"},
+	})
+	require.Error(t, err, "every dynamic neighbor built from this group would ignore its policy")
+	assert.Contains(t, err.Error(), "route-server client")
 }

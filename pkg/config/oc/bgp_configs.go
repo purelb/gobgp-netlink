@@ -3842,6 +3842,109 @@ func (lhs *Neighbor) Equal(rhs *Neighbor) bool {
 	return true
 }
 
+// struct for container rpol:state.
+// Operational state for routing policy.
+type ApplyPolicyState struct {
+	// original -> rpol:import-policy
+	// list of policy names in sequence to be applied on
+	// receiving a routing update in the current context, e.g.,
+	// for the current peer group, neighbor, address family,
+	// etc.
+	ImportPolicyList []string `mapstructure:"import-policy-list" json:"import-policy-list,omitempty"`
+	// original -> rpol:default-import-policy
+	// explicitly set a default policy if no policy definition
+	// in the import policy chain is satisfied.
+	DefaultImportPolicy DefaultPolicyType `mapstructure:"default-import-policy" json:"default-import-policy,omitempty"`
+	// original -> rpol:export-policy
+	// list of policy names in sequence to be applied on
+	// sending a routing update in the current context, e.g.,
+	// for the current peer group, neighbor, address family,
+	// etc.
+	ExportPolicyList []string `mapstructure:"export-policy-list" json:"export-policy-list,omitempty"`
+	// original -> rpol:default-export-policy
+	// explicitly set a default policy if no policy definition
+	// in the export policy chain is satisfied.
+	DefaultExportPolicy DefaultPolicyType `mapstructure:"default-export-policy" json:"default-export-policy,omitempty"`
+}
+
+// struct for container rpol:config.
+// Policy configuration data.
+type ApplyPolicyConfig struct {
+	// original -> rpol:import-policy
+	// list of policy names in sequence to be applied on
+	// receiving a routing update in the current context, e.g.,
+	// for the current peer group, neighbor, address family,
+	// etc.
+	ImportPolicyList []string `mapstructure:"import-policy-list" json:"import-policy-list,omitempty"`
+	// original -> rpol:default-import-policy
+	// explicitly set a default policy if no policy definition
+	// in the import policy chain is satisfied.
+	DefaultImportPolicy DefaultPolicyType `mapstructure:"default-import-policy" json:"default-import-policy,omitempty"`
+	// original -> rpol:export-policy
+	// list of policy names in sequence to be applied on
+	// sending a routing update in the current context, e.g.,
+	// for the current peer group, neighbor, address family,
+	// etc.
+	ExportPolicyList []string `mapstructure:"export-policy-list" json:"export-policy-list,omitempty"`
+	// original -> rpol:default-export-policy
+	// explicitly set a default policy if no policy definition
+	// in the export policy chain is satisfied.
+	DefaultExportPolicy DefaultPolicyType `mapstructure:"default-export-policy" json:"default-export-policy,omitempty"`
+}
+
+func (lhs *ApplyPolicyConfig) Equal(rhs *ApplyPolicyConfig) bool {
+	if lhs == nil || rhs == nil {
+		return false
+	}
+	if len(lhs.ImportPolicyList) != len(rhs.ImportPolicyList) {
+		return false
+	}
+	for idx, l := range lhs.ImportPolicyList {
+		if l != rhs.ImportPolicyList[idx] {
+			return false
+		}
+	}
+	if lhs.DefaultImportPolicy != rhs.DefaultImportPolicy {
+		return false
+	}
+	if len(lhs.ExportPolicyList) != len(rhs.ExportPolicyList) {
+		return false
+	}
+	for idx, l := range lhs.ExportPolicyList {
+		if l != rhs.ExportPolicyList[idx] {
+			return false
+		}
+	}
+	if lhs.DefaultExportPolicy != rhs.DefaultExportPolicy {
+		return false
+	}
+	return true
+}
+
+// struct for container rpol:apply-policy.
+// Anchor point for routing policies in the model.
+// Import and export policies are with respect to the local
+// routing table, i.e., export (send) and import (receive),
+// depending on the context.
+type ApplyPolicy struct {
+	// original -> rpol:apply-policy-config
+	// Policy configuration data.
+	Config ApplyPolicyConfig `mapstructure:"config" json:"config,omitempty"`
+	// original -> rpol:apply-policy-state
+	// Operational state for routing policy.
+	State ApplyPolicyState `mapstructure:"state" json:"state,omitempty"`
+}
+
+func (lhs *ApplyPolicy) Equal(rhs *ApplyPolicy) bool {
+	if lhs == nil || rhs == nil {
+		return false
+	}
+	if !lhs.Config.Equal(&(rhs.Config)) {
+		return false
+	}
+	return true
+}
+
 // struct for container gobgp:state.
 type LongLivedGracefulRestartState struct {
 	// original -> gobgp:enabled
@@ -4012,109 +4115,6 @@ func (lhs *PrefixLimit) Equal(rhs *PrefixLimit) bool {
 	return true
 }
 
-// struct for container rpol:state.
-// Operational state for routing policy.
-type ApplyPolicyState struct {
-	// original -> rpol:import-policy
-	// list of policy names in sequence to be applied on
-	// receiving a routing update in the current context, e.g.,
-	// for the current peer group, neighbor, address family,
-	// etc.
-	ImportPolicyList []string `mapstructure:"import-policy-list" json:"import-policy-list,omitempty"`
-	// original -> rpol:default-import-policy
-	// explicitly set a default policy if no policy definition
-	// in the import policy chain is satisfied.
-	DefaultImportPolicy DefaultPolicyType `mapstructure:"default-import-policy" json:"default-import-policy,omitempty"`
-	// original -> rpol:export-policy
-	// list of policy names in sequence to be applied on
-	// sending a routing update in the current context, e.g.,
-	// for the current peer group, neighbor, address family,
-	// etc.
-	ExportPolicyList []string `mapstructure:"export-policy-list" json:"export-policy-list,omitempty"`
-	// original -> rpol:default-export-policy
-	// explicitly set a default policy if no policy definition
-	// in the export policy chain is satisfied.
-	DefaultExportPolicy DefaultPolicyType `mapstructure:"default-export-policy" json:"default-export-policy,omitempty"`
-}
-
-// struct for container rpol:config.
-// Policy configuration data.
-type ApplyPolicyConfig struct {
-	// original -> rpol:import-policy
-	// list of policy names in sequence to be applied on
-	// receiving a routing update in the current context, e.g.,
-	// for the current peer group, neighbor, address family,
-	// etc.
-	ImportPolicyList []string `mapstructure:"import-policy-list" json:"import-policy-list,omitempty"`
-	// original -> rpol:default-import-policy
-	// explicitly set a default policy if no policy definition
-	// in the import policy chain is satisfied.
-	DefaultImportPolicy DefaultPolicyType `mapstructure:"default-import-policy" json:"default-import-policy,omitempty"`
-	// original -> rpol:export-policy
-	// list of policy names in sequence to be applied on
-	// sending a routing update in the current context, e.g.,
-	// for the current peer group, neighbor, address family,
-	// etc.
-	ExportPolicyList []string `mapstructure:"export-policy-list" json:"export-policy-list,omitempty"`
-	// original -> rpol:default-export-policy
-	// explicitly set a default policy if no policy definition
-	// in the export policy chain is satisfied.
-	DefaultExportPolicy DefaultPolicyType `mapstructure:"default-export-policy" json:"default-export-policy,omitempty"`
-}
-
-func (lhs *ApplyPolicyConfig) Equal(rhs *ApplyPolicyConfig) bool {
-	if lhs == nil || rhs == nil {
-		return false
-	}
-	if len(lhs.ImportPolicyList) != len(rhs.ImportPolicyList) {
-		return false
-	}
-	for idx, l := range lhs.ImportPolicyList {
-		if l != rhs.ImportPolicyList[idx] {
-			return false
-		}
-	}
-	if lhs.DefaultImportPolicy != rhs.DefaultImportPolicy {
-		return false
-	}
-	if len(lhs.ExportPolicyList) != len(rhs.ExportPolicyList) {
-		return false
-	}
-	for idx, l := range lhs.ExportPolicyList {
-		if l != rhs.ExportPolicyList[idx] {
-			return false
-		}
-	}
-	if lhs.DefaultExportPolicy != rhs.DefaultExportPolicy {
-		return false
-	}
-	return true
-}
-
-// struct for container rpol:apply-policy.
-// Anchor point for routing policies in the model.
-// Import and export policies are with respect to the local
-// routing table, i.e., export (send) and import (receive),
-// depending on the context.
-type ApplyPolicy struct {
-	// original -> rpol:apply-policy-config
-	// Policy configuration data.
-	Config ApplyPolicyConfig `mapstructure:"config" json:"config,omitempty"`
-	// original -> rpol:apply-policy-state
-	// Operational state for routing policy.
-	State ApplyPolicyState `mapstructure:"state" json:"state,omitempty"`
-}
-
-func (lhs *ApplyPolicy) Equal(rhs *ApplyPolicy) bool {
-	if lhs == nil || rhs == nil {
-		return false
-	}
-	if !lhs.Config.Equal(&(rhs.Config)) {
-		return false
-	}
-	return true
-}
-
 // struct for container bgp-mp:state.
 // State information relating to the AFI-SAFI.
 type AfiSafiState struct {
@@ -4248,12 +4248,6 @@ type AfiSafi struct {
 	// original -> bgp-mp:afi-safi-state
 	// State information relating to the AFI-SAFI.
 	State AfiSafiState `mapstructure:"state" json:"state,omitempty"`
-	// original -> rpol:apply-policy
-	// Anchor point for routing policies in the model.
-	// Import and export policies are with respect to the local
-	// routing table, i.e., export (send) and import (receive),
-	// depending on the context.
-	ApplyPolicy ApplyPolicy `mapstructure:"apply-policy" json:"apply-policy,omitempty"`
 	// original -> bgp-mp:prefix-limit
 	// Configure the maximum number of prefixes that will be
 	// accepted from a peer.
@@ -4275,9 +4269,6 @@ func (lhs *AfiSafi) Equal(rhs *AfiSafi) bool {
 		return false
 	}
 	if !lhs.Config.Equal(&(rhs.Config)) {
-		return false
-	}
-	if !lhs.ApplyPolicy.Equal(&(rhs.ApplyPolicy)) {
 		return false
 	}
 	if !lhs.PrefixLimit.Equal(&(rhs.PrefixLimit)) {

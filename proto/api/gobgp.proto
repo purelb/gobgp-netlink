@@ -1405,7 +1405,10 @@ message AfiSafi {
   MpGracefulRestart mp_graceful_restart = 1;
   AfiSafiConfig config = 2;
   AfiSafiState state = 3;
-  ApplyPolicy apply_policy = 4;
+  // Removed in 1.3.5: per-family policy was stored and never applied - policy
+  // is attached to the global table, or per peer for route-server clients.
+  reserved 4;
+  reserved "apply_policy";
   // TODO:
   // Support the following structures:
   // - Ipv4Unicast

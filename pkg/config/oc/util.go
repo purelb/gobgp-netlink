@@ -481,7 +481,6 @@ func newAfiSafiFromConfigStruct(c *AfiSafi) *api.AfiSafi {
 	return &api.AfiSafi{
 		MpGracefulRestart:        newMpGracefulRestartFromConfigStruct(&c.MpGracefulRestart),
 		Config:                   newAfiSafiConfigFromConfigStruct(c),
-		ApplyPolicy:              newApplyPolicyFromConfigStruct(&c.ApplyPolicy),
 		PrefixLimits:             newPrefixLimitFromConfigStruct(c),
 		RouteTargetMembership:    newRouteTargetMembershipFromConfigStruct(&c.RouteTargetMembership),
 		LongLivedGracefulRestart: newLongLivedGracefulRestartFromConfigStruct(&c.LongLivedGracefulRestart),
