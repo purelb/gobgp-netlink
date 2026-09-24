@@ -17,9 +17,11 @@ package server
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/osrg/gobgp/v4/pkg/config/oc"
 )
@@ -187,4 +189,107 @@ func inheritableConfigFields() []string {
 		out = append(out, tag)
 	}
 	return out
+}
+
+// What a change to each block does to a running session: rebuild it, or apply
+// in place.
+//
+// The third question, after "is presence recorded" and "does anything act on
+// it". A block in neither of updateNeighbor's lists was accepted and dropped:
+// route-server and route-reflector changes did nothing at all, and a hold-time
+// change was reported at once while the session kept the old one until it
+// restarted. Every block now has to say which it is, and the claim is checked
+// against NeedsResendOpenMessage rather than taken on trust.
+//
+// config and timers are mixed, field by field; TestNeedsResendOpenMessageCarveOuts
+// pins each of their fields in both directions.
+var blockChangeHandling = map[string]string{
+	"config":           "per field: rebuild, except send-community, remove-private-as and description, applied in place",
+	"timers":           "per field: hold-time and keepalive-interval rebuild; connect-retry and idle-hold-time-after-reset are read live",
+	"transport":        "rebuild: addresses, ports and socket options belong to the connection",
+	"ebgp-multihop":    "rebuild: sets the socket TTL",
+	"route-reflector":  "rebuild: stamped into the PeerInfo snapshot that decides ORIGINATOR_ID and CLUSTER_LIST",
+	"as-path-options":  "rebuild: the loop checks run on the adj-rib-in as routes arrive",
+	"add-paths":        "rebuild: negotiated as a capability",
+	"afi-safis":        "rebuild: families are negotiated in the OPEN; prefix-limit alone is applied in place",
+	"graceful-restart": "rebuild: negotiated as a capability",
+	"apply-policy":     "in place: installed by setPeerPolicy for route-server clients and re-applied by soft reset in",
+	"route-server":     "rebuild: decides which RIB the peer's routes live in",
+	"ttl-security":     "rebuild: sets IP_MINTTL on the socket",
+	"bfd":              "in place: updateBfdPeer reconfigures the BFD session",
+}
+
+func TestConformanceEveryBlockChangeIsClassified(t *testing.T) {
+	blocks := inheritableBlocks()
+	known := map[string]bool{}
+	for _, b := range blocks {
+		known[b] = true
+		how, ok := blockChangeHandling[b]
+		if !assert.True(t, ok, "block %q has no recorded change handling. Say whether changing it on a live peer "+
+			"rebuilds the session or is applied in place - and make the code do that. A block in neither is "+
+			"accepted and dropped.", b) {
+			continue
+		}
+		rebuild := strings.HasPrefix(how, "rebuild:")
+		inPlace := strings.HasPrefix(how, "in place:")
+		if strings.HasPrefix(how, "per field:") {
+			continue // pinned field by field in TestNeedsResendOpenMessageCarveOuts
+		}
+		require.True(t, rebuild || inPlace, "block %q: handling must start with rebuild:, in place: or per field:", b)
+
+		// Change one field of the block and ask the code.
+		base := &oc.Neighbor{}
+		changed := &oc.Neighbor{}
+		if b == "afi-safis" {
+			changed.AfiSafis = []oc.AfiSafi{{Config: oc.AfiSafiConfig{AfiSafiName: oc.AFI_SAFI_TYPE_IPV4_UNICAST}}}
+		} else {
+			cfg, ok := blockConfig(changed, b)
+			require.True(t, ok, "block %q has no config container to change", b)
+			require.True(t, setFirstScalar(cfg), "block %q has no scalar field to change", b)
+		}
+		assert.Equal(t, rebuild, base.NeedsResendOpenMessage(changed),
+			"block %q is recorded as %q, but NeedsResendOpenMessage disagrees", b, how)
+	}
+	for b := range blockChangeHandling {
+		assert.True(t, known[b], "blockChangeHandling names %q, which is not an inheritable block", b)
+	}
+}
+
+// blockConfig returns the settable Config struct of the block whose
+// mapstructure tag is tag.
+func blockConfig(n *oc.Neighbor, tag string) (reflect.Value, bool) {
+	v := reflect.ValueOf(n).Elem()
+	t := v.Type()
+	for i := range t.NumField() {
+		if t.Field(i).Tag.Get("mapstructure") != tag {
+			continue
+		}
+		c := v.Field(i).FieldByName("Config")
+		return c, c.IsValid()
+	}
+	return reflect.Value{}, false
+}
+
+// setFirstScalar gives the first bool, integer, float or string field of a
+// struct a non-zero value.
+func setFirstScalar(s reflect.Value) bool {
+	for i := range s.NumField() {
+		f := s.Field(i)
+		switch f.Kind() {
+		case reflect.Bool:
+			f.SetBool(true)
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			f.SetInt(7)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			f.SetUint(7)
+		case reflect.Float32, reflect.Float64:
+			f.SetFloat(7)
+		case reflect.String:
+			f.SetString("x")
+		default:
+			continue
+		}
+		return true
+	}
+	return false
 }

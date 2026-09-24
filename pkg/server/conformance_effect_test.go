@@ -49,6 +49,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // wireEffectFields maps a per-peer setting that changes what is advertised to
@@ -646,6 +647,149 @@ func TestEffectPrefixLimitShutdownIsReportedAsSuch(t *testing.T) {
 		"the session went down because this speaker sent a CEASE, not because a read or write failed")
 	assert.Contains(t, st.DisconnectMessage, "maximum number of prefixes reached",
 		"the message must name the CEASE subcode")
+}
+
+// Everything ListPeer reports about a live session is reported.
+//
+// The other half of the configuration-consumer registry. That one catches a
+// setting nothing acts on; this catches a value the daemon has and never
+// writes into the reply - the defect behind most of this release: description,
+// peer group, remove-private, both hold timers, the queue depth, the sent
+// withdrawal counters, the disconnect reason, the netlink next hops. Each was
+// in scope at the conversion and left out of the literal.
+//
+// The session is built to use as much as it can - a peer group, a
+// description, remove-private and send-community, routes and a withdrawal in
+// each direction - and then every scalar under PeerState and
+// TimersState must be non-zero. What legitimately stays zero on a healthy
+// session is listed with the reason and, where it matters, the test that does
+// assert it non-zero. A new field added to either message arrives here as a
+// failure until someone reports it or says why not.
+var reportedStateZeroOnAHealthySession = map[string]string{
+	"PeerState.auth_password_set":              "no MD5 on this session; server_authpassword_test.go asserts the flag",
+	"PeerState.bfd_state":                      "BFD is not run on this session; Test_BfdPeerStateSnapshotPopulatesEveryField asserts the snapshot",
+	"PeerState.disconnect_reason":              "the session has never gone down; TestEffectDisconnectReasonIsReported",
+	"PeerState.disconnect_message":             "the session has never gone down; TestEffectDisconnectReasonIsReported",
+	"PeerState.flops":                          "the session has never gone down",
+	"PeerState.ipv6_nexthop":                   "the session is over IPv4 loopback, which has no global IPv6 address; TestSetNetlinkNexthops",
+	"PeerState.ipv6_link_local_nexthop":        "as ipv6_nexthop; TestSetNetlinkNexthops",
+	"PeerState.out_q":                          "the output queue is empty on an idle session; TestEffectOutputQueueIsReported",
+	"PeerState.queues.output":                  "as out_q; TestEffectOutputQueueIsReported",
+	"PeerState.messages.received.notification": "a NOTIFICATION ends the session",
+	"PeerState.messages.sent.notification":     "a NOTIFICATION ends the session",
+	"PeerState.messages.received.discarded":    "nothing malformed was sent",
+	"PeerState.messages.sent.discarded":        "nothing was discarded",
+	"PeerState.messages.sent.refresh": "gobgpd never sends ROUTE-REFRESH: a soft reset in replays the stored " +
+		"Adj-RIB-In instead of asking the peer",
+	"PeerState.messages.received.refresh": "the peer here is gobgpd, which never sends one",
+	"TimersState.downtime":                "the session has never gone down",
+	"TimersState.uptime.nanos":            "uptime is recorded to the second",
+}
+
+func TestConformanceReportedStateIsComplete(t *testing.T) {
+	const port = 10801
+	ctx := context.Background()
+
+	a := NewBgpServer()
+	go a.Serve()
+	require.NoError(t, a.StartBgp(ctx, &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65001, RouterId: "1.1.1.1", ListenPort: port},
+	}))
+	t.Cleanup(func() { a.StopBgp(ctx, &api.StopBgpRequest{}) }) //nolint:errcheck
+
+	require.NoError(t, a.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65002},
+	}}))
+	require.NoError(t, a.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "127.0.0.1",
+			PeerGroup:       "edge",
+			Description:     proto.String("state completeness"),
+			RemovePrivate:   api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+			SendCommunity:   proto.Uint32(2),
+		},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	b := NewBgpServer()
+	go b.Serve()
+	require.NoError(t, b.StartBgp(ctx, &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65002, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	t.Cleanup(func() { b.StopBgp(ctx, &api.StopBgpRequest{}) }) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(a, api.PeerState_SESSION_STATE_ESTABLISHED)
+	require.NoError(t, b.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65001},
+		Transport: &api.Transport{RemotePort: port},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	// Traffic in both directions, and a withdrawal each way.
+	advertise(t, a, "10.80.1.0/24")
+	advertise(t, a, "10.80.2.0/24")
+	advertise(t, b, "10.80.3.0/24")
+	advertise(t, b, "10.80.4.0/24")
+	time.Sleep(2 * time.Second)
+	withdraw := func(s *BgpServer, prefix string) {
+		t.Helper()
+		var paths []*apiutil.Path
+		require.NoError(t, s.ListPath(apiutil.ListPathRequest{
+			TableType: api.TableType_TABLE_TYPE_GLOBAL, Family: bgp.RF_IPv4_UC,
+		}, func(n bgp.NLRI, ps []*apiutil.Path) {
+			if n.String() == prefix {
+				for _, p := range ps {
+					if p.PeerASN == 0 { // locally originated
+						paths = append(paths, p)
+					}
+				}
+			}
+		}))
+		require.NotEmpty(t, paths, "%s must be in the RIB to withdraw", prefix)
+		require.NoError(t, s.DeletePath(apiutil.DeletePathRequest{Paths: paths}))
+	}
+	withdraw(a, "10.80.2.0/24")
+	withdraw(b, "10.80.4.0/24")
+	time.Sleep(3 * time.Second)
+
+	var p *api.Peer
+	require.NoError(t, a.ListPeer(ctx, &api.ListPeerRequest{EnableAdvertised: true},
+		func(x *api.Peer) { p = x }))
+	require.NotNil(t, p)
+	require.NotNil(t, p.State)
+	require.NotNil(t, p.Timers)
+	require.NotNil(t, p.Timers.State)
+
+	seen := map[string]bool{}
+	var walk func(m protoreflect.Message, path string)
+	walk = func(m protoreflect.Message, path string) {
+		fields := m.Descriptor().Fields()
+		for i := range fields.Len() {
+			fd := fields.Get(i)
+			name := path + "." + string(fd.Name())
+			seen[name] = true
+			if _, ok := reportedStateZeroOnAHealthySession[name]; ok {
+				continue
+			}
+			if fd.Kind() == protoreflect.MessageKind && !fd.IsList() && !fd.IsMap() {
+				if assert.True(t, m.Has(fd), "%s is not reported", name) {
+					walk(m.Get(fd).Message(), name)
+				}
+				continue
+			}
+			assert.True(t, m.Has(fd),
+				"%s is zero on a live session that exercises it. Either the daemon knows it and does not "+
+					"write it into the reply, or it is legitimately zero here - then say why in "+
+					"reportedStateZeroOnAHealthySession.", name)
+		}
+	}
+	walk(p.State.ProtoReflect(), "PeerState")
+	walk(p.Timers.State.ProtoReflect(), "TimersState")
+
+	for name := range reportedStateZeroOnAHealthySession {
+		assert.True(t, seen[name], "reportedStateZeroOnAHealthySession names %s, which is not a reported field", name)
+	}
 }
 
 // A hold-time change on a live peer reaches the running session.
