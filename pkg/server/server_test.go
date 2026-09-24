@@ -5489,11 +5489,6 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 			AlwaysCompareMed:        true,
 			IgnoreAsPathLength:      true,
 			ExternalCompareRouterId: true,
-			EnableAigp:              true,
-		},
-		DefaultRouteDistance: &api.DefaultRouteDistance{
-			ExternalRouteDistance: 20,
-			InternalRouteDistance: 200,
 		},
 		Confederation: &api.Confederation{
 			Enabled:      true,
@@ -5526,11 +5521,6 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 		assert.True(got.RouteSelectionOptions.AlwaysCompareMed)
 		assert.True(got.RouteSelectionOptions.IgnoreAsPathLength)
 		assert.True(got.RouteSelectionOptions.ExternalCompareRouterId)
-		assert.True(got.RouteSelectionOptions.EnableAigp)
-	}
-	if assert.NotNil(got.DefaultRouteDistance, "default_route_distance") {
-		assert.Equal(uint32(20), got.DefaultRouteDistance.ExternalRouteDistance)
-		assert.Equal(uint32(200), got.DefaultRouteDistance.InternalRouteDistance)
 	}
 	if assert.NotNil(got.Confederation, "confederation") {
 		assert.True(got.Confederation.Enabled)

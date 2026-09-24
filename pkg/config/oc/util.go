@@ -1028,14 +1028,7 @@ func NewGlobalFromConfigStruct(c *Global) *api.Global {
 			AlwaysCompareMed:         c.RouteSelectionOptions.Config.AlwaysCompareMed,
 			IgnoreAsPathLength:       c.RouteSelectionOptions.Config.IgnoreAsPathLength,
 			ExternalCompareRouterId:  c.RouteSelectionOptions.Config.ExternalCompareRouterId,
-			AdvertiseInactiveRoutes:  c.RouteSelectionOptions.Config.AdvertiseInactiveRoutes,
-			EnableAigp:               c.RouteSelectionOptions.Config.EnableAigp,
-			IgnoreNextHopIgpMetric:   c.RouteSelectionOptions.Config.IgnoreNextHopIgpMetric,
 			DisableBestPathSelection: c.RouteSelectionOptions.Config.DisableBestPathSelection,
-		},
-		DefaultRouteDistance: &api.DefaultRouteDistance{
-			ExternalRouteDistance: uint32(c.DefaultRouteDistance.Config.ExternalRouteDistance),
-			InternalRouteDistance: uint32(c.DefaultRouteDistance.Config.InternalRouteDistance),
 		},
 		Confederation: &api.Confederation{
 			Enabled:      c.Confederation.Config.Enabled,

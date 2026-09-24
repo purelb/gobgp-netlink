@@ -1353,9 +1353,11 @@ message RouteSelectionOptionsConfig {
   bool always_compare_med = 1;
   bool ignore_as_path_length = 2;
   bool external_compare_router_id = 3;
-  bool advertise_inactive_routes = 4;
-  bool enable_aigp = 5;
-  bool ignore_next_hop_igp_metric = 6;
+  // Removed in 1.3.5: accepted by StartBgp and reported by GetBgp, and read by
+  // nothing in route selection - there is no AIGP comparison, no IGP metric
+  // to ignore, and inactive routes are never advertised.
+  reserved 4, 5, 6;
+  reserved "advertise_inactive_routes", "enable_aigp", "ignore_next_hop_igp_metric";
   bool disable_best_path_selection = 7;
 }
 
@@ -1642,11 +1644,6 @@ message VrfNetlinkInfo {
   repeated string import_interfaces = 2;
 }
 
-message DefaultRouteDistance {
-  uint32 external_route_distance = 1;
-  uint32 internal_route_distance = 2;
-}
-
 message Global {
   uint32 asn = 1;
   string router_id = 2;
@@ -1666,7 +1663,10 @@ message Global {
   repeated uint32 families = 5;
   bool use_multiple_paths = 6;
   RouteSelectionOptionsConfig route_selection_options = 7;
-  DefaultRouteDistance default_route_distance = 8;
+  // Removed in 1.3.5: administrative distance is not used by anything this
+  // daemon does. Accepted and reported only.
+  reserved 8;
+  reserved "default_route_distance";
   Confederation confederation = 9;
   GracefulRestart graceful_restart = 10;
   string bind_to_device = 11;

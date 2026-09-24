@@ -5016,70 +5016,6 @@ func (lhs *Confederation) Equal(rhs *Confederation) bool {
 	return true
 }
 
-// struct for container bgp:state.
-// State information relating to the default route distance.
-type DefaultRouteDistanceState struct {
-	// original -> bgp:external-route-distance
-	// Administrative distance for routes learned from external
-	// BGP (eBGP).
-	ExternalRouteDistance uint8 `mapstructure:"external-route-distance" json:"external-route-distance,omitempty"`
-	// original -> bgp:internal-route-distance
-	// Administrative distance for routes learned from internal
-	// BGP (iBGP).
-	InternalRouteDistance uint8 `mapstructure:"internal-route-distance" json:"internal-route-distance,omitempty"`
-}
-
-// struct for container bgp:config.
-// Configuration parameters relating to the default route
-// distance.
-type DefaultRouteDistanceConfig struct {
-	// original -> bgp:external-route-distance
-	// Administrative distance for routes learned from external
-	// BGP (eBGP).
-	ExternalRouteDistance uint8 `mapstructure:"external-route-distance" json:"external-route-distance,omitempty"`
-	// original -> bgp:internal-route-distance
-	// Administrative distance for routes learned from internal
-	// BGP (iBGP).
-	InternalRouteDistance uint8 `mapstructure:"internal-route-distance" json:"internal-route-distance,omitempty"`
-}
-
-func (lhs *DefaultRouteDistanceConfig) Equal(rhs *DefaultRouteDistanceConfig) bool {
-	if lhs == nil || rhs == nil {
-		return false
-	}
-	if lhs.ExternalRouteDistance != rhs.ExternalRouteDistance {
-		return false
-	}
-	if lhs.InternalRouteDistance != rhs.InternalRouteDistance {
-		return false
-	}
-	return true
-}
-
-// struct for container bgp:default-route-distance.
-// Administrative distance (or preference) assigned to
-// routes received from different sources
-// (external, internal, and local).
-type DefaultRouteDistance struct {
-	// original -> bgp:default-route-distance-config
-	// Configuration parameters relating to the default route
-	// distance.
-	Config DefaultRouteDistanceConfig `mapstructure:"config" json:"config,omitempty"`
-	// original -> bgp:default-route-distance-state
-	// State information relating to the default route distance.
-	State DefaultRouteDistanceState `mapstructure:"state" json:"state,omitempty"`
-}
-
-func (lhs *DefaultRouteDistance) Equal(rhs *DefaultRouteDistance) bool {
-	if lhs == nil || rhs == nil {
-		return false
-	}
-	if !lhs.Config.Equal(&(rhs.Config)) {
-		return false
-	}
-	return true
-}
-
 // struct for container bgp-mp:state.
 // State information for the route selection options.
 type RouteSelectionOptionsState struct {
@@ -5102,22 +5038,6 @@ type RouteSelectionOptionsState struct {
 	// BGP peers, use the router-id as a criterion to select
 	// the active path.
 	ExternalCompareRouterId bool `mapstructure:"external-compare-router-id" json:"external-compare-router-id,omitempty"`
-	// original -> bgp-mp:advertise-inactive-routes
-	// bgp-mp:advertise-inactive-routes's original type is boolean.
-	// Advertise inactive routes to external peers.  The
-	// default is to only advertise active routes.
-	AdvertiseInactiveRoutes bool `mapstructure:"advertise-inactive-routes" json:"advertise-inactive-routes,omitempty"`
-	// original -> bgp-mp:enable-aigp
-	// bgp-mp:enable-aigp's original type is boolean.
-	// Flag to enable sending / receiving accumulated IGP
-	// attribute in routing updates.
-	EnableAigp bool `mapstructure:"enable-aigp" json:"enable-aigp,omitempty"`
-	// original -> bgp-mp:ignore-next-hop-igp-metric
-	// bgp-mp:ignore-next-hop-igp-metric's original type is boolean.
-	// Ignore the IGP metric to the next-hop when calculating
-	// BGP best-path. The default is to select the route for
-	// which the metric to the next-hop is lowest.
-	IgnoreNextHopIgpMetric bool `mapstructure:"ignore-next-hop-igp-metric" json:"ignore-next-hop-igp-metric,omitempty"`
 	// original -> gobgp:disable-best-path-selection
 	// gobgp:disable-best-path-selection's original type is boolean.
 	// Disables best path selection process.
@@ -5147,22 +5067,6 @@ type RouteSelectionOptionsConfig struct {
 	// BGP peers, use the router-id as a criterion to select
 	// the active path.
 	ExternalCompareRouterId bool `mapstructure:"external-compare-router-id" json:"external-compare-router-id,omitempty"`
-	// original -> bgp-mp:advertise-inactive-routes
-	// bgp-mp:advertise-inactive-routes's original type is boolean.
-	// Advertise inactive routes to external peers.  The
-	// default is to only advertise active routes.
-	AdvertiseInactiveRoutes bool `mapstructure:"advertise-inactive-routes" json:"advertise-inactive-routes,omitempty"`
-	// original -> bgp-mp:enable-aigp
-	// bgp-mp:enable-aigp's original type is boolean.
-	// Flag to enable sending / receiving accumulated IGP
-	// attribute in routing updates.
-	EnableAigp bool `mapstructure:"enable-aigp" json:"enable-aigp,omitempty"`
-	// original -> bgp-mp:ignore-next-hop-igp-metric
-	// bgp-mp:ignore-next-hop-igp-metric's original type is boolean.
-	// Ignore the IGP metric to the next-hop when calculating
-	// BGP best-path. The default is to select the route for
-	// which the metric to the next-hop is lowest.
-	IgnoreNextHopIgpMetric bool `mapstructure:"ignore-next-hop-igp-metric" json:"ignore-next-hop-igp-metric,omitempty"`
 	// original -> gobgp:disable-best-path-selection
 	// gobgp:disable-best-path-selection's original type is boolean.
 	// Disables best path selection process.
@@ -5180,15 +5084,6 @@ func (lhs *RouteSelectionOptionsConfig) Equal(rhs *RouteSelectionOptionsConfig) 
 		return false
 	}
 	if lhs.ExternalCompareRouterId != rhs.ExternalCompareRouterId {
-		return false
-	}
-	if lhs.AdvertiseInactiveRoutes != rhs.AdvertiseInactiveRoutes {
-		return false
-	}
-	if lhs.EnableAigp != rhs.EnableAigp {
-		return false
-	}
-	if lhs.IgnoreNextHopIgpMetric != rhs.IgnoreNextHopIgpMetric {
 		return false
 	}
 	if lhs.DisableBestPathSelection != rhs.DisableBestPathSelection {
@@ -5359,11 +5254,6 @@ type Global struct {
 	// original -> bgp-mp:route-selection-options
 	// Parameters relating to options for route selection.
 	RouteSelectionOptions RouteSelectionOptions `mapstructure:"route-selection-options" json:"route-selection-options,omitempty"`
-	// original -> bgp:default-route-distance
-	// Administrative distance (or preference) assigned to
-	// routes received from different sources
-	// (external, internal, and local).
-	DefaultRouteDistance DefaultRouteDistance `mapstructure:"default-route-distance" json:"default-route-distance,omitempty"`
 	// original -> bgp:confederation
 	// Parameters indicating whether the local system acts as part
 	// of a BGP confederation.
@@ -5394,9 +5284,6 @@ func (lhs *Global) Equal(rhs *Global) bool {
 		return false
 	}
 	if !lhs.RouteSelectionOptions.Equal(&(rhs.RouteSelectionOptions)) {
-		return false
-	}
-	if !lhs.DefaultRouteDistance.Equal(&(rhs.DefaultRouteDistance)) {
 		return false
 	}
 	if !lhs.Confederation.Equal(&(rhs.Confederation)) {

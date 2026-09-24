@@ -485,6 +485,23 @@ func TestRemovedLeavesAreRejected(t *testing.T) {
       max-prefixes = 100
       restart-timer = 30
 `,
+		"global advertise-inactive-routes": global + `
+[global.route-selection-options.config]
+  advertise-inactive-routes = true
+`,
+		"global enable-aigp": global + `
+[global.route-selection-options.config]
+  enable-aigp = true
+`,
+		"global ignore-next-hop-igp-metric": global + `
+[global.route-selection-options.config]
+  ignore-next-hop-igp-metric = true
+`,
+		"global default-route-distance": global + `
+[global.default-route-distance.config]
+  external-route-distance = 20
+  internal-route-distance = 200
+`,
 		"rpki refresh-time": global + `
 [[rpki-servers]]
   [rpki-servers.config]

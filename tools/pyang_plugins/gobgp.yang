@@ -1172,6 +1172,38 @@ module gobgp {
   // What stays is what works: [global].use-multiple-paths with its enabled
   // switch and the ebgp/ibgp maximum-paths, and [global].route-selection-options.
 
+  // route-selection-options: advertise-inactive-routes, enable-aigp and
+  // ignore-next-hop-igp-metric are read by no comparator.
+  deviation "/bgp:bgp/bgp:global/bgp:route-selection-options/bgp:config" +
+    "/bgp:advertise-inactive-routes" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:route-selection-options/bgp:config" +
+    "/bgp:enable-aigp" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:route-selection-options/bgp:config" +
+    "/bgp:ignore-next-hop-igp-metric" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:route-selection-options/bgp:state" +
+    "/bgp:advertise-inactive-routes" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:route-selection-options/bgp:state" +
+    "/bgp:enable-aigp" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:global/bgp:route-selection-options/bgp:state" +
+    "/bgp:ignore-next-hop-igp-metric" {
+    deviate not-supported;
+  }
+
+  // default-route-distance: administrative distance is used by nothing here.
+  deviation "/bgp:bgp/bgp:global/bgp:default-route-distance" {
+    deviate not-supported;
+  }
+
   // route-flap-damping: no route flap damping is implemented.
   deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:config/bgp:route-flap-damping" {
     deviate not-supported;

@@ -1631,7 +1631,7 @@ func (x SetLogLevelRequest_Level) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SetLogLevelRequest_Level.Descriptor instead.
 func (SetLogLevelRequest_Level) EnumDescriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{211, 0}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{210, 0}
 }
 
 type GetNetlinkRequest struct {
@@ -11117,9 +11117,6 @@ type RouteSelectionOptionsConfig struct {
 	AlwaysCompareMed         bool                   `protobuf:"varint,1,opt,name=always_compare_med,json=alwaysCompareMed,proto3" json:"always_compare_med,omitempty"`
 	IgnoreAsPathLength       bool                   `protobuf:"varint,2,opt,name=ignore_as_path_length,json=ignoreAsPathLength,proto3" json:"ignore_as_path_length,omitempty"`
 	ExternalCompareRouterId  bool                   `protobuf:"varint,3,opt,name=external_compare_router_id,json=externalCompareRouterId,proto3" json:"external_compare_router_id,omitempty"`
-	AdvertiseInactiveRoutes  bool                   `protobuf:"varint,4,opt,name=advertise_inactive_routes,json=advertiseInactiveRoutes,proto3" json:"advertise_inactive_routes,omitempty"`
-	EnableAigp               bool                   `protobuf:"varint,5,opt,name=enable_aigp,json=enableAigp,proto3" json:"enable_aigp,omitempty"`
-	IgnoreNextHopIgpMetric   bool                   `protobuf:"varint,6,opt,name=ignore_next_hop_igp_metric,json=ignoreNextHopIgpMetric,proto3" json:"ignore_next_hop_igp_metric,omitempty"`
 	DisableBestPathSelection bool                   `protobuf:"varint,7,opt,name=disable_best_path_selection,json=disableBestPathSelection,proto3" json:"disable_best_path_selection,omitempty"`
 	unknownFields            protoimpl.UnknownFields
 	sizeCache                protoimpl.SizeCache
@@ -11172,27 +11169,6 @@ func (x *RouteSelectionOptionsConfig) GetIgnoreAsPathLength() bool {
 func (x *RouteSelectionOptionsConfig) GetExternalCompareRouterId() bool {
 	if x != nil {
 		return x.ExternalCompareRouterId
-	}
-	return false
-}
-
-func (x *RouteSelectionOptionsConfig) GetAdvertiseInactiveRoutes() bool {
-	if x != nil {
-		return x.AdvertiseInactiveRoutes
-	}
-	return false
-}
-
-func (x *RouteSelectionOptionsConfig) GetEnableAigp() bool {
-	if x != nil {
-		return x.EnableAigp
-	}
-	return false
-}
-
-func (x *RouteSelectionOptionsConfig) GetIgnoreNextHopIgpMetric() bool {
-	if x != nil {
-		return x.IgnoreNextHopIgpMetric
 	}
 	return false
 }
@@ -13199,58 +13175,6 @@ func (x *VrfNetlinkInfo) GetImportInterfaces() []string {
 	return nil
 }
 
-type DefaultRouteDistance struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	ExternalRouteDistance uint32                 `protobuf:"varint,1,opt,name=external_route_distance,json=externalRouteDistance,proto3" json:"external_route_distance,omitempty"`
-	InternalRouteDistance uint32                 `protobuf:"varint,2,opt,name=internal_route_distance,json=internalRouteDistance,proto3" json:"internal_route_distance,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
-}
-
-func (x *DefaultRouteDistance) Reset() {
-	*x = DefaultRouteDistance{}
-	mi := &file_api_gobgp_proto_msgTypes[205]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DefaultRouteDistance) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DefaultRouteDistance) ProtoMessage() {}
-
-func (x *DefaultRouteDistance) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[205]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DefaultRouteDistance.ProtoReflect.Descriptor instead.
-func (*DefaultRouteDistance) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{205}
-}
-
-func (x *DefaultRouteDistance) GetExternalRouteDistance() uint32 {
-	if x != nil {
-		return x.ExternalRouteDistance
-	}
-	return 0
-}
-
-func (x *DefaultRouteDistance) GetInternalRouteDistance() uint32 {
-	if x != nil {
-		return x.InternalRouteDistance
-	}
-	return 0
-}
-
 type Global struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Asn             uint32                 `protobuf:"varint,1,opt,name=asn,proto3" json:"asn,omitempty"`
@@ -13271,7 +13195,6 @@ type Global struct {
 	Families              []uint32                     `protobuf:"varint,5,rep,packed,name=families,proto3" json:"families,omitempty"`
 	UseMultiplePaths      bool                         `protobuf:"varint,6,opt,name=use_multiple_paths,json=useMultiplePaths,proto3" json:"use_multiple_paths,omitempty"`
 	RouteSelectionOptions *RouteSelectionOptionsConfig `protobuf:"bytes,7,opt,name=route_selection_options,json=routeSelectionOptions,proto3" json:"route_selection_options,omitempty"`
-	DefaultRouteDistance  *DefaultRouteDistance        `protobuf:"bytes,8,opt,name=default_route_distance,json=defaultRouteDistance,proto3" json:"default_route_distance,omitempty"`
 	Confederation         *Confederation               `protobuf:"bytes,9,opt,name=confederation,proto3" json:"confederation,omitempty"`
 	GracefulRestart       *GracefulRestart             `protobuf:"bytes,10,opt,name=graceful_restart,json=gracefulRestart,proto3" json:"graceful_restart,omitempty"`
 	BindToDevice          string                       `protobuf:"bytes,11,opt,name=bind_to_device,json=bindToDevice,proto3" json:"bind_to_device,omitempty"`
@@ -13311,7 +13234,7 @@ type Global struct {
 
 func (x *Global) Reset() {
 	*x = Global{}
-	mi := &file_api_gobgp_proto_msgTypes[206]
+	mi := &file_api_gobgp_proto_msgTypes[205]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13323,7 +13246,7 @@ func (x *Global) String() string {
 func (*Global) ProtoMessage() {}
 
 func (x *Global) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[206]
+	mi := &file_api_gobgp_proto_msgTypes[205]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13336,7 +13259,7 @@ func (x *Global) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Global.ProtoReflect.Descriptor instead.
 func (*Global) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{206}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{205}
 }
 
 func (x *Global) GetAsn() uint32 {
@@ -13384,13 +13307,6 @@ func (x *Global) GetUseMultiplePaths() bool {
 func (x *Global) GetRouteSelectionOptions() *RouteSelectionOptionsConfig {
 	if x != nil {
 		return x.RouteSelectionOptions
-	}
-	return nil
-}
-
-func (x *Global) GetDefaultRouteDistance() *DefaultRouteDistance {
-	if x != nil {
-		return x.DefaultRouteDistance
 	}
 	return nil
 }
@@ -13448,7 +13364,7 @@ type Confederation struct {
 
 func (x *Confederation) Reset() {
 	*x = Confederation{}
-	mi := &file_api_gobgp_proto_msgTypes[207]
+	mi := &file_api_gobgp_proto_msgTypes[206]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13460,7 +13376,7 @@ func (x *Confederation) String() string {
 func (*Confederation) ProtoMessage() {}
 
 func (x *Confederation) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[207]
+	mi := &file_api_gobgp_proto_msgTypes[206]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13473,7 +13389,7 @@ func (x *Confederation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Confederation.ProtoReflect.Descriptor instead.
 func (*Confederation) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{207}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{206}
 }
 
 func (x *Confederation) GetEnabled() bool {
@@ -13511,7 +13427,7 @@ type RPKIConf struct {
 
 func (x *RPKIConf) Reset() {
 	*x = RPKIConf{}
-	mi := &file_api_gobgp_proto_msgTypes[208]
+	mi := &file_api_gobgp_proto_msgTypes[207]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13523,7 +13439,7 @@ func (x *RPKIConf) String() string {
 func (*RPKIConf) ProtoMessage() {}
 
 func (x *RPKIConf) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[208]
+	mi := &file_api_gobgp_proto_msgTypes[207]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13536,7 +13452,7 @@ func (x *RPKIConf) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RPKIConf.ProtoReflect.Descriptor instead.
 func (*RPKIConf) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{208}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{207}
 }
 
 func (x *RPKIConf) GetAddress() string {
@@ -13585,7 +13501,7 @@ type RPKIState struct {
 
 func (x *RPKIState) Reset() {
 	*x = RPKIState{}
-	mi := &file_api_gobgp_proto_msgTypes[209]
+	mi := &file_api_gobgp_proto_msgTypes[208]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13597,7 +13513,7 @@ func (x *RPKIState) String() string {
 func (*RPKIState) ProtoMessage() {}
 
 func (x *RPKIState) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[209]
+	mi := &file_api_gobgp_proto_msgTypes[208]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13610,7 +13526,7 @@ func (x *RPKIState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RPKIState.ProtoReflect.Descriptor instead.
 func (*RPKIState) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{209}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{208}
 }
 
 func (x *RPKIState) GetUptime() *timestamppb.Timestamp {
@@ -13742,7 +13658,7 @@ type Rpki struct {
 
 func (x *Rpki) Reset() {
 	*x = Rpki{}
-	mi := &file_api_gobgp_proto_msgTypes[210]
+	mi := &file_api_gobgp_proto_msgTypes[209]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13754,7 +13670,7 @@ func (x *Rpki) String() string {
 func (*Rpki) ProtoMessage() {}
 
 func (x *Rpki) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[210]
+	mi := &file_api_gobgp_proto_msgTypes[209]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13767,7 +13683,7 @@ func (x *Rpki) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Rpki.ProtoReflect.Descriptor instead.
 func (*Rpki) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{210}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{209}
 }
 
 func (x *Rpki) GetConf() *RPKIConf {
@@ -13793,7 +13709,7 @@ type SetLogLevelRequest struct {
 
 func (x *SetLogLevelRequest) Reset() {
 	*x = SetLogLevelRequest{}
-	mi := &file_api_gobgp_proto_msgTypes[211]
+	mi := &file_api_gobgp_proto_msgTypes[210]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13805,7 +13721,7 @@ func (x *SetLogLevelRequest) String() string {
 func (*SetLogLevelRequest) ProtoMessage() {}
 
 func (x *SetLogLevelRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[211]
+	mi := &file_api_gobgp_proto_msgTypes[210]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13818,7 +13734,7 @@ func (x *SetLogLevelRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetLogLevelRequest.ProtoReflect.Descriptor instead.
 func (*SetLogLevelRequest) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{211}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{210}
 }
 
 func (x *SetLogLevelRequest) GetLevel() SetLogLevelRequest_Level {
@@ -13836,7 +13752,7 @@ type SetLogLevelResponse struct {
 
 func (x *SetLogLevelResponse) Reset() {
 	*x = SetLogLevelResponse{}
-	mi := &file_api_gobgp_proto_msgTypes[212]
+	mi := &file_api_gobgp_proto_msgTypes[211]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13848,7 +13764,7 @@ func (x *SetLogLevelResponse) String() string {
 func (*SetLogLevelResponse) ProtoMessage() {}
 
 func (x *SetLogLevelResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[212]
+	mi := &file_api_gobgp_proto_msgTypes[211]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13861,7 +13777,7 @@ func (x *SetLogLevelResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetLogLevelResponse.ProtoReflect.Descriptor instead.
 func (*SetLogLevelResponse) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{212}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{211}
 }
 
 type BfdAsyncCounters struct {
@@ -13874,7 +13790,7 @@ type BfdAsyncCounters struct {
 
 func (x *BfdAsyncCounters) Reset() {
 	*x = BfdAsyncCounters{}
-	mi := &file_api_gobgp_proto_msgTypes[213]
+	mi := &file_api_gobgp_proto_msgTypes[212]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13886,7 +13802,7 @@ func (x *BfdAsyncCounters) String() string {
 func (*BfdAsyncCounters) ProtoMessage() {}
 
 func (x *BfdAsyncCounters) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[213]
+	mi := &file_api_gobgp_proto_msgTypes[212]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13899,7 +13815,7 @@ func (x *BfdAsyncCounters) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BfdAsyncCounters.ProtoReflect.Descriptor instead.
 func (*BfdAsyncCounters) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{213}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{212}
 }
 
 func (x *BfdAsyncCounters) GetTransmittedPackets() uint64 {
@@ -13934,7 +13850,7 @@ type BfdPeerState struct {
 
 func (x *BfdPeerState) Reset() {
 	*x = BfdPeerState{}
-	mi := &file_api_gobgp_proto_msgTypes[214]
+	mi := &file_api_gobgp_proto_msgTypes[213]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13946,7 +13862,7 @@ func (x *BfdPeerState) String() string {
 func (*BfdPeerState) ProtoMessage() {}
 
 func (x *BfdPeerState) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[214]
+	mi := &file_api_gobgp_proto_msgTypes[213]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13959,7 +13875,7 @@ func (x *BfdPeerState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BfdPeerState.ProtoReflect.Descriptor instead.
 func (*BfdPeerState) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{214}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{213}
 }
 
 func (x *BfdPeerState) GetSessionState() BfdSessionState {
@@ -14045,7 +13961,7 @@ type BfdPeerConfig struct {
 
 func (x *BfdPeerConfig) Reset() {
 	*x = BfdPeerConfig{}
-	mi := &file_api_gobgp_proto_msgTypes[215]
+	mi := &file_api_gobgp_proto_msgTypes[214]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14057,7 +13973,7 @@ func (x *BfdPeerConfig) String() string {
 func (*BfdPeerConfig) ProtoMessage() {}
 
 func (x *BfdPeerConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[215]
+	mi := &file_api_gobgp_proto_msgTypes[214]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14070,7 +13986,7 @@ func (x *BfdPeerConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BfdPeerConfig.ProtoReflect.Descriptor instead.
 func (*BfdPeerConfig) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{215}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{214}
 }
 
 func (x *BfdPeerConfig) GetEnabled() bool {
@@ -14127,7 +14043,7 @@ type BfdState struct {
 
 func (x *BfdState) Reset() {
 	*x = BfdState{}
-	mi := &file_api_gobgp_proto_msgTypes[216]
+	mi := &file_api_gobgp_proto_msgTypes[215]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14139,7 +14055,7 @@ func (x *BfdState) String() string {
 func (*BfdState) ProtoMessage() {}
 
 func (x *BfdState) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[216]
+	mi := &file_api_gobgp_proto_msgTypes[215]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14152,7 +14068,7 @@ func (x *BfdState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BfdState.ProtoReflect.Descriptor instead.
 func (*BfdState) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{216}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{215}
 }
 
 func (x *BfdState) GetReceivedPacket() uint64 {
@@ -14212,7 +14128,7 @@ type GetBfdServerStateRequest struct {
 
 func (x *GetBfdServerStateRequest) Reset() {
 	*x = GetBfdServerStateRequest{}
-	mi := &file_api_gobgp_proto_msgTypes[217]
+	mi := &file_api_gobgp_proto_msgTypes[216]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14224,7 +14140,7 @@ func (x *GetBfdServerStateRequest) String() string {
 func (*GetBfdServerStateRequest) ProtoMessage() {}
 
 func (x *GetBfdServerStateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[217]
+	mi := &file_api_gobgp_proto_msgTypes[216]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14237,7 +14153,7 @@ func (x *GetBfdServerStateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBfdServerStateRequest.ProtoReflect.Descriptor instead.
 func (*GetBfdServerStateRequest) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{217}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{216}
 }
 
 // GetBfdServerStateResponse carries the BFD server's receive-path counters.
@@ -14252,7 +14168,7 @@ type GetBfdServerStateResponse struct {
 
 func (x *GetBfdServerStateResponse) Reset() {
 	*x = GetBfdServerStateResponse{}
-	mi := &file_api_gobgp_proto_msgTypes[218]
+	mi := &file_api_gobgp_proto_msgTypes[217]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14264,7 +14180,7 @@ func (x *GetBfdServerStateResponse) String() string {
 func (*GetBfdServerStateResponse) ProtoMessage() {}
 
 func (x *GetBfdServerStateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[218]
+	mi := &file_api_gobgp_proto_msgTypes[217]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14277,7 +14193,7 @@ func (x *GetBfdServerStateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetBfdServerStateResponse.ProtoReflect.Descriptor instead.
 func (*GetBfdServerStateResponse) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{218}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{217}
 }
 
 func (x *GetBfdServerStateResponse) GetState() *BfdState {
@@ -14300,7 +14216,7 @@ type TcpAoKey struct {
 
 func (x *TcpAoKey) Reset() {
 	*x = TcpAoKey{}
-	mi := &file_api_gobgp_proto_msgTypes[219]
+	mi := &file_api_gobgp_proto_msgTypes[218]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14312,7 +14228,7 @@ func (x *TcpAoKey) String() string {
 func (*TcpAoKey) ProtoMessage() {}
 
 func (x *TcpAoKey) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[219]
+	mi := &file_api_gobgp_proto_msgTypes[218]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14325,7 +14241,7 @@ func (x *TcpAoKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TcpAoKey.ProtoReflect.Descriptor instead.
 func (*TcpAoKey) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{219}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{218}
 }
 
 func (x *TcpAoKey) GetSendId() uint32 {
@@ -14373,7 +14289,7 @@ type TcpAoKeychain struct {
 
 func (x *TcpAoKeychain) Reset() {
 	*x = TcpAoKeychain{}
-	mi := &file_api_gobgp_proto_msgTypes[220]
+	mi := &file_api_gobgp_proto_msgTypes[219]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14385,7 +14301,7 @@ func (x *TcpAoKeychain) String() string {
 func (*TcpAoKeychain) ProtoMessage() {}
 
 func (x *TcpAoKeychain) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[220]
+	mi := &file_api_gobgp_proto_msgTypes[219]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14398,7 +14314,7 @@ func (x *TcpAoKeychain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TcpAoKeychain.ProtoReflect.Descriptor instead.
 func (*TcpAoKeychain) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{220}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{219}
 }
 
 func (x *TcpAoKeychain) GetName() string {
@@ -14424,7 +14340,7 @@ type AddTcpAoKeychainRequest struct {
 
 func (x *AddTcpAoKeychainRequest) Reset() {
 	*x = AddTcpAoKeychainRequest{}
-	mi := &file_api_gobgp_proto_msgTypes[221]
+	mi := &file_api_gobgp_proto_msgTypes[220]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14436,7 +14352,7 @@ func (x *AddTcpAoKeychainRequest) String() string {
 func (*AddTcpAoKeychainRequest) ProtoMessage() {}
 
 func (x *AddTcpAoKeychainRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[221]
+	mi := &file_api_gobgp_proto_msgTypes[220]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14449,7 +14365,7 @@ func (x *AddTcpAoKeychainRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddTcpAoKeychainRequest.ProtoReflect.Descriptor instead.
 func (*AddTcpAoKeychainRequest) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{221}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{220}
 }
 
 func (x *AddTcpAoKeychainRequest) GetKeychain() *TcpAoKeychain {
@@ -14467,7 +14383,7 @@ type AddTcpAoKeychainResponse struct {
 
 func (x *AddTcpAoKeychainResponse) Reset() {
 	*x = AddTcpAoKeychainResponse{}
-	mi := &file_api_gobgp_proto_msgTypes[222]
+	mi := &file_api_gobgp_proto_msgTypes[221]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14479,7 +14395,7 @@ func (x *AddTcpAoKeychainResponse) String() string {
 func (*AddTcpAoKeychainResponse) ProtoMessage() {}
 
 func (x *AddTcpAoKeychainResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[222]
+	mi := &file_api_gobgp_proto_msgTypes[221]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14492,7 +14408,7 @@ func (x *AddTcpAoKeychainResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AddTcpAoKeychainResponse.ProtoReflect.Descriptor instead.
 func (*AddTcpAoKeychainResponse) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{222}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{221}
 }
 
 type UpdateTcpAoKeychainRequest struct {
@@ -14506,7 +14422,7 @@ type UpdateTcpAoKeychainRequest struct {
 
 func (x *UpdateTcpAoKeychainRequest) Reset() {
 	*x = UpdateTcpAoKeychainRequest{}
-	mi := &file_api_gobgp_proto_msgTypes[223]
+	mi := &file_api_gobgp_proto_msgTypes[222]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14518,7 +14434,7 @@ func (x *UpdateTcpAoKeychainRequest) String() string {
 func (*UpdateTcpAoKeychainRequest) ProtoMessage() {}
 
 func (x *UpdateTcpAoKeychainRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[223]
+	mi := &file_api_gobgp_proto_msgTypes[222]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14531,7 +14447,7 @@ func (x *UpdateTcpAoKeychainRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateTcpAoKeychainRequest.ProtoReflect.Descriptor instead.
 func (*UpdateTcpAoKeychainRequest) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{223}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{222}
 }
 
 func (x *UpdateTcpAoKeychainRequest) GetName() string {
@@ -14564,7 +14480,7 @@ type UpdateTcpAoKeychainResponse struct {
 
 func (x *UpdateTcpAoKeychainResponse) Reset() {
 	*x = UpdateTcpAoKeychainResponse{}
-	mi := &file_api_gobgp_proto_msgTypes[224]
+	mi := &file_api_gobgp_proto_msgTypes[223]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14576,7 +14492,7 @@ func (x *UpdateTcpAoKeychainResponse) String() string {
 func (*UpdateTcpAoKeychainResponse) ProtoMessage() {}
 
 func (x *UpdateTcpAoKeychainResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[224]
+	mi := &file_api_gobgp_proto_msgTypes[223]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14589,7 +14505,7 @@ func (x *UpdateTcpAoKeychainResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateTcpAoKeychainResponse.ProtoReflect.Descriptor instead.
 func (*UpdateTcpAoKeychainResponse) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{224}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{223}
 }
 
 func (x *UpdateTcpAoKeychainResponse) GetKeychain() *TcpAoKeychain {
@@ -14608,7 +14524,7 @@ type DeleteTcpAoKeychainRequest struct {
 
 func (x *DeleteTcpAoKeychainRequest) Reset() {
 	*x = DeleteTcpAoKeychainRequest{}
-	mi := &file_api_gobgp_proto_msgTypes[225]
+	mi := &file_api_gobgp_proto_msgTypes[224]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14620,7 +14536,7 @@ func (x *DeleteTcpAoKeychainRequest) String() string {
 func (*DeleteTcpAoKeychainRequest) ProtoMessage() {}
 
 func (x *DeleteTcpAoKeychainRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[225]
+	mi := &file_api_gobgp_proto_msgTypes[224]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14633,7 +14549,7 @@ func (x *DeleteTcpAoKeychainRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteTcpAoKeychainRequest.ProtoReflect.Descriptor instead.
 func (*DeleteTcpAoKeychainRequest) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{225}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{224}
 }
 
 func (x *DeleteTcpAoKeychainRequest) GetName() string {
@@ -14651,7 +14567,7 @@ type DeleteTcpAoKeychainResponse struct {
 
 func (x *DeleteTcpAoKeychainResponse) Reset() {
 	*x = DeleteTcpAoKeychainResponse{}
-	mi := &file_api_gobgp_proto_msgTypes[226]
+	mi := &file_api_gobgp_proto_msgTypes[225]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14663,7 +14579,7 @@ func (x *DeleteTcpAoKeychainResponse) String() string {
 func (*DeleteTcpAoKeychainResponse) ProtoMessage() {}
 
 func (x *DeleteTcpAoKeychainResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[226]
+	mi := &file_api_gobgp_proto_msgTypes[225]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14676,7 +14592,7 @@ func (x *DeleteTcpAoKeychainResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteTcpAoKeychainResponse.ProtoReflect.Descriptor instead.
 func (*DeleteTcpAoKeychainResponse) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{226}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{225}
 }
 
 type ListTcpAoKeychainRequest struct {
@@ -14688,7 +14604,7 @@ type ListTcpAoKeychainRequest struct {
 
 func (x *ListTcpAoKeychainRequest) Reset() {
 	*x = ListTcpAoKeychainRequest{}
-	mi := &file_api_gobgp_proto_msgTypes[227]
+	mi := &file_api_gobgp_proto_msgTypes[226]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14700,7 +14616,7 @@ func (x *ListTcpAoKeychainRequest) String() string {
 func (*ListTcpAoKeychainRequest) ProtoMessage() {}
 
 func (x *ListTcpAoKeychainRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[227]
+	mi := &file_api_gobgp_proto_msgTypes[226]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14713,7 +14629,7 @@ func (x *ListTcpAoKeychainRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTcpAoKeychainRequest.ProtoReflect.Descriptor instead.
 func (*ListTcpAoKeychainRequest) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{227}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{226}
 }
 
 func (x *ListTcpAoKeychainRequest) GetName() string {
@@ -14732,7 +14648,7 @@ type ListTcpAoKeychainResponse struct {
 
 func (x *ListTcpAoKeychainResponse) Reset() {
 	*x = ListTcpAoKeychainResponse{}
-	mi := &file_api_gobgp_proto_msgTypes[228]
+	mi := &file_api_gobgp_proto_msgTypes[227]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14744,7 +14660,7 @@ func (x *ListTcpAoKeychainResponse) String() string {
 func (*ListTcpAoKeychainResponse) ProtoMessage() {}
 
 func (x *ListTcpAoKeychainResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[228]
+	mi := &file_api_gobgp_proto_msgTypes[227]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14757,7 +14673,7 @@ func (x *ListTcpAoKeychainResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTcpAoKeychainResponse.ProtoReflect.Descriptor instead.
 func (*ListTcpAoKeychainResponse) Descriptor() ([]byte, []int) {
-	return file_api_gobgp_proto_rawDescGZIP(), []int{228}
+	return file_api_gobgp_proto_rawDescGZIP(), []int{227}
 }
 
 func (x *ListTcpAoKeychainResponse) GetKeychain() *TcpAoKeychain {
@@ -14775,7 +14691,7 @@ type WatchEventRequest_Peer struct {
 
 func (x *WatchEventRequest_Peer) Reset() {
 	*x = WatchEventRequest_Peer{}
-	mi := &file_api_gobgp_proto_msgTypes[229]
+	mi := &file_api_gobgp_proto_msgTypes[228]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14787,7 +14703,7 @@ func (x *WatchEventRequest_Peer) String() string {
 func (*WatchEventRequest_Peer) ProtoMessage() {}
 
 func (x *WatchEventRequest_Peer) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[229]
+	mi := &file_api_gobgp_proto_msgTypes[228]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14812,7 +14728,7 @@ type WatchEventRequest_Table struct {
 
 func (x *WatchEventRequest_Table) Reset() {
 	*x = WatchEventRequest_Table{}
-	mi := &file_api_gobgp_proto_msgTypes[230]
+	mi := &file_api_gobgp_proto_msgTypes[229]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14824,7 +14740,7 @@ func (x *WatchEventRequest_Table) String() string {
 func (*WatchEventRequest_Table) ProtoMessage() {}
 
 func (x *WatchEventRequest_Table) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[230]
+	mi := &file_api_gobgp_proto_msgTypes[229]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14859,7 +14775,7 @@ type WatchEventRequest_Table_Filter struct {
 
 func (x *WatchEventRequest_Table_Filter) Reset() {
 	*x = WatchEventRequest_Table_Filter{}
-	mi := &file_api_gobgp_proto_msgTypes[231]
+	mi := &file_api_gobgp_proto_msgTypes[230]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14871,7 +14787,7 @@ func (x *WatchEventRequest_Table_Filter) String() string {
 func (*WatchEventRequest_Table_Filter) ProtoMessage() {}
 
 func (x *WatchEventRequest_Table_Filter) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[231]
+	mi := &file_api_gobgp_proto_msgTypes[230]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14925,7 +14841,7 @@ type WatchEventResponse_PeerEvent struct {
 
 func (x *WatchEventResponse_PeerEvent) Reset() {
 	*x = WatchEventResponse_PeerEvent{}
-	mi := &file_api_gobgp_proto_msgTypes[232]
+	mi := &file_api_gobgp_proto_msgTypes[231]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14937,7 +14853,7 @@ func (x *WatchEventResponse_PeerEvent) String() string {
 func (*WatchEventResponse_PeerEvent) ProtoMessage() {}
 
 func (x *WatchEventResponse_PeerEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[232]
+	mi := &file_api_gobgp_proto_msgTypes[231]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14976,7 +14892,7 @@ type WatchEventResponse_TableEvent struct {
 
 func (x *WatchEventResponse_TableEvent) Reset() {
 	*x = WatchEventResponse_TableEvent{}
-	mi := &file_api_gobgp_proto_msgTypes[233]
+	mi := &file_api_gobgp_proto_msgTypes[232]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14988,7 +14904,7 @@ func (x *WatchEventResponse_TableEvent) String() string {
 func (*WatchEventResponse_TableEvent) ProtoMessage() {}
 
 func (x *WatchEventResponse_TableEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[233]
+	mi := &file_api_gobgp_proto_msgTypes[232]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15026,7 +14942,7 @@ type ListNetlinkExportResponse_ExportedRoute struct {
 
 func (x *ListNetlinkExportResponse_ExportedRoute) Reset() {
 	*x = ListNetlinkExportResponse_ExportedRoute{}
-	mi := &file_api_gobgp_proto_msgTypes[234]
+	mi := &file_api_gobgp_proto_msgTypes[233]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15038,7 +14954,7 @@ func (x *ListNetlinkExportResponse_ExportedRoute) String() string {
 func (*ListNetlinkExportResponse_ExportedRoute) ProtoMessage() {}
 
 func (x *ListNetlinkExportResponse_ExportedRoute) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[234]
+	mi := &file_api_gobgp_proto_msgTypes[233]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15118,7 +15034,7 @@ type ListNetlinkExportRulesResponse_ExportRule struct {
 
 func (x *ListNetlinkExportRulesResponse_ExportRule) Reset() {
 	*x = ListNetlinkExportRulesResponse_ExportRule{}
-	mi := &file_api_gobgp_proto_msgTypes[235]
+	mi := &file_api_gobgp_proto_msgTypes[234]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15130,7 +15046,7 @@ func (x *ListNetlinkExportRulesResponse_ExportRule) String() string {
 func (*ListNetlinkExportRulesResponse_ExportRule) ProtoMessage() {}
 
 func (x *ListNetlinkExportRulesResponse_ExportRule) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[235]
+	mi := &file_api_gobgp_proto_msgTypes[234]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15210,7 +15126,7 @@ type ListNetlinkExportRulesResponse_VrfExportRule struct {
 
 func (x *ListNetlinkExportRulesResponse_VrfExportRule) Reset() {
 	*x = ListNetlinkExportRulesResponse_VrfExportRule{}
-	mi := &file_api_gobgp_proto_msgTypes[236]
+	mi := &file_api_gobgp_proto_msgTypes[235]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15222,7 +15138,7 @@ func (x *ListNetlinkExportRulesResponse_VrfExportRule) String() string {
 func (*ListNetlinkExportRulesResponse_VrfExportRule) ProtoMessage() {}
 
 func (x *ListNetlinkExportRulesResponse_VrfExportRule) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[236]
+	mi := &file_api_gobgp_proto_msgTypes[235]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15297,7 +15213,7 @@ type ListBmpResponse_BmpStation struct {
 
 func (x *ListBmpResponse_BmpStation) Reset() {
 	*x = ListBmpResponse_BmpStation{}
-	mi := &file_api_gobgp_proto_msgTypes[237]
+	mi := &file_api_gobgp_proto_msgTypes[236]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15309,7 +15225,7 @@ func (x *ListBmpResponse_BmpStation) String() string {
 func (*ListBmpResponse_BmpStation) ProtoMessage() {}
 
 func (x *ListBmpResponse_BmpStation) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[237]
+	mi := &file_api_gobgp_proto_msgTypes[236]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15356,7 +15272,7 @@ type ListBmpResponse_BmpStation_Conf struct {
 
 func (x *ListBmpResponse_BmpStation_Conf) Reset() {
 	*x = ListBmpResponse_BmpStation_Conf{}
-	mi := &file_api_gobgp_proto_msgTypes[238]
+	mi := &file_api_gobgp_proto_msgTypes[237]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15368,7 +15284,7 @@ func (x *ListBmpResponse_BmpStation_Conf) String() string {
 func (*ListBmpResponse_BmpStation_Conf) ProtoMessage() {}
 
 func (x *ListBmpResponse_BmpStation_Conf) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[238]
+	mi := &file_api_gobgp_proto_msgTypes[237]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -15436,7 +15352,7 @@ type ListBmpResponse_BmpStation_State struct {
 
 func (x *ListBmpResponse_BmpStation_State) Reset() {
 	*x = ListBmpResponse_BmpStation_State{}
-	mi := &file_api_gobgp_proto_msgTypes[239]
+	mi := &file_api_gobgp_proto_msgTypes[238]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -15448,7 +15364,7 @@ func (x *ListBmpResponse_BmpStation_State) String() string {
 func (*ListBmpResponse_BmpStation_State) ProtoMessage() {}
 
 func (x *ListBmpResponse_BmpStation_State) ProtoReflect() protoreflect.Message {
-	mi := &file_api_gobgp_proto_msgTypes[239]
+	mi := &file_api_gobgp_proto_msgTypes[238]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16261,16 +16177,12 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\baccepted\x18\x04 \x01(\x04R\baccepted\x12\x1e\n" +
 	"\n" +
 	"advertised\x18\x05 \x01(\x04R\n" +
-	"advertised\"\x93\x03\n" +
+	"advertised\"\xd0\x02\n" +
 	"\x1bRouteSelectionOptionsConfig\x12,\n" +
 	"\x12always_compare_med\x18\x01 \x01(\bR\x10alwaysCompareMed\x121\n" +
 	"\x15ignore_as_path_length\x18\x02 \x01(\bR\x12ignoreAsPathLength\x12;\n" +
-	"\x1aexternal_compare_router_id\x18\x03 \x01(\bR\x17externalCompareRouterId\x12:\n" +
-	"\x19advertise_inactive_routes\x18\x04 \x01(\bR\x17advertiseInactiveRoutes\x12\x1f\n" +
-	"\venable_aigp\x18\x05 \x01(\bR\n" +
-	"enableAigp\x12:\n" +
-	"\x1aignore_next_hop_igp_metric\x18\x06 \x01(\bR\x16ignoreNextHopIgpMetric\x12=\n" +
-	"\x1bdisable_best_path_selection\x18\a \x01(\bR\x18disableBestPathSelection\"B\n" +
+	"\x1aexternal_compare_router_id\x18\x03 \x01(\bR\x17externalCompareRouterId\x12=\n" +
+	"\x1bdisable_best_path_selection\x18\a \x01(\bR\x18disableBestPathSelectionJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aR\x19advertise_inactive_routesR\venable_aigpR\x1aignore_next_hop_igp_metric\"B\n" +
 	"\x1bRouteTargetMembershipConfig\x12#\n" +
 	"\rdeferral_time\x18\x01 \x01(\rR\fdeferralTime\"A\n" +
 	"\x1aRouteTargetMembershipState\x12#\n" +
@@ -16443,10 +16355,7 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\anetlink\x18\xc8\x01 \x01(\v2\x13.api.VrfNetlinkInfoR\anetlink\"d\n" +
 	"\x0eVrfNetlinkInfo\x12%\n" +
 	"\x0eimport_enabled\x18\x01 \x01(\bR\rimportEnabled\x12+\n" +
-	"\x11import_interfaces\x18\x02 \x03(\tR\x10importInterfaces\"\x86\x01\n" +
-	"\x14DefaultRouteDistance\x126\n" +
-	"\x17external_route_distance\x18\x01 \x01(\rR\x15externalRouteDistance\x126\n" +
-	"\x17internal_route_distance\x18\x02 \x01(\rR\x15internalRouteDistance\"\xc9\x05\n" +
+	"\x11import_interfaces\x18\x02 \x03(\tR\x10importInterfaces\"\x96\x05\n" +
 	"\x06Global\x12\x10\n" +
 	"\x03asn\x18\x01 \x01(\rR\x03asn\x12\x1b\n" +
 	"\trouter_id\x18\x02 \x01(\tR\brouterId\x12\x1f\n" +
@@ -16455,15 +16364,14 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x10listen_addresses\x18\x04 \x03(\tR\x0flistenAddresses\x12\x1a\n" +
 	"\bfamilies\x18\x05 \x03(\rR\bfamilies\x12,\n" +
 	"\x12use_multiple_paths\x18\x06 \x01(\bR\x10useMultiplePaths\x12X\n" +
-	"\x17route_selection_options\x18\a \x01(\v2 .api.RouteSelectionOptionsConfigR\x15routeSelectionOptions\x12O\n" +
-	"\x16default_route_distance\x18\b \x01(\v2\x19.api.DefaultRouteDistanceR\x14defaultRouteDistance\x128\n" +
+	"\x17route_selection_options\x18\a \x01(\v2 .api.RouteSelectionOptionsConfigR\x15routeSelectionOptions\x128\n" +
 	"\rconfederation\x18\t \x01(\v2\x12.api.ConfederationR\rconfederation\x12?\n" +
 	"\x10graceful_restart\x18\n" +
 	" \x01(\v2\x14.api.GracefulRestartR\x0fgracefulRestart\x12$\n" +
 	"\x0ebind_to_device\x18\v \x01(\tR\fbindToDevice\x12P\n" +
 	"%graceful_restart_inherit_to_neighbors\x18\f \x01(\bR!gracefulRestartInheritToNeighbors\x12-\n" +
 	"\x12ebgp_maximum_paths\x18\xc8\x01 \x01(\rR\x10ebgpMaximumPaths\x12-\n" +
-	"\x12ibgp_maximum_paths\x18\xc9\x01 \x01(\rR\x10ibgpMaximumPaths\"o\n" +
+	"\x12ibgp_maximum_paths\x18\xc9\x01 \x01(\rR\x10ibgpMaximumPathsJ\x04\b\b\x10\tR\x16default_route_distance\"o\n" +
 	"\rConfederation\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x1e\n" +
 	"\n" +
@@ -16754,7 +16662,7 @@ func file_api_gobgp_proto_rawDescGZIP() []byte {
 }
 
 var file_api_gobgp_proto_enumTypes = make([]protoimpl.EnumInfo, 29)
-var file_api_gobgp_proto_msgTypes = make([]protoimpl.MessageInfo, 240)
+var file_api_gobgp_proto_msgTypes = make([]protoimpl.MessageInfo, 239)
 var file_api_gobgp_proto_goTypes = []any{
 	(ConfigFormat)(0),                                    // 0: api.ConfigFormat
 	(TableType)(0),                                       // 1: api.TableType
@@ -16990,58 +16898,57 @@ var file_api_gobgp_proto_goTypes = []any{
 	(*Roa)(nil),                                          // 231: api.Roa
 	(*Vrf)(nil),                                          // 232: api.Vrf
 	(*VrfNetlinkInfo)(nil),                               // 233: api.VrfNetlinkInfo
-	(*DefaultRouteDistance)(nil),                         // 234: api.DefaultRouteDistance
-	(*Global)(nil),                                       // 235: api.Global
-	(*Confederation)(nil),                                // 236: api.Confederation
-	(*RPKIConf)(nil),                                     // 237: api.RPKIConf
-	(*RPKIState)(nil),                                    // 238: api.RPKIState
-	(*Rpki)(nil),                                         // 239: api.Rpki
-	(*SetLogLevelRequest)(nil),                           // 240: api.SetLogLevelRequest
-	(*SetLogLevelResponse)(nil),                          // 241: api.SetLogLevelResponse
-	(*BfdAsyncCounters)(nil),                             // 242: api.BfdAsyncCounters
-	(*BfdPeerState)(nil),                                 // 243: api.BfdPeerState
-	(*BfdPeerConfig)(nil),                                // 244: api.BfdPeerConfig
-	(*BfdState)(nil),                                     // 245: api.BfdState
-	(*GetBfdServerStateRequest)(nil),                     // 246: api.GetBfdServerStateRequest
-	(*GetBfdServerStateResponse)(nil),                    // 247: api.GetBfdServerStateResponse
-	(*TcpAoKey)(nil),                                     // 248: api.TcpAoKey
-	(*TcpAoKeychain)(nil),                                // 249: api.TcpAoKeychain
-	(*AddTcpAoKeychainRequest)(nil),                      // 250: api.AddTcpAoKeychainRequest
-	(*AddTcpAoKeychainResponse)(nil),                     // 251: api.AddTcpAoKeychainResponse
-	(*UpdateTcpAoKeychainRequest)(nil),                   // 252: api.UpdateTcpAoKeychainRequest
-	(*UpdateTcpAoKeychainResponse)(nil),                  // 253: api.UpdateTcpAoKeychainResponse
-	(*DeleteTcpAoKeychainRequest)(nil),                   // 254: api.DeleteTcpAoKeychainRequest
-	(*DeleteTcpAoKeychainResponse)(nil),                  // 255: api.DeleteTcpAoKeychainResponse
-	(*ListTcpAoKeychainRequest)(nil),                     // 256: api.ListTcpAoKeychainRequest
-	(*ListTcpAoKeychainResponse)(nil),                    // 257: api.ListTcpAoKeychainResponse
-	(*WatchEventRequest_Peer)(nil),                       // 258: api.WatchEventRequest.Peer
-	(*WatchEventRequest_Table)(nil),                      // 259: api.WatchEventRequest.Table
-	(*WatchEventRequest_Table_Filter)(nil),               // 260: api.WatchEventRequest.Table.Filter
-	(*WatchEventResponse_PeerEvent)(nil),                 // 261: api.WatchEventResponse.PeerEvent
-	(*WatchEventResponse_TableEvent)(nil),                // 262: api.WatchEventResponse.TableEvent
-	(*ListNetlinkExportResponse_ExportedRoute)(nil),      // 263: api.ListNetlinkExportResponse.ExportedRoute
-	(*ListNetlinkExportRulesResponse_ExportRule)(nil),    // 264: api.ListNetlinkExportRulesResponse.ExportRule
-	(*ListNetlinkExportRulesResponse_VrfExportRule)(nil), // 265: api.ListNetlinkExportRulesResponse.VrfExportRule
-	(*ListBmpResponse_BmpStation)(nil),                   // 266: api.ListBmpResponse.BmpStation
-	(*ListBmpResponse_BmpStation_Conf)(nil),              // 267: api.ListBmpResponse.BmpStation.Conf
-	(*ListBmpResponse_BmpStation_State)(nil),             // 268: api.ListBmpResponse.BmpStation.State
-	(*Family)(nil),                                       // 269: api.Family
-	(*NLRI)(nil),                                         // 270: api.NLRI
-	(*Attribute)(nil),                                    // 271: api.Attribute
-	(*timestamppb.Timestamp)(nil),                        // 272: google.protobuf.Timestamp
-	(*Capability)(nil),                                   // 273: api.Capability
-	(*RouteDistinguisher)(nil),                           // 274: api.RouteDistinguisher
-	(*RouteTarget)(nil),                                  // 275: api.RouteTarget
+	(*Global)(nil),                                       // 234: api.Global
+	(*Confederation)(nil),                                // 235: api.Confederation
+	(*RPKIConf)(nil),                                     // 236: api.RPKIConf
+	(*RPKIState)(nil),                                    // 237: api.RPKIState
+	(*Rpki)(nil),                                         // 238: api.Rpki
+	(*SetLogLevelRequest)(nil),                           // 239: api.SetLogLevelRequest
+	(*SetLogLevelResponse)(nil),                          // 240: api.SetLogLevelResponse
+	(*BfdAsyncCounters)(nil),                             // 241: api.BfdAsyncCounters
+	(*BfdPeerState)(nil),                                 // 242: api.BfdPeerState
+	(*BfdPeerConfig)(nil),                                // 243: api.BfdPeerConfig
+	(*BfdState)(nil),                                     // 244: api.BfdState
+	(*GetBfdServerStateRequest)(nil),                     // 245: api.GetBfdServerStateRequest
+	(*GetBfdServerStateResponse)(nil),                    // 246: api.GetBfdServerStateResponse
+	(*TcpAoKey)(nil),                                     // 247: api.TcpAoKey
+	(*TcpAoKeychain)(nil),                                // 248: api.TcpAoKeychain
+	(*AddTcpAoKeychainRequest)(nil),                      // 249: api.AddTcpAoKeychainRequest
+	(*AddTcpAoKeychainResponse)(nil),                     // 250: api.AddTcpAoKeychainResponse
+	(*UpdateTcpAoKeychainRequest)(nil),                   // 251: api.UpdateTcpAoKeychainRequest
+	(*UpdateTcpAoKeychainResponse)(nil),                  // 252: api.UpdateTcpAoKeychainResponse
+	(*DeleteTcpAoKeychainRequest)(nil),                   // 253: api.DeleteTcpAoKeychainRequest
+	(*DeleteTcpAoKeychainResponse)(nil),                  // 254: api.DeleteTcpAoKeychainResponse
+	(*ListTcpAoKeychainRequest)(nil),                     // 255: api.ListTcpAoKeychainRequest
+	(*ListTcpAoKeychainResponse)(nil),                    // 256: api.ListTcpAoKeychainResponse
+	(*WatchEventRequest_Peer)(nil),                       // 257: api.WatchEventRequest.Peer
+	(*WatchEventRequest_Table)(nil),                      // 258: api.WatchEventRequest.Table
+	(*WatchEventRequest_Table_Filter)(nil),               // 259: api.WatchEventRequest.Table.Filter
+	(*WatchEventResponse_PeerEvent)(nil),                 // 260: api.WatchEventResponse.PeerEvent
+	(*WatchEventResponse_TableEvent)(nil),                // 261: api.WatchEventResponse.TableEvent
+	(*ListNetlinkExportResponse_ExportedRoute)(nil),      // 262: api.ListNetlinkExportResponse.ExportedRoute
+	(*ListNetlinkExportRulesResponse_ExportRule)(nil),    // 263: api.ListNetlinkExportRulesResponse.ExportRule
+	(*ListNetlinkExportRulesResponse_VrfExportRule)(nil), // 264: api.ListNetlinkExportRulesResponse.VrfExportRule
+	(*ListBmpResponse_BmpStation)(nil),                   // 265: api.ListBmpResponse.BmpStation
+	(*ListBmpResponse_BmpStation_Conf)(nil),              // 266: api.ListBmpResponse.BmpStation.Conf
+	(*ListBmpResponse_BmpStation_State)(nil),             // 267: api.ListBmpResponse.BmpStation.State
+	(*Family)(nil),                                       // 268: api.Family
+	(*NLRI)(nil),                                         // 269: api.NLRI
+	(*Attribute)(nil),                                    // 270: api.Attribute
+	(*timestamppb.Timestamp)(nil),                        // 271: google.protobuf.Timestamp
+	(*Capability)(nil),                                   // 272: api.Capability
+	(*RouteDistinguisher)(nil),                           // 273: api.RouteDistinguisher
+	(*RouteTarget)(nil),                                  // 274: api.RouteTarget
 }
 var file_api_gobgp_proto_depIdxs = []int32{
 	30,  // 0: api.GetNetlinkResponse.vrf_imports:type_name -> api.NetlinkVrfImport
 	0,   // 1: api.GetRunningConfigRequest.format:type_name -> api.ConfigFormat
-	235, // 2: api.StartBgpRequest.global:type_name -> api.Global
-	235, // 3: api.GetBgpResponse.global:type_name -> api.Global
-	258, // 4: api.WatchEventRequest.peer:type_name -> api.WatchEventRequest.Peer
-	259, // 5: api.WatchEventRequest.table:type_name -> api.WatchEventRequest.Table
-	261, // 6: api.WatchEventResponse.peer:type_name -> api.WatchEventResponse.PeerEvent
-	262, // 7: api.WatchEventResponse.table:type_name -> api.WatchEventResponse.TableEvent
+	234, // 2: api.StartBgpRequest.global:type_name -> api.Global
+	234, // 3: api.GetBgpResponse.global:type_name -> api.Global
+	257, // 4: api.WatchEventRequest.peer:type_name -> api.WatchEventRequest.Peer
+	258, // 5: api.WatchEventRequest.table:type_name -> api.WatchEventRequest.Table
+	260, // 6: api.WatchEventResponse.peer:type_name -> api.WatchEventResponse.PeerEvent
+	261, // 7: api.WatchEventResponse.table:type_name -> api.WatchEventResponse.TableEvent
 	175, // 8: api.AddPeerRequest.peer:type_name -> api.Peer
 	175, // 9: api.ListPeerResponse.peer:type_name -> api.Peer
 	175, // 10: api.UpdatePeerRequest.peer:type_name -> api.Peer
@@ -17054,18 +16961,18 @@ var file_api_gobgp_proto_depIdxs = []int32{
 	1,   // 17: api.AddPathRequest.table_type:type_name -> api.TableType
 	172, // 18: api.AddPathRequest.path:type_name -> api.Path
 	1,   // 19: api.DeletePathRequest.table_type:type_name -> api.TableType
-	269, // 20: api.DeletePathRequest.family:type_name -> api.Family
+	268, // 20: api.DeletePathRequest.family:type_name -> api.Family
 	172, // 21: api.DeletePathRequest.path:type_name -> api.Path
 	16,  // 22: api.TableLookupPrefix.type:type_name -> api.TableLookupPrefix.Type
 	1,   // 23: api.ListPathRequest.table_type:type_name -> api.TableType
-	269, // 24: api.ListPathRequest.family:type_name -> api.Family
+	268, // 24: api.ListPathRequest.family:type_name -> api.Family
 	76,  // 25: api.ListPathRequest.prefixes:type_name -> api.TableLookupPrefix
 	17,  // 26: api.ListPathRequest.sort_type:type_name -> api.ListPathRequest.SortType
 	174, // 27: api.ListPathResponse.destination:type_name -> api.Destination
 	1,   // 28: api.AddPathStreamRequest.table_type:type_name -> api.TableType
 	172, // 29: api.AddPathStreamRequest.paths:type_name -> api.Path
 	1,   // 30: api.GetTableRequest.table_type:type_name -> api.TableType
-	269, // 31: api.GetTableRequest.family:type_name -> api.Family
+	268, // 31: api.GetTableRequest.family:type_name -> api.Family
 	232, // 32: api.AddVrfRequest.vrf:type_name -> api.Vrf
 	232, // 33: api.ListVrfResponse.vrf:type_name -> api.Vrf
 	228, // 34: api.AddPolicyRequest.policy:type_name -> api.Policy
@@ -17086,28 +16993,28 @@ var file_api_gobgp_proto_depIdxs = []int32{
 	9,   // 49: api.ListPolicyAssignmentRequest.direction:type_name -> api.PolicyDirection
 	229, // 50: api.ListPolicyAssignmentResponse.assignment:type_name -> api.PolicyAssignment
 	229, // 51: api.SetPolicyAssignmentRequest.assignment:type_name -> api.PolicyAssignment
-	269, // 52: api.ListRpkiRequest.family:type_name -> api.Family
-	239, // 53: api.ListRpkiResponse.server:type_name -> api.Rpki
-	269, // 54: api.ListRpkiTableRequest.family:type_name -> api.Family
+	268, // 52: api.ListRpkiRequest.family:type_name -> api.Family
+	238, // 53: api.ListRpkiResponse.server:type_name -> api.Rpki
+	268, // 54: api.ListRpkiTableRequest.family:type_name -> api.Family
 	231, // 55: api.ListRpkiTableResponse.roa:type_name -> api.Roa
 	135, // 56: api.EnableNetlinkExportRequest.rules:type_name -> api.NetlinkExportRuleConfig
 	146, // 57: api.EnableVrfNetlinkExportRequest.config:type_name -> api.VrfNetlinkExportConfig
-	263, // 58: api.ListNetlinkExportResponse.route:type_name -> api.ListNetlinkExportResponse.ExportedRoute
-	264, // 59: api.ListNetlinkExportRulesResponse.rules:type_name -> api.ListNetlinkExportRulesResponse.ExportRule
-	265, // 60: api.ListNetlinkExportRulesResponse.vrf_rules:type_name -> api.ListNetlinkExportRulesResponse.VrfExportRule
+	262, // 58: api.ListNetlinkExportResponse.route:type_name -> api.ListNetlinkExportResponse.ExportedRoute
+	263, // 59: api.ListNetlinkExportRulesResponse.rules:type_name -> api.ListNetlinkExportRulesResponse.ExportRule
+	264, // 60: api.ListNetlinkExportRulesResponse.vrf_rules:type_name -> api.ListNetlinkExportRulesResponse.VrfExportRule
 	18,  // 61: api.EnableMrtRequest.dump_type:type_name -> api.EnableMrtRequest.DumpType
 	19,  // 62: api.AddBmpRequest.policy:type_name -> api.AddBmpRequest.MonitoringPolicy
-	266, // 63: api.ListBmpResponse.station:type_name -> api.ListBmpResponse.BmpStation
+	265, // 63: api.ListBmpResponse.station:type_name -> api.ListBmpResponse.BmpStation
 	2,   // 64: api.Validation.state:type_name -> api.ValidationState
 	20,  // 65: api.Validation.reason:type_name -> api.Validation.Reason
 	231, // 66: api.Validation.matched:type_name -> api.Roa
 	231, // 67: api.Validation.unmatched_asn:type_name -> api.Roa
 	231, // 68: api.Validation.unmatched_length:type_name -> api.Roa
-	270, // 69: api.Path.nlri:type_name -> api.NLRI
-	271, // 70: api.Path.pattrs:type_name -> api.Attribute
-	272, // 71: api.Path.age:type_name -> google.protobuf.Timestamp
+	269, // 69: api.Path.nlri:type_name -> api.NLRI
+	270, // 70: api.Path.pattrs:type_name -> api.Attribute
+	271, // 71: api.Path.age:type_name -> google.protobuf.Timestamp
 	171, // 72: api.Path.validation:type_name -> api.Validation
-	269, // 73: api.Path.family:type_name -> api.Family
+	268, // 73: api.Path.family:type_name -> api.Family
 	173, // 74: api.Path.netlink:type_name -> api.NetlinkPathInfo
 	172, // 75: api.Destination.paths:type_name -> api.Path
 	178, // 76: api.Peer.apply_policy:type_name -> api.ApplyPolicy
@@ -17121,7 +17028,7 @@ var file_api_gobgp_proto_depIdxs = []int32{
 	195, // 84: api.Peer.graceful_restart:type_name -> api.GracefulRestart
 	208, // 85: api.Peer.afi_safis:type_name -> api.AfiSafi
 	183, // 86: api.Peer.ttl_security:type_name -> api.TtlSecurity
-	244, // 87: api.Peer.bfd:type_name -> api.BfdPeerConfig
+	243, // 87: api.Peer.bfd:type_name -> api.BfdPeerConfig
 	178, // 88: api.PeerGroup.apply_policy:type_name -> api.ApplyPolicy
 	181, // 89: api.PeerGroup.conf:type_name -> api.PeerGroupConf
 	184, // 90: api.PeerGroup.ebgp_multihop:type_name -> api.EbgpMultihop
@@ -17133,10 +17040,10 @@ var file_api_gobgp_proto_depIdxs = []int32{
 	195, // 96: api.PeerGroup.graceful_restart:type_name -> api.GracefulRestart
 	208, // 97: api.PeerGroup.afi_safis:type_name -> api.AfiSafi
 	183, // 98: api.PeerGroup.ttl_security:type_name -> api.TtlSecurity
-	244, // 99: api.PeerGroup.bfd:type_name -> api.BfdPeerConfig
+	243, // 99: api.PeerGroup.bfd:type_name -> api.BfdPeerConfig
 	229, // 100: api.ApplyPolicy.export_policy:type_name -> api.PolicyAssignment
 	229, // 101: api.ApplyPolicy.import_policy:type_name -> api.PolicyAssignment
-	269, // 102: api.PrefixLimit.family:type_name -> api.Family
+	268, // 102: api.PrefixLimit.family:type_name -> api.Family
 	3,   // 103: api.PeerConf.type:type_name -> api.PeerType
 	4,   // 104: api.PeerConf.remove_private:type_name -> api.RemovePrivate
 	3,   // 105: api.PeerGroupConf.type:type_name -> api.PeerType
@@ -17149,20 +17056,20 @@ var file_api_gobgp_proto_depIdxs = []int32{
 	4,   // 112: api.PeerState.remove_private:type_name -> api.RemovePrivate
 	21,  // 113: api.PeerState.session_state:type_name -> api.PeerState.SessionState
 	22,  // 114: api.PeerState.admin_state:type_name -> api.PeerState.AdminState
-	273, // 115: api.PeerState.remote_cap:type_name -> api.Capability
-	273, // 116: api.PeerState.local_cap:type_name -> api.Capability
+	272, // 115: api.PeerState.remote_cap:type_name -> api.Capability
+	272, // 116: api.PeerState.local_cap:type_name -> api.Capability
 	23,  // 117: api.PeerState.disconnect_reason:type_name -> api.PeerState.DisconnectReason
-	243, // 118: api.PeerState.bfd_state:type_name -> api.BfdPeerState
+	242, // 118: api.PeerState.bfd_state:type_name -> api.BfdPeerState
 	188, // 119: api.Messages.received:type_name -> api.Message
 	188, // 120: api.Messages.sent:type_name -> api.Message
 	191, // 121: api.Timers.config:type_name -> api.TimersConfig
 	192, // 122: api.Timers.state:type_name -> api.TimersState
-	272, // 123: api.TimersState.uptime:type_name -> google.protobuf.Timestamp
-	272, // 124: api.TimersState.downtime:type_name -> google.protobuf.Timestamp
+	271, // 123: api.TimersState.uptime:type_name -> google.protobuf.Timestamp
+	271, // 124: api.TimersState.downtime:type_name -> google.protobuf.Timestamp
 	196, // 125: api.MpGracefulRestart.config:type_name -> api.MpGracefulRestartConfig
 	197, // 126: api.MpGracefulRestart.state:type_name -> api.MpGracefulRestartState
-	269, // 127: api.AfiSafiConfig.family:type_name -> api.Family
-	269, // 128: api.AfiSafiState.family:type_name -> api.Family
+	268, // 127: api.AfiSafiConfig.family:type_name -> api.Family
+	268, // 128: api.AfiSafiState.family:type_name -> api.Family
 	202, // 129: api.RouteTargetMembership.config:type_name -> api.RouteTargetMembershipConfig
 	203, // 130: api.RouteTargetMembership.state:type_name -> api.RouteTargetMembershipState
 	205, // 131: api.LongLivedGracefulRestart.config:type_name -> api.LongLivedGracefulRestartConfig
@@ -17191,7 +17098,7 @@ var file_api_gobgp_proto_depIdxs = []int32{
 	2,   // 154: api.Conditions.rpki_result:type_name -> api.ValidationState
 	25,  // 155: api.Conditions.route_type:type_name -> api.Conditions.RouteType
 	214, // 156: api.Conditions.large_community_set:type_name -> api.MatchSet
-	269, // 157: api.Conditions.afi_safi_in:type_name -> api.Family
+	268, // 157: api.Conditions.afi_safi_in:type_name -> api.Family
 	216, // 158: api.Conditions.community_count:type_name -> api.CommunityCount
 	7,   // 159: api.Conditions.origin:type_name -> api.OriginType
 	217, // 160: api.Conditions.local_pref_eq:type_name -> api.LocalPrefEq
@@ -17216,198 +17123,197 @@ var file_api_gobgp_proto_depIdxs = []int32{
 	8,   // 179: api.PolicyAssignment.default_action:type_name -> api.RouteAction
 	213, // 180: api.RoutingPolicy.defined_sets:type_name -> api.DefinedSet
 	228, // 181: api.RoutingPolicy.policies:type_name -> api.Policy
-	237, // 182: api.Roa.conf:type_name -> api.RPKIConf
-	274, // 183: api.Vrf.rd:type_name -> api.RouteDistinguisher
-	275, // 184: api.Vrf.import_rt:type_name -> api.RouteTarget
-	275, // 185: api.Vrf.export_rt:type_name -> api.RouteTarget
+	236, // 182: api.Roa.conf:type_name -> api.RPKIConf
+	273, // 183: api.Vrf.rd:type_name -> api.RouteDistinguisher
+	274, // 184: api.Vrf.import_rt:type_name -> api.RouteTarget
+	274, // 185: api.Vrf.export_rt:type_name -> api.RouteTarget
 	233, // 186: api.Vrf.netlink:type_name -> api.VrfNetlinkInfo
 	201, // 187: api.Global.route_selection_options:type_name -> api.RouteSelectionOptionsConfig
-	234, // 188: api.Global.default_route_distance:type_name -> api.DefaultRouteDistance
-	236, // 189: api.Global.confederation:type_name -> api.Confederation
-	195, // 190: api.Global.graceful_restart:type_name -> api.GracefulRestart
-	272, // 191: api.RPKIState.uptime:type_name -> google.protobuf.Timestamp
-	272, // 192: api.RPKIState.downtime:type_name -> google.protobuf.Timestamp
-	237, // 193: api.Rpki.conf:type_name -> api.RPKIConf
-	238, // 194: api.Rpki.state:type_name -> api.RPKIState
-	28,  // 195: api.SetLogLevelRequest.level:type_name -> api.SetLogLevelRequest.Level
-	10,  // 196: api.BfdPeerState.session_state:type_name -> api.BfdSessionState
-	10,  // 197: api.BfdPeerState.remote_session_state:type_name -> api.BfdSessionState
-	11,  // 198: api.BfdPeerState.local_diagnostic_code:type_name -> api.BfdDiagnosticCode
-	11,  // 199: api.BfdPeerState.remote_diagnostic_code:type_name -> api.BfdDiagnosticCode
-	242, // 200: api.BfdPeerState.bfd_async:type_name -> api.BfdAsyncCounters
-	245, // 201: api.GetBfdServerStateResponse.state:type_name -> api.BfdState
-	12,  // 202: api.TcpAoKey.algorithm:type_name -> api.TcpAoAlgorithm
-	248, // 203: api.TcpAoKeychain.keys:type_name -> api.TcpAoKey
-	249, // 204: api.AddTcpAoKeychainRequest.keychain:type_name -> api.TcpAoKeychain
-	248, // 205: api.UpdateTcpAoKeychainRequest.add_keys:type_name -> api.TcpAoKey
-	248, // 206: api.UpdateTcpAoKeychainRequest.delete_keys:type_name -> api.TcpAoKey
-	249, // 207: api.UpdateTcpAoKeychainResponse.keychain:type_name -> api.TcpAoKeychain
-	249, // 208: api.ListTcpAoKeychainResponse.keychain:type_name -> api.TcpAoKeychain
-	260, // 209: api.WatchEventRequest.Table.filters:type_name -> api.WatchEventRequest.Table.Filter
-	13,  // 210: api.WatchEventRequest.Table.Filter.type:type_name -> api.WatchEventRequest.Table.Filter.Type
-	14,  // 211: api.WatchEventResponse.PeerEvent.type:type_name -> api.WatchEventResponse.PeerEvent.Type
-	175, // 212: api.WatchEventResponse.PeerEvent.peer:type_name -> api.Peer
-	172, // 213: api.WatchEventResponse.TableEvent.paths:type_name -> api.Path
-	267, // 214: api.ListBmpResponse.BmpStation.conf:type_name -> api.ListBmpResponse.BmpStation.Conf
-	268, // 215: api.ListBmpResponse.BmpStation.state:type_name -> api.ListBmpResponse.BmpStation.State
-	19,  // 216: api.ListBmpResponse.BmpStation.Conf.policy:type_name -> api.AddBmpRequest.MonitoringPolicy
-	272, // 217: api.ListBmpResponse.BmpStation.State.uptime:type_name -> google.protobuf.Timestamp
-	272, // 218: api.ListBmpResponse.BmpStation.State.downtime:type_name -> google.protobuf.Timestamp
-	34,  // 219: api.GoBgpService.StartBgp:input_type -> api.StartBgpRequest
-	36,  // 220: api.GoBgpService.StopBgp:input_type -> api.StopBgpRequest
-	38,  // 221: api.GoBgpService.GetBgp:input_type -> api.GetBgpRequest
-	32,  // 222: api.GoBgpService.GetRunningConfig:input_type -> api.GetRunningConfigRequest
-	246, // 223: api.GoBgpService.GetBfdServerState:input_type -> api.GetBfdServerStateRequest
-	40,  // 224: api.GoBgpService.WatchEvent:input_type -> api.WatchEventRequest
-	42,  // 225: api.GoBgpService.AddPeer:input_type -> api.AddPeerRequest
-	44,  // 226: api.GoBgpService.DeletePeer:input_type -> api.DeletePeerRequest
-	46,  // 227: api.GoBgpService.ListPeer:input_type -> api.ListPeerRequest
-	48,  // 228: api.GoBgpService.UpdatePeer:input_type -> api.UpdatePeerRequest
-	50,  // 229: api.GoBgpService.ResetPeer:input_type -> api.ResetPeerRequest
-	52,  // 230: api.GoBgpService.ShutdownPeer:input_type -> api.ShutdownPeerRequest
-	54,  // 231: api.GoBgpService.EnablePeer:input_type -> api.EnablePeerRequest
-	56,  // 232: api.GoBgpService.DisablePeer:input_type -> api.DisablePeerRequest
-	58,  // 233: api.GoBgpService.AddPeerGroup:input_type -> api.AddPeerGroupRequest
-	60,  // 234: api.GoBgpService.DeletePeerGroup:input_type -> api.DeletePeerGroupRequest
-	64,  // 235: api.GoBgpService.ListPeerGroup:input_type -> api.ListPeerGroupRequest
-	62,  // 236: api.GoBgpService.UpdatePeerGroup:input_type -> api.UpdatePeerGroupRequest
-	66,  // 237: api.GoBgpService.AddDynamicNeighbor:input_type -> api.AddDynamicNeighborRequest
-	70,  // 238: api.GoBgpService.ListDynamicNeighbor:input_type -> api.ListDynamicNeighborRequest
-	68,  // 239: api.GoBgpService.DeleteDynamicNeighbor:input_type -> api.DeleteDynamicNeighborRequest
-	72,  // 240: api.GoBgpService.AddPath:input_type -> api.AddPathRequest
-	74,  // 241: api.GoBgpService.DeletePath:input_type -> api.DeletePathRequest
-	77,  // 242: api.GoBgpService.ListPath:input_type -> api.ListPathRequest
-	79,  // 243: api.GoBgpService.AddPathStream:input_type -> api.AddPathStreamRequest
-	81,  // 244: api.GoBgpService.GetTable:input_type -> api.GetTableRequest
-	83,  // 245: api.GoBgpService.AddVrf:input_type -> api.AddVrfRequest
-	85,  // 246: api.GoBgpService.DeleteVrf:input_type -> api.DeleteVrfRequest
-	87,  // 247: api.GoBgpService.ListVrf:input_type -> api.ListVrfRequest
-	89,  // 248: api.GoBgpService.AddPolicy:input_type -> api.AddPolicyRequest
-	91,  // 249: api.GoBgpService.DeletePolicy:input_type -> api.DeletePolicyRequest
-	93,  // 250: api.GoBgpService.ListPolicy:input_type -> api.ListPolicyRequest
-	95,  // 251: api.GoBgpService.SetPolicies:input_type -> api.SetPoliciesRequest
-	97,  // 252: api.GoBgpService.AddDefinedSet:input_type -> api.AddDefinedSetRequest
-	99,  // 253: api.GoBgpService.DeleteDefinedSet:input_type -> api.DeleteDefinedSetRequest
-	101, // 254: api.GoBgpService.ListDefinedSet:input_type -> api.ListDefinedSetRequest
-	103, // 255: api.GoBgpService.AddStatement:input_type -> api.AddStatementRequest
-	105, // 256: api.GoBgpService.DeleteStatement:input_type -> api.DeleteStatementRequest
-	107, // 257: api.GoBgpService.ListStatement:input_type -> api.ListStatementRequest
-	109, // 258: api.GoBgpService.AddPolicyAssignment:input_type -> api.AddPolicyAssignmentRequest
-	111, // 259: api.GoBgpService.DeletePolicyAssignment:input_type -> api.DeletePolicyAssignmentRequest
-	113, // 260: api.GoBgpService.ListPolicyAssignment:input_type -> api.ListPolicyAssignmentRequest
-	115, // 261: api.GoBgpService.SetPolicyAssignment:input_type -> api.SetPolicyAssignmentRequest
-	117, // 262: api.GoBgpService.AddRpki:input_type -> api.AddRpkiRequest
-	119, // 263: api.GoBgpService.DeleteRpki:input_type -> api.DeleteRpkiRequest
-	121, // 264: api.GoBgpService.ListRpki:input_type -> api.ListRpkiRequest
-	123, // 265: api.GoBgpService.EnableRpki:input_type -> api.EnableRpkiRequest
-	125, // 266: api.GoBgpService.DisableRpki:input_type -> api.DisableRpkiRequest
-	127, // 267: api.GoBgpService.ResetRpki:input_type -> api.ResetRpkiRequest
-	129, // 268: api.GoBgpService.ListRpkiTable:input_type -> api.ListRpkiTableRequest
-	131, // 269: api.GoBgpService.EnableZebra:input_type -> api.EnableZebraRequest
-	29,  // 270: api.GoBgpService.GetNetlink:input_type -> api.GetNetlinkRequest
-	133, // 271: api.GoBgpService.EnableNetlinkImport:input_type -> api.EnableNetlinkImportRequest
-	138, // 272: api.GoBgpService.DisableNetlinkImport:input_type -> api.DisableNetlinkImportRequest
-	136, // 273: api.GoBgpService.EnableNetlinkExport:input_type -> api.EnableNetlinkExportRequest
-	140, // 274: api.GoBgpService.DisableNetlinkExport:input_type -> api.DisableNetlinkExportRequest
-	142, // 275: api.GoBgpService.EnableVrfNetlinkImport:input_type -> api.EnableVrfNetlinkImportRequest
-	144, // 276: api.GoBgpService.DisableVrfNetlinkImport:input_type -> api.DisableVrfNetlinkImportRequest
-	147, // 277: api.GoBgpService.EnableVrfNetlinkExport:input_type -> api.EnableVrfNetlinkExportRequest
-	149, // 278: api.GoBgpService.DisableVrfNetlinkExport:input_type -> api.DisableVrfNetlinkExportRequest
-	159, // 279: api.GoBgpService.GetNetlinkImportStats:input_type -> api.GetNetlinkImportStatsRequest
-	151, // 280: api.GoBgpService.ListNetlinkExport:input_type -> api.ListNetlinkExportRequest
-	153, // 281: api.GoBgpService.GetNetlinkExportStats:input_type -> api.GetNetlinkExportStatsRequest
-	155, // 282: api.GoBgpService.FlushNetlinkExport:input_type -> api.FlushNetlinkExportRequest
-	157, // 283: api.GoBgpService.ListNetlinkExportRules:input_type -> api.ListNetlinkExportRulesRequest
-	161, // 284: api.GoBgpService.EnableMrt:input_type -> api.EnableMrtRequest
-	163, // 285: api.GoBgpService.DisableMrt:input_type -> api.DisableMrtRequest
-	165, // 286: api.GoBgpService.AddBmp:input_type -> api.AddBmpRequest
-	167, // 287: api.GoBgpService.DeleteBmp:input_type -> api.DeleteBmpRequest
-	169, // 288: api.GoBgpService.ListBmp:input_type -> api.ListBmpRequest
-	240, // 289: api.GoBgpService.SetLogLevel:input_type -> api.SetLogLevelRequest
-	250, // 290: api.GoBgpService.AddTcpAoKeychain:input_type -> api.AddTcpAoKeychainRequest
-	252, // 291: api.GoBgpService.UpdateTcpAoKeychain:input_type -> api.UpdateTcpAoKeychainRequest
-	254, // 292: api.GoBgpService.DeleteTcpAoKeychain:input_type -> api.DeleteTcpAoKeychainRequest
-	256, // 293: api.GoBgpService.ListTcpAoKeychain:input_type -> api.ListTcpAoKeychainRequest
-	35,  // 294: api.GoBgpService.StartBgp:output_type -> api.StartBgpResponse
-	37,  // 295: api.GoBgpService.StopBgp:output_type -> api.StopBgpResponse
-	39,  // 296: api.GoBgpService.GetBgp:output_type -> api.GetBgpResponse
-	33,  // 297: api.GoBgpService.GetRunningConfig:output_type -> api.GetRunningConfigResponse
-	247, // 298: api.GoBgpService.GetBfdServerState:output_type -> api.GetBfdServerStateResponse
-	41,  // 299: api.GoBgpService.WatchEvent:output_type -> api.WatchEventResponse
-	43,  // 300: api.GoBgpService.AddPeer:output_type -> api.AddPeerResponse
-	45,  // 301: api.GoBgpService.DeletePeer:output_type -> api.DeletePeerResponse
-	47,  // 302: api.GoBgpService.ListPeer:output_type -> api.ListPeerResponse
-	49,  // 303: api.GoBgpService.UpdatePeer:output_type -> api.UpdatePeerResponse
-	51,  // 304: api.GoBgpService.ResetPeer:output_type -> api.ResetPeerResponse
-	53,  // 305: api.GoBgpService.ShutdownPeer:output_type -> api.ShutdownPeerResponse
-	55,  // 306: api.GoBgpService.EnablePeer:output_type -> api.EnablePeerResponse
-	57,  // 307: api.GoBgpService.DisablePeer:output_type -> api.DisablePeerResponse
-	59,  // 308: api.GoBgpService.AddPeerGroup:output_type -> api.AddPeerGroupResponse
-	61,  // 309: api.GoBgpService.DeletePeerGroup:output_type -> api.DeletePeerGroupResponse
-	65,  // 310: api.GoBgpService.ListPeerGroup:output_type -> api.ListPeerGroupResponse
-	63,  // 311: api.GoBgpService.UpdatePeerGroup:output_type -> api.UpdatePeerGroupResponse
-	67,  // 312: api.GoBgpService.AddDynamicNeighbor:output_type -> api.AddDynamicNeighborResponse
-	71,  // 313: api.GoBgpService.ListDynamicNeighbor:output_type -> api.ListDynamicNeighborResponse
-	69,  // 314: api.GoBgpService.DeleteDynamicNeighbor:output_type -> api.DeleteDynamicNeighborResponse
-	73,  // 315: api.GoBgpService.AddPath:output_type -> api.AddPathResponse
-	75,  // 316: api.GoBgpService.DeletePath:output_type -> api.DeletePathResponse
-	78,  // 317: api.GoBgpService.ListPath:output_type -> api.ListPathResponse
-	80,  // 318: api.GoBgpService.AddPathStream:output_type -> api.AddPathStreamResponse
-	82,  // 319: api.GoBgpService.GetTable:output_type -> api.GetTableResponse
-	84,  // 320: api.GoBgpService.AddVrf:output_type -> api.AddVrfResponse
-	86,  // 321: api.GoBgpService.DeleteVrf:output_type -> api.DeleteVrfResponse
-	88,  // 322: api.GoBgpService.ListVrf:output_type -> api.ListVrfResponse
-	90,  // 323: api.GoBgpService.AddPolicy:output_type -> api.AddPolicyResponse
-	92,  // 324: api.GoBgpService.DeletePolicy:output_type -> api.DeletePolicyResponse
-	94,  // 325: api.GoBgpService.ListPolicy:output_type -> api.ListPolicyResponse
-	96,  // 326: api.GoBgpService.SetPolicies:output_type -> api.SetPoliciesResponse
-	98,  // 327: api.GoBgpService.AddDefinedSet:output_type -> api.AddDefinedSetResponse
-	100, // 328: api.GoBgpService.DeleteDefinedSet:output_type -> api.DeleteDefinedSetResponse
-	102, // 329: api.GoBgpService.ListDefinedSet:output_type -> api.ListDefinedSetResponse
-	104, // 330: api.GoBgpService.AddStatement:output_type -> api.AddStatementResponse
-	106, // 331: api.GoBgpService.DeleteStatement:output_type -> api.DeleteStatementResponse
-	108, // 332: api.GoBgpService.ListStatement:output_type -> api.ListStatementResponse
-	110, // 333: api.GoBgpService.AddPolicyAssignment:output_type -> api.AddPolicyAssignmentResponse
-	112, // 334: api.GoBgpService.DeletePolicyAssignment:output_type -> api.DeletePolicyAssignmentResponse
-	114, // 335: api.GoBgpService.ListPolicyAssignment:output_type -> api.ListPolicyAssignmentResponse
-	116, // 336: api.GoBgpService.SetPolicyAssignment:output_type -> api.SetPolicyAssignmentResponse
-	118, // 337: api.GoBgpService.AddRpki:output_type -> api.AddRpkiResponse
-	120, // 338: api.GoBgpService.DeleteRpki:output_type -> api.DeleteRpkiResponse
-	122, // 339: api.GoBgpService.ListRpki:output_type -> api.ListRpkiResponse
-	124, // 340: api.GoBgpService.EnableRpki:output_type -> api.EnableRpkiResponse
-	126, // 341: api.GoBgpService.DisableRpki:output_type -> api.DisableRpkiResponse
-	128, // 342: api.GoBgpService.ResetRpki:output_type -> api.ResetRpkiResponse
-	130, // 343: api.GoBgpService.ListRpkiTable:output_type -> api.ListRpkiTableResponse
-	132, // 344: api.GoBgpService.EnableZebra:output_type -> api.EnableZebraResponse
-	31,  // 345: api.GoBgpService.GetNetlink:output_type -> api.GetNetlinkResponse
-	134, // 346: api.GoBgpService.EnableNetlinkImport:output_type -> api.EnableNetlinkImportResponse
-	139, // 347: api.GoBgpService.DisableNetlinkImport:output_type -> api.DisableNetlinkImportResponse
-	137, // 348: api.GoBgpService.EnableNetlinkExport:output_type -> api.EnableNetlinkExportResponse
-	141, // 349: api.GoBgpService.DisableNetlinkExport:output_type -> api.DisableNetlinkExportResponse
-	143, // 350: api.GoBgpService.EnableVrfNetlinkImport:output_type -> api.EnableVrfNetlinkImportResponse
-	145, // 351: api.GoBgpService.DisableVrfNetlinkImport:output_type -> api.DisableVrfNetlinkImportResponse
-	148, // 352: api.GoBgpService.EnableVrfNetlinkExport:output_type -> api.EnableVrfNetlinkExportResponse
-	150, // 353: api.GoBgpService.DisableVrfNetlinkExport:output_type -> api.DisableVrfNetlinkExportResponse
-	160, // 354: api.GoBgpService.GetNetlinkImportStats:output_type -> api.GetNetlinkImportStatsResponse
-	152, // 355: api.GoBgpService.ListNetlinkExport:output_type -> api.ListNetlinkExportResponse
-	154, // 356: api.GoBgpService.GetNetlinkExportStats:output_type -> api.GetNetlinkExportStatsResponse
-	156, // 357: api.GoBgpService.FlushNetlinkExport:output_type -> api.FlushNetlinkExportResponse
-	158, // 358: api.GoBgpService.ListNetlinkExportRules:output_type -> api.ListNetlinkExportRulesResponse
-	162, // 359: api.GoBgpService.EnableMrt:output_type -> api.EnableMrtResponse
-	164, // 360: api.GoBgpService.DisableMrt:output_type -> api.DisableMrtResponse
-	166, // 361: api.GoBgpService.AddBmp:output_type -> api.AddBmpResponse
-	168, // 362: api.GoBgpService.DeleteBmp:output_type -> api.DeleteBmpResponse
-	170, // 363: api.GoBgpService.ListBmp:output_type -> api.ListBmpResponse
-	241, // 364: api.GoBgpService.SetLogLevel:output_type -> api.SetLogLevelResponse
-	251, // 365: api.GoBgpService.AddTcpAoKeychain:output_type -> api.AddTcpAoKeychainResponse
-	253, // 366: api.GoBgpService.UpdateTcpAoKeychain:output_type -> api.UpdateTcpAoKeychainResponse
-	255, // 367: api.GoBgpService.DeleteTcpAoKeychain:output_type -> api.DeleteTcpAoKeychainResponse
-	257, // 368: api.GoBgpService.ListTcpAoKeychain:output_type -> api.ListTcpAoKeychainResponse
-	294, // [294:369] is the sub-list for method output_type
-	219, // [219:294] is the sub-list for method input_type
-	219, // [219:219] is the sub-list for extension type_name
-	219, // [219:219] is the sub-list for extension extendee
-	0,   // [0:219] is the sub-list for field type_name
+	235, // 188: api.Global.confederation:type_name -> api.Confederation
+	195, // 189: api.Global.graceful_restart:type_name -> api.GracefulRestart
+	271, // 190: api.RPKIState.uptime:type_name -> google.protobuf.Timestamp
+	271, // 191: api.RPKIState.downtime:type_name -> google.protobuf.Timestamp
+	236, // 192: api.Rpki.conf:type_name -> api.RPKIConf
+	237, // 193: api.Rpki.state:type_name -> api.RPKIState
+	28,  // 194: api.SetLogLevelRequest.level:type_name -> api.SetLogLevelRequest.Level
+	10,  // 195: api.BfdPeerState.session_state:type_name -> api.BfdSessionState
+	10,  // 196: api.BfdPeerState.remote_session_state:type_name -> api.BfdSessionState
+	11,  // 197: api.BfdPeerState.local_diagnostic_code:type_name -> api.BfdDiagnosticCode
+	11,  // 198: api.BfdPeerState.remote_diagnostic_code:type_name -> api.BfdDiagnosticCode
+	241, // 199: api.BfdPeerState.bfd_async:type_name -> api.BfdAsyncCounters
+	244, // 200: api.GetBfdServerStateResponse.state:type_name -> api.BfdState
+	12,  // 201: api.TcpAoKey.algorithm:type_name -> api.TcpAoAlgorithm
+	247, // 202: api.TcpAoKeychain.keys:type_name -> api.TcpAoKey
+	248, // 203: api.AddTcpAoKeychainRequest.keychain:type_name -> api.TcpAoKeychain
+	247, // 204: api.UpdateTcpAoKeychainRequest.add_keys:type_name -> api.TcpAoKey
+	247, // 205: api.UpdateTcpAoKeychainRequest.delete_keys:type_name -> api.TcpAoKey
+	248, // 206: api.UpdateTcpAoKeychainResponse.keychain:type_name -> api.TcpAoKeychain
+	248, // 207: api.ListTcpAoKeychainResponse.keychain:type_name -> api.TcpAoKeychain
+	259, // 208: api.WatchEventRequest.Table.filters:type_name -> api.WatchEventRequest.Table.Filter
+	13,  // 209: api.WatchEventRequest.Table.Filter.type:type_name -> api.WatchEventRequest.Table.Filter.Type
+	14,  // 210: api.WatchEventResponse.PeerEvent.type:type_name -> api.WatchEventResponse.PeerEvent.Type
+	175, // 211: api.WatchEventResponse.PeerEvent.peer:type_name -> api.Peer
+	172, // 212: api.WatchEventResponse.TableEvent.paths:type_name -> api.Path
+	266, // 213: api.ListBmpResponse.BmpStation.conf:type_name -> api.ListBmpResponse.BmpStation.Conf
+	267, // 214: api.ListBmpResponse.BmpStation.state:type_name -> api.ListBmpResponse.BmpStation.State
+	19,  // 215: api.ListBmpResponse.BmpStation.Conf.policy:type_name -> api.AddBmpRequest.MonitoringPolicy
+	271, // 216: api.ListBmpResponse.BmpStation.State.uptime:type_name -> google.protobuf.Timestamp
+	271, // 217: api.ListBmpResponse.BmpStation.State.downtime:type_name -> google.protobuf.Timestamp
+	34,  // 218: api.GoBgpService.StartBgp:input_type -> api.StartBgpRequest
+	36,  // 219: api.GoBgpService.StopBgp:input_type -> api.StopBgpRequest
+	38,  // 220: api.GoBgpService.GetBgp:input_type -> api.GetBgpRequest
+	32,  // 221: api.GoBgpService.GetRunningConfig:input_type -> api.GetRunningConfigRequest
+	245, // 222: api.GoBgpService.GetBfdServerState:input_type -> api.GetBfdServerStateRequest
+	40,  // 223: api.GoBgpService.WatchEvent:input_type -> api.WatchEventRequest
+	42,  // 224: api.GoBgpService.AddPeer:input_type -> api.AddPeerRequest
+	44,  // 225: api.GoBgpService.DeletePeer:input_type -> api.DeletePeerRequest
+	46,  // 226: api.GoBgpService.ListPeer:input_type -> api.ListPeerRequest
+	48,  // 227: api.GoBgpService.UpdatePeer:input_type -> api.UpdatePeerRequest
+	50,  // 228: api.GoBgpService.ResetPeer:input_type -> api.ResetPeerRequest
+	52,  // 229: api.GoBgpService.ShutdownPeer:input_type -> api.ShutdownPeerRequest
+	54,  // 230: api.GoBgpService.EnablePeer:input_type -> api.EnablePeerRequest
+	56,  // 231: api.GoBgpService.DisablePeer:input_type -> api.DisablePeerRequest
+	58,  // 232: api.GoBgpService.AddPeerGroup:input_type -> api.AddPeerGroupRequest
+	60,  // 233: api.GoBgpService.DeletePeerGroup:input_type -> api.DeletePeerGroupRequest
+	64,  // 234: api.GoBgpService.ListPeerGroup:input_type -> api.ListPeerGroupRequest
+	62,  // 235: api.GoBgpService.UpdatePeerGroup:input_type -> api.UpdatePeerGroupRequest
+	66,  // 236: api.GoBgpService.AddDynamicNeighbor:input_type -> api.AddDynamicNeighborRequest
+	70,  // 237: api.GoBgpService.ListDynamicNeighbor:input_type -> api.ListDynamicNeighborRequest
+	68,  // 238: api.GoBgpService.DeleteDynamicNeighbor:input_type -> api.DeleteDynamicNeighborRequest
+	72,  // 239: api.GoBgpService.AddPath:input_type -> api.AddPathRequest
+	74,  // 240: api.GoBgpService.DeletePath:input_type -> api.DeletePathRequest
+	77,  // 241: api.GoBgpService.ListPath:input_type -> api.ListPathRequest
+	79,  // 242: api.GoBgpService.AddPathStream:input_type -> api.AddPathStreamRequest
+	81,  // 243: api.GoBgpService.GetTable:input_type -> api.GetTableRequest
+	83,  // 244: api.GoBgpService.AddVrf:input_type -> api.AddVrfRequest
+	85,  // 245: api.GoBgpService.DeleteVrf:input_type -> api.DeleteVrfRequest
+	87,  // 246: api.GoBgpService.ListVrf:input_type -> api.ListVrfRequest
+	89,  // 247: api.GoBgpService.AddPolicy:input_type -> api.AddPolicyRequest
+	91,  // 248: api.GoBgpService.DeletePolicy:input_type -> api.DeletePolicyRequest
+	93,  // 249: api.GoBgpService.ListPolicy:input_type -> api.ListPolicyRequest
+	95,  // 250: api.GoBgpService.SetPolicies:input_type -> api.SetPoliciesRequest
+	97,  // 251: api.GoBgpService.AddDefinedSet:input_type -> api.AddDefinedSetRequest
+	99,  // 252: api.GoBgpService.DeleteDefinedSet:input_type -> api.DeleteDefinedSetRequest
+	101, // 253: api.GoBgpService.ListDefinedSet:input_type -> api.ListDefinedSetRequest
+	103, // 254: api.GoBgpService.AddStatement:input_type -> api.AddStatementRequest
+	105, // 255: api.GoBgpService.DeleteStatement:input_type -> api.DeleteStatementRequest
+	107, // 256: api.GoBgpService.ListStatement:input_type -> api.ListStatementRequest
+	109, // 257: api.GoBgpService.AddPolicyAssignment:input_type -> api.AddPolicyAssignmentRequest
+	111, // 258: api.GoBgpService.DeletePolicyAssignment:input_type -> api.DeletePolicyAssignmentRequest
+	113, // 259: api.GoBgpService.ListPolicyAssignment:input_type -> api.ListPolicyAssignmentRequest
+	115, // 260: api.GoBgpService.SetPolicyAssignment:input_type -> api.SetPolicyAssignmentRequest
+	117, // 261: api.GoBgpService.AddRpki:input_type -> api.AddRpkiRequest
+	119, // 262: api.GoBgpService.DeleteRpki:input_type -> api.DeleteRpkiRequest
+	121, // 263: api.GoBgpService.ListRpki:input_type -> api.ListRpkiRequest
+	123, // 264: api.GoBgpService.EnableRpki:input_type -> api.EnableRpkiRequest
+	125, // 265: api.GoBgpService.DisableRpki:input_type -> api.DisableRpkiRequest
+	127, // 266: api.GoBgpService.ResetRpki:input_type -> api.ResetRpkiRequest
+	129, // 267: api.GoBgpService.ListRpkiTable:input_type -> api.ListRpkiTableRequest
+	131, // 268: api.GoBgpService.EnableZebra:input_type -> api.EnableZebraRequest
+	29,  // 269: api.GoBgpService.GetNetlink:input_type -> api.GetNetlinkRequest
+	133, // 270: api.GoBgpService.EnableNetlinkImport:input_type -> api.EnableNetlinkImportRequest
+	138, // 271: api.GoBgpService.DisableNetlinkImport:input_type -> api.DisableNetlinkImportRequest
+	136, // 272: api.GoBgpService.EnableNetlinkExport:input_type -> api.EnableNetlinkExportRequest
+	140, // 273: api.GoBgpService.DisableNetlinkExport:input_type -> api.DisableNetlinkExportRequest
+	142, // 274: api.GoBgpService.EnableVrfNetlinkImport:input_type -> api.EnableVrfNetlinkImportRequest
+	144, // 275: api.GoBgpService.DisableVrfNetlinkImport:input_type -> api.DisableVrfNetlinkImportRequest
+	147, // 276: api.GoBgpService.EnableVrfNetlinkExport:input_type -> api.EnableVrfNetlinkExportRequest
+	149, // 277: api.GoBgpService.DisableVrfNetlinkExport:input_type -> api.DisableVrfNetlinkExportRequest
+	159, // 278: api.GoBgpService.GetNetlinkImportStats:input_type -> api.GetNetlinkImportStatsRequest
+	151, // 279: api.GoBgpService.ListNetlinkExport:input_type -> api.ListNetlinkExportRequest
+	153, // 280: api.GoBgpService.GetNetlinkExportStats:input_type -> api.GetNetlinkExportStatsRequest
+	155, // 281: api.GoBgpService.FlushNetlinkExport:input_type -> api.FlushNetlinkExportRequest
+	157, // 282: api.GoBgpService.ListNetlinkExportRules:input_type -> api.ListNetlinkExportRulesRequest
+	161, // 283: api.GoBgpService.EnableMrt:input_type -> api.EnableMrtRequest
+	163, // 284: api.GoBgpService.DisableMrt:input_type -> api.DisableMrtRequest
+	165, // 285: api.GoBgpService.AddBmp:input_type -> api.AddBmpRequest
+	167, // 286: api.GoBgpService.DeleteBmp:input_type -> api.DeleteBmpRequest
+	169, // 287: api.GoBgpService.ListBmp:input_type -> api.ListBmpRequest
+	239, // 288: api.GoBgpService.SetLogLevel:input_type -> api.SetLogLevelRequest
+	249, // 289: api.GoBgpService.AddTcpAoKeychain:input_type -> api.AddTcpAoKeychainRequest
+	251, // 290: api.GoBgpService.UpdateTcpAoKeychain:input_type -> api.UpdateTcpAoKeychainRequest
+	253, // 291: api.GoBgpService.DeleteTcpAoKeychain:input_type -> api.DeleteTcpAoKeychainRequest
+	255, // 292: api.GoBgpService.ListTcpAoKeychain:input_type -> api.ListTcpAoKeychainRequest
+	35,  // 293: api.GoBgpService.StartBgp:output_type -> api.StartBgpResponse
+	37,  // 294: api.GoBgpService.StopBgp:output_type -> api.StopBgpResponse
+	39,  // 295: api.GoBgpService.GetBgp:output_type -> api.GetBgpResponse
+	33,  // 296: api.GoBgpService.GetRunningConfig:output_type -> api.GetRunningConfigResponse
+	246, // 297: api.GoBgpService.GetBfdServerState:output_type -> api.GetBfdServerStateResponse
+	41,  // 298: api.GoBgpService.WatchEvent:output_type -> api.WatchEventResponse
+	43,  // 299: api.GoBgpService.AddPeer:output_type -> api.AddPeerResponse
+	45,  // 300: api.GoBgpService.DeletePeer:output_type -> api.DeletePeerResponse
+	47,  // 301: api.GoBgpService.ListPeer:output_type -> api.ListPeerResponse
+	49,  // 302: api.GoBgpService.UpdatePeer:output_type -> api.UpdatePeerResponse
+	51,  // 303: api.GoBgpService.ResetPeer:output_type -> api.ResetPeerResponse
+	53,  // 304: api.GoBgpService.ShutdownPeer:output_type -> api.ShutdownPeerResponse
+	55,  // 305: api.GoBgpService.EnablePeer:output_type -> api.EnablePeerResponse
+	57,  // 306: api.GoBgpService.DisablePeer:output_type -> api.DisablePeerResponse
+	59,  // 307: api.GoBgpService.AddPeerGroup:output_type -> api.AddPeerGroupResponse
+	61,  // 308: api.GoBgpService.DeletePeerGroup:output_type -> api.DeletePeerGroupResponse
+	65,  // 309: api.GoBgpService.ListPeerGroup:output_type -> api.ListPeerGroupResponse
+	63,  // 310: api.GoBgpService.UpdatePeerGroup:output_type -> api.UpdatePeerGroupResponse
+	67,  // 311: api.GoBgpService.AddDynamicNeighbor:output_type -> api.AddDynamicNeighborResponse
+	71,  // 312: api.GoBgpService.ListDynamicNeighbor:output_type -> api.ListDynamicNeighborResponse
+	69,  // 313: api.GoBgpService.DeleteDynamicNeighbor:output_type -> api.DeleteDynamicNeighborResponse
+	73,  // 314: api.GoBgpService.AddPath:output_type -> api.AddPathResponse
+	75,  // 315: api.GoBgpService.DeletePath:output_type -> api.DeletePathResponse
+	78,  // 316: api.GoBgpService.ListPath:output_type -> api.ListPathResponse
+	80,  // 317: api.GoBgpService.AddPathStream:output_type -> api.AddPathStreamResponse
+	82,  // 318: api.GoBgpService.GetTable:output_type -> api.GetTableResponse
+	84,  // 319: api.GoBgpService.AddVrf:output_type -> api.AddVrfResponse
+	86,  // 320: api.GoBgpService.DeleteVrf:output_type -> api.DeleteVrfResponse
+	88,  // 321: api.GoBgpService.ListVrf:output_type -> api.ListVrfResponse
+	90,  // 322: api.GoBgpService.AddPolicy:output_type -> api.AddPolicyResponse
+	92,  // 323: api.GoBgpService.DeletePolicy:output_type -> api.DeletePolicyResponse
+	94,  // 324: api.GoBgpService.ListPolicy:output_type -> api.ListPolicyResponse
+	96,  // 325: api.GoBgpService.SetPolicies:output_type -> api.SetPoliciesResponse
+	98,  // 326: api.GoBgpService.AddDefinedSet:output_type -> api.AddDefinedSetResponse
+	100, // 327: api.GoBgpService.DeleteDefinedSet:output_type -> api.DeleteDefinedSetResponse
+	102, // 328: api.GoBgpService.ListDefinedSet:output_type -> api.ListDefinedSetResponse
+	104, // 329: api.GoBgpService.AddStatement:output_type -> api.AddStatementResponse
+	106, // 330: api.GoBgpService.DeleteStatement:output_type -> api.DeleteStatementResponse
+	108, // 331: api.GoBgpService.ListStatement:output_type -> api.ListStatementResponse
+	110, // 332: api.GoBgpService.AddPolicyAssignment:output_type -> api.AddPolicyAssignmentResponse
+	112, // 333: api.GoBgpService.DeletePolicyAssignment:output_type -> api.DeletePolicyAssignmentResponse
+	114, // 334: api.GoBgpService.ListPolicyAssignment:output_type -> api.ListPolicyAssignmentResponse
+	116, // 335: api.GoBgpService.SetPolicyAssignment:output_type -> api.SetPolicyAssignmentResponse
+	118, // 336: api.GoBgpService.AddRpki:output_type -> api.AddRpkiResponse
+	120, // 337: api.GoBgpService.DeleteRpki:output_type -> api.DeleteRpkiResponse
+	122, // 338: api.GoBgpService.ListRpki:output_type -> api.ListRpkiResponse
+	124, // 339: api.GoBgpService.EnableRpki:output_type -> api.EnableRpkiResponse
+	126, // 340: api.GoBgpService.DisableRpki:output_type -> api.DisableRpkiResponse
+	128, // 341: api.GoBgpService.ResetRpki:output_type -> api.ResetRpkiResponse
+	130, // 342: api.GoBgpService.ListRpkiTable:output_type -> api.ListRpkiTableResponse
+	132, // 343: api.GoBgpService.EnableZebra:output_type -> api.EnableZebraResponse
+	31,  // 344: api.GoBgpService.GetNetlink:output_type -> api.GetNetlinkResponse
+	134, // 345: api.GoBgpService.EnableNetlinkImport:output_type -> api.EnableNetlinkImportResponse
+	139, // 346: api.GoBgpService.DisableNetlinkImport:output_type -> api.DisableNetlinkImportResponse
+	137, // 347: api.GoBgpService.EnableNetlinkExport:output_type -> api.EnableNetlinkExportResponse
+	141, // 348: api.GoBgpService.DisableNetlinkExport:output_type -> api.DisableNetlinkExportResponse
+	143, // 349: api.GoBgpService.EnableVrfNetlinkImport:output_type -> api.EnableVrfNetlinkImportResponse
+	145, // 350: api.GoBgpService.DisableVrfNetlinkImport:output_type -> api.DisableVrfNetlinkImportResponse
+	148, // 351: api.GoBgpService.EnableVrfNetlinkExport:output_type -> api.EnableVrfNetlinkExportResponse
+	150, // 352: api.GoBgpService.DisableVrfNetlinkExport:output_type -> api.DisableVrfNetlinkExportResponse
+	160, // 353: api.GoBgpService.GetNetlinkImportStats:output_type -> api.GetNetlinkImportStatsResponse
+	152, // 354: api.GoBgpService.ListNetlinkExport:output_type -> api.ListNetlinkExportResponse
+	154, // 355: api.GoBgpService.GetNetlinkExportStats:output_type -> api.GetNetlinkExportStatsResponse
+	156, // 356: api.GoBgpService.FlushNetlinkExport:output_type -> api.FlushNetlinkExportResponse
+	158, // 357: api.GoBgpService.ListNetlinkExportRules:output_type -> api.ListNetlinkExportRulesResponse
+	162, // 358: api.GoBgpService.EnableMrt:output_type -> api.EnableMrtResponse
+	164, // 359: api.GoBgpService.DisableMrt:output_type -> api.DisableMrtResponse
+	166, // 360: api.GoBgpService.AddBmp:output_type -> api.AddBmpResponse
+	168, // 361: api.GoBgpService.DeleteBmp:output_type -> api.DeleteBmpResponse
+	170, // 362: api.GoBgpService.ListBmp:output_type -> api.ListBmpResponse
+	240, // 363: api.GoBgpService.SetLogLevel:output_type -> api.SetLogLevelResponse
+	250, // 364: api.GoBgpService.AddTcpAoKeychain:output_type -> api.AddTcpAoKeychainResponse
+	252, // 365: api.GoBgpService.UpdateTcpAoKeychain:output_type -> api.UpdateTcpAoKeychainResponse
+	254, // 366: api.GoBgpService.DeleteTcpAoKeychain:output_type -> api.DeleteTcpAoKeychainResponse
+	256, // 367: api.GoBgpService.ListTcpAoKeychain:output_type -> api.ListTcpAoKeychainResponse
+	293, // [293:368] is the sub-list for method output_type
+	218, // [218:293] is the sub-list for method input_type
+	218, // [218:218] is the sub-list for extension type_name
+	218, // [218:218] is the sub-list for extension extendee
+	0,   // [0:218] is the sub-list for field type_name
 }
 
 func init() { file_api_gobgp_proto_init() }
@@ -17435,7 +17341,7 @@ func file_api_gobgp_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_gobgp_proto_rawDesc), len(file_api_gobgp_proto_rawDesc)),
 			NumEnums:      29,
-			NumMessages:   240,
+			NumMessages:   239,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

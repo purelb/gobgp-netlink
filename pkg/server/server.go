@@ -4008,14 +4008,7 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 					AlwaysCompareMed:         g.RouteSelectionOptions.Config.AlwaysCompareMed,
 					IgnoreAsPathLength:       g.RouteSelectionOptions.Config.IgnoreAsPathLength,
 					ExternalCompareRouterId:  g.RouteSelectionOptions.Config.ExternalCompareRouterId,
-					AdvertiseInactiveRoutes:  g.RouteSelectionOptions.Config.AdvertiseInactiveRoutes,
-					EnableAigp:               g.RouteSelectionOptions.Config.EnableAigp,
-					IgnoreNextHopIgpMetric:   g.RouteSelectionOptions.Config.IgnoreNextHopIgpMetric,
 					DisableBestPathSelection: g.RouteSelectionOptions.Config.DisableBestPathSelection,
-				},
-				DefaultRouteDistance: &api.DefaultRouteDistance{
-					ExternalRouteDistance: uint32(g.DefaultRouteDistance.Config.ExternalRouteDistance),
-					InternalRouteDistance: uint32(g.DefaultRouteDistance.Config.InternalRouteDistance),
 				},
 				Confederation: &api.Confederation{
 					Enabled:      g.Confederation.Config.Enabled,

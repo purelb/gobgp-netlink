@@ -3026,26 +3026,7 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 				AlwaysCompareMed:         a.RouteSelectionOptions.AlwaysCompareMed,
 				IgnoreAsPathLength:       a.RouteSelectionOptions.IgnoreAsPathLength,
 				ExternalCompareRouterId:  a.RouteSelectionOptions.ExternalCompareRouterId,
-				AdvertiseInactiveRoutes:  a.RouteSelectionOptions.AdvertiseInactiveRoutes,
-				EnableAigp:               a.RouteSelectionOptions.EnableAigp,
-				IgnoreNextHopIgpMetric:   a.RouteSelectionOptions.IgnoreNextHopIgpMetric,
 				DisableBestPathSelection: a.RouteSelectionOptions.DisableBestPathSelection,
-			},
-		}
-	}
-	if a.DefaultRouteDistance != nil {
-		extDist, err := narrowUint8("default_route_distance.external_route_distance", a.DefaultRouteDistance.ExternalRouteDistance)
-		if err != nil {
-			return nil, err
-		}
-		intDist, err := narrowUint8("default_route_distance.internal_route_distance", a.DefaultRouteDistance.InternalRouteDistance)
-		if err != nil {
-			return nil, err
-		}
-		global.DefaultRouteDistance = oc.DefaultRouteDistance{
-			Config: oc.DefaultRouteDistanceConfig{
-				ExternalRouteDistance: extDist,
-				InternalRouteDistance: intDist,
 			},
 		}
 	}
