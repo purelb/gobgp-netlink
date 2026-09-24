@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -32,6 +33,11 @@ func showNetlink() error {
 	res, err := client.GetNetlink(context.Background(), &api.GetNetlinkRequest{})
 	if err != nil {
 		return err
+	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
 	}
 
 	fmt.Println("Netlink Status:")
@@ -71,6 +77,11 @@ func showNetlinkImport() error {
 	res, err := client.GetNetlink(context.Background(), &api.GetNetlinkRequest{})
 	if err != nil {
 		return err
+	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
 	}
 
 	hasImport := res.ImportEnabled || len(res.VrfImports) > 0
@@ -114,6 +125,11 @@ func showNetlinkImportStats() error {
 	if err != nil {
 		return err
 	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
+	}
 
 	fmt.Printf("Import Statistics:\n")
 	fmt.Printf("  Total Imported:  %d\n", res.Imported)
@@ -142,6 +158,24 @@ func showNetlinkExport(vrf string) error {
 		return err
 	}
 
+	if globalOpts.Json {
+		// One array of every route, [] rather than null when there are none.
+		routes := make([]*api.ListNetlinkExportResponse_ExportedRoute, 0)
+		for {
+			r, err := stream.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			routes = append(routes, r.Route)
+		}
+		j, _ := json.Marshal(routes)
+		fmt.Println(string(j))
+		return nil
+	}
+
 	headerFormat := "%-40s %-20s %-15s %-8s %-6s %-20s %s\n"
 	rowFormat := "%-40s %-20s %-15s %-8d %-6d %-20s %s\n"
 
@@ -165,9 +199,16 @@ func showNetlinkExport(vrf string) error {
 
 		exportedAt := time.Unix(route.ExportedAt, 0).Format("2006-01-02 15:04:05")
 
+		// nexthops holds every nexthop of an ECMP route; a daemon older than
+		// the field sends only nexthop.
+		nexthops := strings.Join(route.Nexthops, ",")
+		if nexthops == "" {
+			nexthops = route.Nexthop
+		}
+
 		fmt.Printf(rowFormat,
 			route.Prefix,
-			route.Nexthop,
+			nexthops,
 			vrfDisplay,
 			route.TableId,
 			route.Metric,
@@ -182,6 +223,11 @@ func showNetlinkExportRules() error {
 	res, err := client.ListNetlinkExportRules(context.Background(), &api.ListNetlinkExportRulesRequest{})
 	if err != nil {
 		return err
+	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
 	}
 
 	if len(res.Rules) == 0 {
@@ -262,6 +308,11 @@ func showNetlinkExportStats() error {
 	res, err := client.GetNetlinkExportStats(context.Background(), &api.GetNetlinkExportStatsRequest{})
 	if err != nil {
 		return err
+	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
 	}
 
 	fmt.Printf("Export Statistics:\n")

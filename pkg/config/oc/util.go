@@ -244,9 +244,7 @@ func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
 	// Everything else here does reach the wire or the socket and still resets:
 	// peer-as is validated against the peer's OPEN, local-as is carried in
 	// ours, auth-password is a TCP-MD5 socket option, send-software-version
-	// emits a capability. route-flap-damping is read by nothing in this tree
-	// and so resets for no benefit, but it is left alone deliberately - a
-	// carve-out would have to be revisited the day damping is implemented.
+	// emits a capability.
 	//
 	// Neutralise the fields on copies rather than enumerating the ones that do
 	// matter: NeighborConfig is generated, so a field added by a future
@@ -256,13 +254,47 @@ func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
 	lhs.Description, rhs.Description = "", ""
 	lhs.RemovePrivateAs, rhs.RemovePrivateAs = "", ""
 
+	// route-server and route-reflector were in neither list: not here, and not
+	// among the blocks updateNeighbor copies in place. So a change to either
+	// was accepted, reported back as the old value - correctly, since the old
+	// value was still the one in force - and did nothing at all.
+	//
+	// Both have to rebuild the session rather than apply in place, and for
+	// different reasons.
+	//
+	// route-server sets peer.tableId at peer construction (peer.go:148), which
+	// decides whether the peer's routes live in the global RIB or in its own.
+	// Flipping it in place would leave the routes already installed in the
+	// wrong table with nothing to move them.
+	//
+	// route-reflector does not touch tableId. RouteReflectorClient is stamped
+	// into the peer's PeerInfo snapshot, and UpdatePathAttrs reads it from
+	// there to decide whether ORIGINATOR_ID and CLUSTER_LIST survive
+	// (path.go:339) and whether to add them (path.go:400). An in-place change
+	// would leave the snapshot answering with the old value until the session
+	// happened to flap - silent iBGP routing loops, which is the failure mode
+	// route reflection's loop prevention exists to stop.
+	//
+	// deleteNeighbor/addNeighbor already does both correctly; only the
+	// classification was missing.
+	//
+	// hold-time and keepalive-interval likewise. They are carried in and
+	// negotiated from the OPEN, and read only when the session establishes, so
+	// updateNeighbor's in-place copy of the timers block stored them, ListPeer
+	// reported them, and the running session went on using the old values
+	// until it happened to restart. connect-retry and idle-hold-time-after-reset
+	// are read live and stay in place.
 	return !lhs.Equal(&rhs) ||
+		n.Timers.Config.HoldTime != new.Timers.Config.HoldTime ||
+		n.Timers.Config.KeepaliveInterval != new.Timers.Config.KeepaliveInterval ||
 		!n.Transport.Config.Equal(&new.Transport.Config) ||
 		!n.AddPaths.Config.Equal(&new.AddPaths.Config) ||
 		!n.AsPathOptions.Config.Equal(&new.AsPathOptions.Config) ||
 		!n.GracefulRestart.Config.Equal(&new.GracefulRestart.Config) ||
 		isAfiSafiChanged(n.AfiSafis, new.AfiSafis) ||
 		!n.EbgpMultihop.Config.Equal(&new.EbgpMultihop.Config) ||
+		!n.RouteServer.Config.Equal(&new.RouteServer.Config) ||
+		!n.RouteReflector.Config.Equal(&new.RouteReflector.Config) ||
 		!n.TtlSecurity.Config.Equal(&new.TtlSecurity.Config)
 }
 
@@ -438,19 +470,6 @@ func newAddPathsFromConfigStruct(c *AddPaths) *api.AddPaths {
 	}
 }
 
-func newRouteSelectionOptionsFromConfigStruct(c *RouteSelectionOptions) *api.RouteSelectionOptions {
-	return &api.RouteSelectionOptions{
-		Config: &api.RouteSelectionOptionsConfig{
-			AlwaysCompareMed:        c.Config.AlwaysCompareMed,
-			IgnoreAsPathLength:      c.Config.IgnoreAsPathLength,
-			ExternalCompareRouterId: c.Config.ExternalCompareRouterId,
-			AdvertiseInactiveRoutes: c.Config.AdvertiseInactiveRoutes,
-			EnableAigp:              c.Config.EnableAigp,
-			IgnoreNextHopIgpMetric:  c.Config.IgnoreNextHopIgpMetric,
-		},
-	}
-}
-
 func newMpGracefulRestartFromConfigStruct(c *MpGracefulRestart) *api.MpGracefulRestart {
 	return &api.MpGracefulRestart{
 		Config: &api.MpGracefulRestartConfig{
@@ -467,32 +486,10 @@ func newMpGracefulRestartFromConfigStruct(c *MpGracefulRestart) *api.MpGracefulR
 	}
 }
 
-func newUseMultiplePathsFromConfigStruct(c *UseMultiplePaths) *api.UseMultiplePaths {
-	return &api.UseMultiplePaths{
-		Config: &api.UseMultiplePathsConfig{
-			Enabled: c.Config.Enabled,
-		},
-		Ebgp: &api.Ebgp{
-			Config: &api.EbgpConfig{
-				AllowMultipleAsn: c.Ebgp.Config.AllowMultipleAs,
-				MaximumPaths:     c.Ebgp.Config.MaximumPaths,
-			},
-		},
-		Ibgp: &api.Ibgp{
-			Config: &api.IbgpConfig{
-				MaximumPaths: c.Ibgp.Config.MaximumPaths,
-			},
-		},
-	}
-}
-
 func newAfiSafiFromConfigStruct(c *AfiSafi) *api.AfiSafi {
 	return &api.AfiSafi{
 		MpGracefulRestart:        newMpGracefulRestartFromConfigStruct(&c.MpGracefulRestart),
 		Config:                   newAfiSafiConfigFromConfigStruct(c),
-		ApplyPolicy:              newApplyPolicyFromConfigStruct(&c.ApplyPolicy),
-		RouteSelectionOptions:    newRouteSelectionOptionsFromConfigStruct(&c.RouteSelectionOptions),
-		UseMultiplePaths:         newUseMultiplePathsFromConfigStruct(&c.UseMultiplePaths),
 		PrefixLimits:             newPrefixLimitFromConfigStruct(c),
 		RouteTargetMembership:    newRouteTargetMembershipFromConfigStruct(&c.RouteTargetMembership),
 		LongLivedGracefulRestart: newLongLivedGracefulRestartFromConfigStruct(&c.LongLivedGracefulRestart),
@@ -591,6 +588,15 @@ func removePrivateToAPI(o RemovePrivateAsOption) api.RemovePrivate {
 	return api.RemovePrivate_REMOVE_PRIVATE_UNSPECIFIED
 }
 
+// addrOrEmpty reports an optional address. netip.Addr.String() renders the zero
+// value as "invalid IP", which is worse than saying nothing.
+func addrOrEmpty(addr netip.Addr) string {
+	if !addr.IsValid() {
+		return ""
+	}
+	return addr.String()
+}
+
 func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 	afiSafis := make([]*api.AfiSafi, 0, len(pconf.AfiSafis))
 	for _, f := range pconf.AfiSafis {
@@ -659,7 +665,6 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			AdminDown:            pconf.Config.AdminDown,
 			LocalAsn:             proto.Uint32(pconf.Config.LocalAs),
 			AuthPassword:         proto.String(pconf.Config.AuthPassword),
-			RouteFlapDamping:     proto.Bool(pconf.Config.RouteFlapDamping),
 			Description:          proto.String(pconf.Config.Description),
 			SendSoftwareVersion:  proto.Bool(pconf.Config.SendSoftwareVersion),
 		},
@@ -676,6 +681,12 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			// and would carry the key straight out through ListPeer and
 			// `gobgp neighbor -j`.
 			AuthPasswordSet: pconf.Config.AuthPassword != "",
+			// Declared and reported by nothing. peer_group was worse than a
+			// reporting gap - see default.go, where State.PeerGroup is now
+			// populated because WatchEvent's peer-group filter reads it.
+			Description:   pconf.State.Description,
+			PeerGroup:     pconf.State.PeerGroup,
+			RemovePrivate: removePrivate,
 			Messages: &api.Messages{
 				Received: &api.Message{
 					Notification:   pconf.State.Messages.Received.Notification,
@@ -696,17 +707,32 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 					Refresh:      pconf.State.Messages.Sent.Refresh,
 					Discarded:    pconf.State.Messages.Sent.Discarded,
 					Total:        pconf.State.Messages.Sent.Total,
+					// The Received literal above has carried these since it was
+					// written; this one did not, so even once the counters are
+					// incremented the sent side would still report zero.
+					WithdrawUpdate: uint64(pconf.State.Messages.Sent.WithdrawUpdate),
+					WithdrawPrefix: uint64(pconf.State.Messages.Sent.WithdrawPrefix),
 				},
 			},
 			PeerAsn:         s.PeerAs,
 			LocalAsn:        s.LocalAs,
 			Type:            toPeerType(s.PeerType),
 			NeighborAddress: pconf.State.NeighborAddress.String(),
-			Queues:          &api.Queues{},
-			RemoteCap:       remoteCap,
-			LocalCap:        localCap,
-			RouterId:        s.RemoteRouterId.String(),
-			Flops:           s.Flops,
+			// Output only. There is no receive queue to measure - inbound
+			// messages are delivered by callback - so Queues.input is removed
+			// from the proto rather than reported as a permanent zero.
+			Queues:    &api.Queues{Output: s.Queues.Output},
+			OutQ:      s.Queues.Output,
+			RemoteCap: remoteCap,
+			LocalCap:  localCap,
+			RouterId:  s.RemoteRouterId.String(),
+			Flops:     s.Flops,
+			// Next hops used for netlink-imported routes on this session,
+			// resolved when it came up. Declared since the netlink work landed
+			// and never written, because nothing populated PeerInfo either.
+			Ipv4Nexthop:          addrOrEmpty(s.Ipv4Nexthop),
+			Ipv6Nexthop:          addrOrEmpty(s.Ipv6Nexthop),
+			Ipv6LinkLocalNexthop: addrOrEmpty(s.Ipv6LinkLocalNexthop),
 			BfdState: &api.BfdPeerState{
 				SessionState:                 bfdSessionStateToAPI(pconf.Bfd.State.SessionState),
 				RemoteSessionState:           bfdSessionStateToAPI(pconf.Bfd.State.RemoteSessionState),
@@ -737,14 +763,19 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 				HoldTime:               uint64(timer.Config.HoldTime),
 				KeepaliveInterval:      uint64(timer.Config.KeepaliveInterval),
 				IdleHoldTimeAfterReset: uint64(timer.Config.IdleHoldTimeAfterReset),
-				// Accepted by both converters and reported by neither until now.
-				MinimumAdvertisementInterval: uint64(timer.Config.MinimumAdvertisementInterval),
 			},
 			State: &api.TimersState{
 				KeepaliveInterval:  uint64(timer.State.KeepaliveInterval),
 				NegotiatedHoldTime: uint64(timer.State.NegotiatedHoldTime),
 				Uptime:             ProtoTimestamp(timer.State.Uptime),
 				Downtime:           ProtoTimestamp(timer.State.Downtime),
+				// Declared since the model was generated and reported by
+				// nothing, so a client asking for the timers in effect got two
+				// of the four. Neither has a negotiated form - the negotiated
+				// hold time is the separate field above - so the configured
+				// value is the operative one.
+				ConnectRetry: uint64(timer.Config.ConnectRetry),
+				HoldTime:     uint64(timer.Config.HoldTime),
 			},
 		},
 		RouteReflector: &api.RouteReflector{
@@ -772,7 +803,6 @@ func NewPeerFromConfigStruct(pconf *Neighbor) *api.Peer {
 			LocalPort:     uint32(pconf.Transport.Config.LocalPort),
 			LocalAddress:  localAddress.String(),
 			PassiveMode:   pconf.Transport.Config.PassiveMode,
-			MtuDiscovery:  pconf.Transport.Config.MtuDiscovery,
 			BindInterface: pconf.Transport.Config.BindInterface,
 			TcpMss:        uint32(pconf.Transport.Config.TcpMss),
 			IpTos:         uint32(pconf.Transport.Config.IpTos),
@@ -879,7 +909,6 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			LocalAsn:             pconf.Config.LocalAs,
 			Type:                 toPeerType(pconf.Config.PeerType),
 			AuthPassword:         pconf.Config.AuthPassword,
-			RouteFlapDamping:     pconf.Config.RouteFlapDamping,
 			SendCommunity:        SendCommunityToAPI(pconf.Config.SendCommunity),
 			RemovePrivate:        removePrivateToAPI(pconf.Config.RemovePrivateAs),
 			Description:          pconf.Config.Description,
@@ -895,6 +924,18 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			SendCommunity: SendCommunityToAPI(s.SendCommunity),
 			TotalPaths:    s.TotalPaths,
 			TotalPrefixes: s.TotalPrefixes,
+			// Declared and reported by nothing, so a client reading a peer
+			// group back got five of eleven fields. The values are all in
+			// pconf.State already.
+			//
+			// auth_password is deliberately left out and removed from the
+			// proto instead: ListPeer redacts the neighbor's copy, so
+			// reporting the group's here would hand out the key ListPeer
+			// exists to withhold.
+			LocalAsn:      s.LocalAs,
+			Description:   s.Description,
+			PeerGroupName: s.PeerGroupName,
+			RemovePrivate: removePrivateToAPI(s.RemovePrivateAs),
 		},
 		EbgpMultihop: &api.EbgpMultihop{
 			Enabled:     pconf.EbgpMultihop.Config.Enabled,
@@ -910,14 +951,19 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 				HoldTime:               uint64(timer.Config.HoldTime),
 				KeepaliveInterval:      uint64(timer.Config.KeepaliveInterval),
 				IdleHoldTimeAfterReset: uint64(timer.Config.IdleHoldTimeAfterReset),
-				// Accepted by both converters and reported by neither until now.
-				MinimumAdvertisementInterval: uint64(timer.Config.MinimumAdvertisementInterval),
 			},
 			State: &api.TimersState{
 				KeepaliveInterval:  uint64(timer.State.KeepaliveInterval),
 				NegotiatedHoldTime: uint64(timer.State.NegotiatedHoldTime),
 				Uptime:             ProtoTimestamp(timer.State.Uptime),
 				Downtime:           ProtoTimestamp(timer.State.Downtime),
+				// Declared since the model was generated and reported by
+				// nothing, so a client asking for the timers in effect got two
+				// of the four. Neither has a negotiated form - the negotiated
+				// hold time is the separate field above - so the configured
+				// value is the operative one.
+				ConnectRetry: uint64(timer.Config.ConnectRetry),
+				HoldTime:     uint64(timer.Config.HoldTime),
 			},
 		},
 		RouteReflector: &api.RouteReflector{
@@ -942,7 +988,6 @@ func NewPeerGroupFromConfigStruct(pconf *PeerGroup) *api.PeerGroup {
 			RemotePort:    uint32(pconf.Transport.Config.RemotePort),
 			LocalAddress:  pconf.Transport.Config.LocalAddress.String(),
 			PassiveMode:   pconf.Transport.Config.PassiveMode,
-			MtuDiscovery:  pconf.Transport.Config.MtuDiscovery,
 			BindInterface: pconf.Transport.Config.BindInterface,
 			TcpMss:        uint32(pconf.Transport.Config.TcpMss),
 			IpTos:         uint32(pconf.Transport.Config.IpTos),
@@ -980,18 +1025,16 @@ func NewGlobalFromConfigStruct(c *Global) *api.Global {
 
 		GracefulRestartInheritToNeighbors: c.Config.GracefulRestartInheritToNeighbors,
 
+		// The config file reaches StartBgp through this struct, so a limit
+		// not carried here never reaches the daemon at all.
+		EbgpMaximumPaths: c.UseMultiplePaths.Ebgp.Config.MaximumPaths,
+		IbgpMaximumPaths: c.UseMultiplePaths.Ibgp.Config.MaximumPaths,
+
 		RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 			AlwaysCompareMed:         c.RouteSelectionOptions.Config.AlwaysCompareMed,
 			IgnoreAsPathLength:       c.RouteSelectionOptions.Config.IgnoreAsPathLength,
 			ExternalCompareRouterId:  c.RouteSelectionOptions.Config.ExternalCompareRouterId,
-			AdvertiseInactiveRoutes:  c.RouteSelectionOptions.Config.AdvertiseInactiveRoutes,
-			EnableAigp:               c.RouteSelectionOptions.Config.EnableAigp,
-			IgnoreNextHopIgpMetric:   c.RouteSelectionOptions.Config.IgnoreNextHopIgpMetric,
 			DisableBestPathSelection: c.RouteSelectionOptions.Config.DisableBestPathSelection,
-		},
-		DefaultRouteDistance: &api.DefaultRouteDistance{
-			ExternalRouteDistance: uint32(c.DefaultRouteDistance.Config.ExternalRouteDistance),
-			InternalRouteDistance: uint32(c.DefaultRouteDistance.Config.InternalRouteDistance),
 		},
 		Confederation: &api.Confederation{
 			Enabled:      c.Confederation.Config.Enabled,

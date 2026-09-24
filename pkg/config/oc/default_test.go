@@ -17,6 +17,7 @@ package oc
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -361,4 +362,349 @@ func Test_ConfiguredFields_ConcurrentRegisterAndLookup(t *testing.T) {
 	UnregisterConfiguredFields("203.0.113.1")
 	_, ok := lookupConfiguredFields("203.0.113.1")
 	assert.False(t, ok, "unregister must remove the entry, or a re-added peer inherits stale presence")
+}
+
+// Multipath enabled with no limit on either peer type is refused. An unset
+// limit gives that type the single best path, so such a setting reads as on
+// and selects nothing it would not select anyway.
+func TestUseMultiplePathsRequiresALimit(t *testing.T) {
+	global := func(enabled bool, ebgp, ibgp uint32) *Global {
+		g := &Global{Config: GlobalConfig{As: 65001, RouterId: netip.MustParseAddr("10.0.0.1")}}
+		g.UseMultiplePaths.Config.Enabled = enabled
+		g.UseMultiplePaths.Ebgp.Config.MaximumPaths = ebgp
+		g.UseMultiplePaths.Ibgp.Config.MaximumPaths = ibgp
+		return g
+	}
+
+	assert.Error(t, SetDefaultGlobalConfigValues(global(true, 0, 0)),
+		"enabled with neither limit must be refused")
+	assert.NoError(t, SetDefaultGlobalConfigValues(global(true, 4, 0)), "an eBGP limit alone is enough")
+	assert.NoError(t, SetDefaultGlobalConfigValues(global(true, 0, 2)), "an iBGP limit alone is enough")
+	assert.NoError(t, SetDefaultGlobalConfigValues(global(true, 4, 2)), "both may be set")
+	assert.NoError(t, SetDefaultGlobalConfigValues(global(false, 0, 0)), "disabled needs no limit")
+	assert.Error(t, SetDefaultGlobalConfigValues(global(false, 4, 0)),
+		"an eBGP limit without multipath does nothing and must be refused")
+	assert.Error(t, SetDefaultGlobalConfigValues(global(false, 0, 2)),
+		"an iBGP limit without multipath does nothing and must be refused")
+
+	// And a config file saying so fails when it is read, not later.
+	_, err := ReadConfig(strings.NewReader(`
+[global.config]
+  as = 65001
+  router-id = "10.0.0.1"
+[global.use-multiple-paths.config]
+  enabled = true
+`), "toml")
+	assert.Error(t, err, "a config file enabling multipath without a limit must fail to load")
+
+	_, err = ReadConfig(strings.NewReader(`
+[global.config]
+  as = 65001
+  router-id = "10.0.0.1"
+[global.use-multiple-paths.ebgp.config]
+  maximum-paths = 4
+`), "toml")
+	assert.Error(t, err, "a config file setting a limit without multipath must fail to load")
+}
+
+// A config file setting a removed leaf fails to load.
+//
+// Each of these was accepted, stored and acted on by nothing, so a file that
+// set one read as configured and changed nothing. They are removed from the
+// generated model, and the loader's UnmarshalExact rejects an unknown key - so
+// the operator hears about it at load time instead of never.
+//
+// Every case is one real instantiation of a removed leaf. The positive controls
+// at the end are what stop this passing because every file fails.
+func TestRemovedLeavesAreRejected(t *testing.T) {
+	const global = `
+[global.config]
+  as = 65001
+  router-id = "10.0.0.1"
+`
+	const neighbor = `
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "10.0.0.2"
+    peer-as = 65002
+`
+	const peerGroup = `
+[[peer-groups]]
+  [peer-groups.config]
+    peer-group-name = "g"
+    peer-as = 65002
+`
+	for name, body := range map[string]string{
+		"neighbor route-flap-damping": global + neighbor + `
+    route-flap-damping = true
+`,
+		"peer-group route-flap-damping": global + peerGroup + `
+    route-flap-damping = true
+`,
+		"neighbor minimum-advertisement-interval": global + neighbor + `
+  [neighbors.timers.config]
+    minimum-advertisement-interval = 30
+`,
+		"peer-group minimum-advertisement-interval": global + peerGroup + `
+  [peer-groups.timers.config]
+    minimum-advertisement-interval = 30
+`,
+		"neighbor error-handling": global + neighbor + `
+  [neighbors.error-handling.config]
+    treat-as-withdraw = false
+`,
+		"neighbor logging-options": global + neighbor + `
+  [neighbors.logging-options.config]
+    log-neighbor-state-changes = false
+`,
+		"neighbor use-multiple-paths": global + neighbor + `
+  [neighbors.use-multiple-paths.config]
+    enabled = true
+`,
+		"peer-group use-multiple-paths": global + peerGroup + `
+  [peer-groups.use-multiple-paths.config]
+    enabled = true
+`,
+		"global allow-multiple-as": global + `
+[global.use-multiple-paths.ebgp.config]
+  allow-multiple-as = true
+`,
+		"afi-safi use-multiple-paths": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.use-multiple-paths.config]
+      enabled = true
+`,
+		"afi-safi route-selection-options": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.route-selection-options.config]
+    always-compare-med = true
+`,
+		// The per-family containers inside an afi-safi were never read -
+		// send-default-route lived only there, and only the afi-safi's own
+		// prefix-limit is applied - so the containers themselves are gone.
+		"send-default-route": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.ipv4-unicast.config]
+      send-default-route = true
+`,
+		"per-family prefix-limit": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.ipv4-unicast.prefix-limit.config]
+      max-prefixes = 100
+`,
+		"per-family l2vpn-evpn": global + peerGroup + `
+  [[peer-groups.afi-safis]]
+    [peer-groups.afi-safis.config]
+      afi-safi-name = "l2vpn-evpn"
+    [peer-groups.afi-safis.l2vpn-evpn.prefix-limit.config]
+      max-prefixes = 100
+`,
+		"prefix-limit restart-timer": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.prefix-limit.config]
+      max-prefixes = 100
+      restart-timer = 30
+`,
+		"global advertise-inactive-routes": global + `
+[global.route-selection-options.config]
+  advertise-inactive-routes = true
+`,
+		"global enable-aigp": global + `
+[global.route-selection-options.config]
+  enable-aigp = true
+`,
+		"global ignore-next-hop-igp-metric": global + `
+[global.route-selection-options.config]
+  ignore-next-hop-igp-metric = true
+`,
+		"global default-route-distance": global + `
+[global.default-route-distance.config]
+  external-route-distance = 20
+  internal-route-distance = 200
+`,
+		"global afi-safi prefix-limit": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.prefix-limit.config]
+    max-prefixes = 100
+`,
+		"global afi-safi add-paths": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.add-paths.config]
+    send-max = 2
+`,
+		"global afi-safi mp-graceful-restart": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.mp-graceful-restart.config]
+    enabled = true
+`,
+		"global afi-safi long-lived-graceful-restart": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.long-lived-graceful-restart.config]
+    enabled = true
+`,
+		"global afi-safi apply-policy": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.apply-policy.config]
+    default-import-policy = "reject-route"
+`,
+		"global afi-safi route-target-membership": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+  [global.afi-safis.route-target-membership.config]
+    deferral-time = 10
+`,
+		"global afi-safi enabled = false": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+    enabled = false
+`,
+		"neighbor mtu-discovery": global + neighbor + `
+  [neighbors.transport.config]
+    mtu-discovery = true
+`,
+		"peer-group mtu-discovery": global + peerGroup + `
+  [peer-groups.transport.config]
+    mtu-discovery = true
+`,
+		"global long-lived graceful restart": global + `
+[global.graceful-restart.config]
+  enabled = true
+  long-lived-enabled = true
+`,
+		"neighbor afi-safi enabled = false": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+      enabled = false
+`,
+		"peer-group afi-safi enabled = false": global + peerGroup + `
+  [[peer-groups.afi-safis]]
+    [peer-groups.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+      enabled = false
+`,
+		"neighbor afi-safi apply-policy": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.apply-policy.config]
+      default-import-policy = "reject-route"
+`,
+		"rpki refresh-time": global + `
+[[rpki-servers]]
+  [rpki-servers.config]
+    address = "10.0.0.9"
+    port = 323
+    refresh-time = 30
+`,
+		"rpki hold-time": global + `
+[[rpki-servers]]
+  [rpki-servers.config]
+    address = "10.0.0.9"
+    port = 323
+    hold-time = 30
+`,
+		"rpki preference": global + `
+[[rpki-servers]]
+  [rpki-servers.config]
+    address = "10.0.0.9"
+    port = 323
+    preference = 5
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ReadConfig(strings.NewReader(body), "toml")
+			assert.Error(t, err, "a file setting a removed leaf must fail to load, not be silently accepted")
+		})
+	}
+
+	// Positive controls: what was kept still loads, including the siblings of
+	// every removed leaf.
+	for name, body := range map[string]string{
+		"global multipath with limits": global + `
+[global.use-multiple-paths.config]
+  enabled = true
+[global.use-multiple-paths.ebgp.config]
+  maximum-paths = 4
+[global.use-multiple-paths.ibgp.config]
+  maximum-paths = 2
+`,
+		"global route-selection-options": global + `
+[global.route-selection-options.config]
+  always-compare-med = true
+`,
+		// The afi-safi's own prefix-limit - the one updatePrefixLimitConfig
+		// actually applies.
+		"prefix-limit without restart-timer": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+    [neighbors.afi-safis.prefix-limit.config]
+      max-prefixes = 100
+`,
+		"neighbor timers without the interval": global + neighbor + `
+  [neighbors.timers.config]
+    hold-time = 90
+`,
+		"global afi-safi with only its name": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+`,
+		"global afi-safi with enabled = true": global + `
+[[global.afi-safis]]
+  [global.afi-safis.config]
+    afi-safi-name = "ipv4-unicast"
+    enabled = true
+`,
+		"neighbor afi-safi enabled = true": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+      enabled = true
+`,
+		"global graceful restart without long-lived": global + `
+[global.graceful-restart.config]
+  enabled = true
+  restart-time = 120
+`,
+		"neighbor transport without mtu-discovery": global + neighbor + `
+  [neighbors.transport.config]
+    passive-mode = true
+`,
+		"rpki server with record-lifetime": global + `
+[[rpki-servers]]
+  [rpki-servers.config]
+    address = "10.0.0.9"
+    port = 323
+    record-lifetime = 3600
+`,
+	} {
+		t.Run("kept: "+name, func(t *testing.T) {
+			_, err := ReadConfig(strings.NewReader(body), "toml")
+			assert.NoError(t, err)
+		})
+	}
 }

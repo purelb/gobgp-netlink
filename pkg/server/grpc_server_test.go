@@ -902,23 +902,6 @@ func TestPeerGroupInheritancePerConfigFieldOverAPI(t *testing.T) {
 			},
 		},
 		{
-			field:                         "route-flap-damping",
-			ownIndistinguishableFromGroup: true,
-			setOwn:                        func(c *api.PeerConf) { c.RouteFlapDamping = proto.Bool(true) },
-			setZero:                       func(c *api.PeerConf) { c.RouteFlapDamping = proto.Bool(false) },
-			setGroup:                      func(g *oc.PeerGroupConfig) { g.RouteFlapDamping = true },
-			wantOwn: func(t *testing.T, n *oc.Neighbor) {
-				assert.True(t, n.Config.RouteFlapDamping)
-			},
-			wantInherited: func(t *testing.T, n *oc.Neighbor) {
-				assert.True(t, n.Config.RouteFlapDamping)
-			},
-			wantZero: func(t *testing.T, n *oc.Neighbor) {
-				assert.False(t, n.Config.RouteFlapDamping,
-					"an explicit false must survive a group that damps")
-			},
-		},
-		{
 			field:                         "send-software-version",
 			ownIndistinguishableFromGroup: true,
 			setOwn:                        func(c *api.PeerConf) { c.SendSoftwareVersion = proto.Bool(true) },

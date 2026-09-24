@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 
@@ -10,11 +11,98 @@ import (
 )
 
 func main() {
-	b := oc.Bgp{
+	out, err := example()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%v\n", out)
+}
+
+// example is the example configuration as TOML.
+//
+// The model's structs name their config keys only in mapstructure and json
+// tags, and the TOML encoder reads neither, so encoding the structs directly
+// printed Go field names - "RouterId" for "router-id" - and gobgpd refused the
+// file. The json tags match the loader's mapstructure names, so the structs go
+// through JSON first.
+func example() (string, error) {
+	var buffer bytes.Buffer
+	encoder := toml.NewEncoder(&buffer)
+	for _, v := range []any{bgp(), policy()} {
+		tree, err := configTree(v)
+		if err != nil {
+			return "", err
+		}
+		if err := encoder.Encode(tree); err != nil {
+			return "", err
+		}
+	}
+	return buffer.String(), nil
+}
+
+// configTree is v as the tree of keys a config file holds.
+func configTree(v any) (map[string]any, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	var tree map[string]any
+	if err := d.Decode(&tree); err != nil {
+		return nil, err
+	}
+	pruned, _ := prune(tree).(map[string]any)
+	return pruned, nil
+}
+
+// prune drops what JSON writes for a setting left unset - omitempty does not
+// apply to structs, so an unset block is {} and an unset address "", which the
+// loader cannot parse - and turns JSON numbers back into integers rather than
+// floats.
+func prune(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, e := range t {
+			if p := prune(e); p != nil && p != "" {
+				out[k] = p
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = prune(e)
+		}
+		return out
+	case json.Number:
+		if i, err := t.Int64(); err == nil {
+			return i
+		}
+		f, _ := t.Float64()
+		return f
+	}
+	return v
+}
+
+func bgp() oc.Bgp {
+	return oc.Bgp{
 		Global: oc.Global{
 			Config: oc.GlobalConfig{
 				As:       12332,
 				RouterId: netip.MustParseAddr("10.0.0.1"),
+			},
+			// Global, not on the neighbor: per-peer policy applies only to
+			// route-server clients, and gobgpd refuses it on any other peer.
+			ApplyPolicy: oc.ApplyPolicy{
+				Config: oc.ApplyPolicyConfig{
+					ImportPolicyList:    []string{"pd1"},
+					DefaultImportPolicy: oc.DEFAULT_POLICY_TYPE_ACCEPT_ROUTE,
+				},
 			},
 		},
 		Neighbors: []oc.Neighbor{
@@ -36,12 +124,6 @@ func main() {
 						},
 					},
 				},
-				ApplyPolicy: oc.ApplyPolicy{
-					Config: oc.ApplyPolicyConfig{
-						ImportPolicyList:    []string{"pd1"},
-						DefaultImportPolicy: oc.DEFAULT_POLICY_TYPE_ACCEPT_ROUTE,
-					},
-				},
 			},
 
 			{
@@ -61,19 +143,6 @@ func main() {
 			},
 		},
 	}
-
-	var buffer bytes.Buffer
-	encoder := toml.NewEncoder(&buffer)
-	err := encoder.Encode(b)
-	if err != nil {
-		panic(err)
-	}
-
-	err = encoder.Encode(policy())
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("%v\n", buffer.String())
 }
 
 func policy() oc.RoutingPolicy {

@@ -380,10 +380,18 @@ class GoBGPContainer(BGPContainer):
 
         self._merge_dict(config, self.bgp_config)
 
-        if self.zebra and self.zapi_version == 2:
-            config['global']['use-multiple-paths'] = {'config': {'enabled': True}}
-        else:
-            config['global']['use-multiple-paths'] = {'config': {'enabled': self.zebra_multipath_enabled}}
+        # gobgpd refuses use-multiple-paths without a maximum-paths for at
+        # least one peer type, and a maximum-paths without use-multiple-paths.
+        # These scenarios test which paths reach zebra, not the cap, so the
+        # limit sits above anything they advertise.
+        multipath_limits = {
+            'ebgp': {'config': {'maximum-paths': 64}},
+            'ibgp': {'config': {'maximum-paths': 64}},
+        }
+        multipath = bool((self.zebra and self.zapi_version == 2) or self.zebra_multipath_enabled)
+        config['global']['use-multiple-paths'] = {'config': {'enabled': multipath}}
+        if multipath:
+            config['global']['use-multiple-paths'].update(multipath_limits)
 
         for peer, info in self.peers.items():
             afi_safi_list = []
@@ -506,8 +514,11 @@ class GoBGPContainer(BGPContainer):
             for typ, d in info.get('default-policy', {}).items():
                 n['apply-policy']['config']['default-{0}-policy'.format(typ)] = _f(d)
 
-            if info['treat_as_withdraw']:
-                n['error-handling'] = {'config': {'treat-as-withdraw': True}}
+            # treat_as_withdraw needs nothing in the config: RFC 7606 revised
+            # error handling is always on in gobgpd, and the error-handling block
+            # that appeared to control it was removed from the model because it
+            # never reached the daemon. The option is still accepted so callers
+            # that ask for it keep working.
 
             config['neighbors'].append(n)
 

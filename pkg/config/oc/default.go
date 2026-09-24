@@ -39,9 +39,19 @@ const (
 	DEFAULT_CONNECT_RETRY             = 120
 )
 
+// forcedOverwrittenConfig names the fields a peer group owns unconditionally,
+// whether or not the member configured one.
+//
+// peer-as is here because it is session identity: a member of a group peers
+// with the AS the group names. minimum-advertisement-interval used to be here
+// too, which meant a member could set it, have it silently replaced by the
+// group's - usually zero, because groups rarely set it - and read the group's
+// value back for ever, so a controller comparing desired against observed
+// never converged. Nothing in this daemon reads the value, so removing it
+// changes no advertisement timing; it changes what a member is allowed to
+// state and have reported back.
 var forcedOverwrittenConfig = []string{
 	"neighbor.config.peer-as",
-	"neighbor.timers.config.minimum-advertisement-interval",
 }
 
 // configuredFields records which fields a TOML neighbor actually set, keyed by
@@ -277,10 +287,6 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 	n.AsPathOptions.State.AllowOwnAs = n.AsPathOptions.Config.AllowOwnAs
 	n.AsPathOptions.State.AllowAsPathLoopLocal = n.AsPathOptions.Config.AllowAsPathLoopLocal
 
-	if !v.IsSet("neighbor.error-handling.config.treat-as-withdraw") {
-		n.ErrorHandling.Config.TreatAsWithdraw = true
-	}
-
 	if !v.IsSet("neighbor.timers.config.connect-retry") && n.Timers.Config.ConnectRetry == 0 {
 		n.Timers.Config.ConnectRetry = float64(DEFAULT_CONNECT_RETRY)
 	}
@@ -423,6 +429,11 @@ func setDefaultNeighborConfigValuesWithViper(v *viper.Viper, n *Neighbor, g *Glo
 
 	n.State.Description = n.Config.Description
 	n.State.AdminDown = n.Config.AdminDown
+	// Never populated, and not only a reporting gap: WatchEvent's peer-group
+	// filter (server.go:5971, :6008) compares the requested group against this
+	// field, so it compared against "" and never matched. A client watching a
+	// peer group received nothing at all.
+	n.State.PeerGroup = n.Config.PeerGroup
 
 	if n.GracefulRestart.Config.Enabled {
 		if !v.IsSet("neighbor.graceful-restart.config.restart-time") && n.GracefulRestart.Config.RestartTime == 0 {
@@ -495,6 +506,12 @@ func SetPeerGroupStateValues(pg *PeerGroup, g *Global) error {
 		return err
 	}
 	pg.State.SendCommunity = pg.Config.SendCommunity
+	// Mirrored for the same reason as the four above: PeerGroupState is what
+	// ListPeerGroup reports, and these were declared there and populated by
+	// nothing, so a client read back five of eleven fields.
+	pg.State.PeerGroupName = pg.Config.PeerGroupName
+	pg.State.Description = pg.Config.Description
+	pg.State.RemovePrivateAs = pg.Config.RemovePrivateAs
 
 	if pg.RouteReflector.Config.RouteReflectorClient {
 		clusterId, err := getConfigClusterId(g, pg.RouteReflector.Config.RouteReflectorClusterId)
@@ -531,6 +548,96 @@ func getConfigClusterId(g *Global, configClusterId netip.Addr) (netip.Addr, erro
 	return configClusterId, nil
 }
 
+// validateAfiSafisEnabled refuses enabled = false on a neighbor's or peer
+// group's afi-safi.
+//
+// Every listed family is negotiated: capabilitiesFromConfig advertises
+// multiprotocol capability for each afi-safi in the list whatever this flag
+// says, and defaulting sets it true when absent. So false was ignored - the
+// family came up anyway, and ListPeer then stopped reporting its counts.
+//
+// Config files only. Over the API proto3 cannot tell false from absent, and
+// absent is what clients send, gobgp's own CLI included; refusing false there
+// would refuse them. A file states it explicitly, so it can be refused.
+func validateAfiSafisEnabled(v *viper.Viper) error {
+	for _, owner := range []string{"neighbors", "peer-groups"} {
+		owners, err := extractArray(v.Get(owner))
+		if err != nil {
+			return err
+		}
+		for i, o := range owners {
+			entry, ok := o.(map[string]any)
+			if !ok {
+				continue
+			}
+			afs, err := extractArray(entry["afi-safis"])
+			if err != nil {
+				return err
+			}
+			for j, af := range afs {
+				afm, _ := af.(map[string]any)
+				cfg, _ := afm["config"].(map[string]any)
+				if on, set := cfg["enabled"].(bool); set && !on {
+					return fmt.Errorf("%s[%d].afi-safis[%d].config.enabled = false is not supported: every listed "+
+						"family is negotiated; remove the family from the list instead", owner, i, j)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateGlobalAfiSafis refuses the parts of [[global.afi-safis]] that never
+// reach the daemon.
+//
+// InitialConfig hands the config file to StartBgp as an api.Global, and
+// api.Global carries the global address families as a list of family indexes
+// and nothing else. So each entry's afi-safi-name survives and every other
+// setting in it - prefix-limit, add-paths, graceful restart, apply-policy,
+// route-target membership - was parsed, stored and dropped on the way in.
+// config.enabled was dropped too: every listed family is enabled, so
+// enabled = false did nothing.
+//
+// The model cannot say this. AfiSafi is one generated Go type shared with the
+// neighbor and peer-group afi-safis, where all of these blocks work, so a
+// deviation at the global path leaves the fields on the type and the file keeps
+// accepting them. This check is how they are removed from the global level.
+//
+// enabled = true is let through: it states what happens anyway.
+func validateGlobalAfiSafis(v *viper.Viper) error {
+	list, err := extractArray(v.Get("global.afi-safis"))
+	if err != nil {
+		return err
+	}
+	for i, item := range list {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for key, val := range entry {
+			if key != "config" {
+				return fmt.Errorf("global.afi-safis[%d].%s is not supported: only afi-safi-name reaches the daemon at the "+
+					"global level; per-family settings belong under a neighbor or peer group", i, key)
+			}
+			cfg, _ := val.(map[string]any)
+			for ck, cv := range cfg {
+				switch ck {
+				case "afi-safi-name":
+				case "enabled":
+					if on, ok := cv.(bool); ok && on {
+						continue
+					}
+					return fmt.Errorf("global.afi-safis[%d].config.enabled = false is not supported: every listed family "+
+						"is enabled; remove the entry instead", i)
+				default:
+					return fmt.Errorf("global.afi-safis[%d].config.%s is not supported", i, ck)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func SetDefaultGlobalConfigValues(g *Global) error {
 	if len(g.AfiSafis) == 0 {
 		g.AfiSafis = []AfiSafi{}
@@ -545,6 +652,35 @@ func SetDefaultGlobalConfigValues(g *Global) error {
 
 	if len(g.Config.LocalAddressList) == 0 {
 		g.Config.LocalAddressList = []netip.Addr{netip.IPv4Unspecified(), netip.IPv6Unspecified()}
+	}
+
+	// Multipath with no limit on either peer type selects nothing it would
+	// not select anyway: an unset limit gives that type the single best path.
+	// Accepting it would be a switch that reads as on and does nothing, so it
+	// is refused. Called from both the config-file loader and StartBgp, so a
+	// file fails when it is read and an API request fails when it is sent.
+	// Long-lived graceful restart is never propagated from the global block:
+	// inheritance copies the rest of it and forces this off, because long-lived
+	// retention is measured in hours and one global line should not commit an
+	// entire fleet to it. So setting it here was accepted and did nothing. The
+	// field cannot be removed - the graceful-restart block is one type shared
+	// with the neighbor and peer-group blocks, where it works - so it is
+	// refused. Both the config loader and StartBgp come through here.
+	if g.GracefulRestart.Config.LongLivedEnabled {
+		return fmt.Errorf("global graceful-restart long-lived-enabled is not supported: long-lived graceful " +
+			"restart is never inherited from the global block; set it per neighbor or peer group")
+	}
+
+	mp := &g.UseMultiplePaths
+	if mp.Config.Enabled && mp.Ebgp.Config.MaximumPaths == 0 && mp.Ibgp.Config.MaximumPaths == 0 {
+		return fmt.Errorf("use-multiple-paths is enabled but neither ebgp nor ibgp maximum-paths is set; " +
+			"set at least one, or multipath selects only the single best path")
+	}
+	// And the inverse: a limit only caps the multipath set, so without
+	// multipath it was accepted, reported back, and did nothing.
+	if !mp.Config.Enabled && (mp.Ebgp.Config.MaximumPaths != 0 || mp.Ibgp.Config.MaximumPaths != 0) {
+		return fmt.Errorf("use-multiple-paths maximum-paths is set but use-multiple-paths is not enabled; " +
+			"enable it, or remove the limit")
 	}
 	return nil
 }
@@ -610,6 +746,13 @@ func setDefaultPolicyConfigValuesWithViper(v *viper.Viper, p *PolicyDefinition) 
 func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 	if v == nil {
 		v = viper.New()
+	}
+
+	if err := validateGlobalAfiSafis(v); err != nil {
+		return err
+	}
+	if err := validateAfiSafisEnabled(v); err != nil {
+		return err
 	}
 
 	if err := SetDefaultGlobalConfigValues(&b.Global); err != nil {
@@ -767,15 +910,12 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	overwriteConfig(&c.Config, &pg.Config, "neighbor.config", v)
 	overwriteConfig(&c.Timers.Config, &pg.Timers.Config, "neighbor.timers.config", v)
 	overwriteConfig(&c.Transport.Config, &pg.Transport.Config, "neighbor.transport.config", v)
-	overwriteConfig(&c.ErrorHandling.Config, &pg.ErrorHandling.Config, "neighbor.error-handling.config", v)
-	overwriteConfig(&c.LoggingOptions.Config, &pg.LoggingOptions.Config, "neighbor.logging-options.config", v)
 	overwriteConfig(&c.EbgpMultihop.Config, &pg.EbgpMultihop.Config, "neighbor.ebgp-multihop.config", v)
 	overwriteConfig(&c.RouteReflector.Config, &pg.RouteReflector.Config, "neighbor.route-reflector.config", v)
 	overwriteConfig(&c.AsPathOptions.Config, &pg.AsPathOptions.Config, "neighbor.as-path-options.config", v)
 	overwriteConfig(&c.AddPaths.Config, &pg.AddPaths.Config, "neighbor.add-paths.config", v)
 	overwriteConfig(&c.GracefulRestart.Config, &pg.GracefulRestart.Config, "neighbor.graceful-restart.config", v)
 	overwriteConfig(&c.ApplyPolicy.Config, &pg.ApplyPolicy.Config, "neighbor.apply-policy.config", v)
-	overwriteConfig(&c.UseMultiplePaths.Config, &pg.UseMultiplePaths.Config, "neighbor.use-multiple-paths.config", v)
 	overwriteConfig(&c.RouteServer.Config, &pg.RouteServer.Config, "neighbor.route-server.config", v)
 	overwriteConfig(&c.TtlSecurity.Config, &pg.TtlSecurity.Config, "neighbor.ttl-security.config", v)
 	// BFD is per-field like everything else again. It was gated on the
@@ -815,15 +955,12 @@ func OverwriteNeighborConfigWithPeerGroup(c *Neighbor, pg *PeerGroup) error {
 	}{
 		{"timers", c.Timers.Config},
 		{"transport", c.Transport.Config},
-		{"error-handling", c.ErrorHandling.Config},
-		{"logging-options", c.LoggingOptions.Config},
 		{"ebgp-multihop", c.EbgpMultihop.Config},
 		{"route-reflector", c.RouteReflector.Config},
 		{"as-path-options", c.AsPathOptions.Config},
 		{"add-paths", c.AddPaths.Config},
 		{"graceful-restart", c.GracefulRestart.Config},
 		{"apply-policy", c.ApplyPolicy.Config},
-		{"use-multiple-paths", c.UseMultiplePaths.Config},
 		{"route-server", c.RouteServer.Config},
 		{"ttl-security", c.TtlSecurity.Config},
 		{"bfd", c.Bfd.Config},
@@ -868,11 +1005,26 @@ func overwriteConfig(c, pg any, tagPrefix string, v *viper.Viper) {
 	for i := range pgType.NumField() {
 		field := pgType.Field(i).Name
 		tag := tagPrefix + "." + pgType.Field(i).Tag.Get("mapstructure")
-		if func() bool {
-			return slices.Contains(forcedOverwrittenConfig, tag)
-		}() || !v.IsSet(tag) {
+		forced := slices.Contains(forcedOverwrittenConfig, tag)
+		if forced || !v.IsSet(tag) {
 			if nField := nValue.FieldByName(field); nField.IsValid() {
-				nField.Set(pgValue.FieldByName(field))
+				pgField := pgValue.FieldByName(field)
+				// A forced field is owned by the peer group where the group
+				// states a value, not where it is silent. Forcing a zero over
+				// the member's own value is never what the group meant, and for
+				// peer-as - the only forced field - it is a security downgrade:
+				// peer-as 0 makes the FSM skip ASN negotiation entirely, so the
+				// peer chooses its own type from the OPEN it sends. Claiming our
+				// local AS then makes it iBGP, which keeps LOCAL_PREF and loses
+				// the eBGP TTL clamp.
+				//
+				// A peer group that configures timers and policy but leaves the
+				// remote AS to its members is an ordinary shape, and it silently
+				// disabled ASN validation for every member that set one.
+				if forced && pgField.IsZero() {
+					continue
+				}
+				nField.Set(pgField)
 			}
 		}
 	}

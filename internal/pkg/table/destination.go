@@ -33,6 +33,13 @@ import (
 var (
 	SelectionOptions oc.RouteSelectionOptionsConfig
 	UseMultiplePaths oc.UseMultiplePathsConfig
+	// The most paths getMultiBestPath returns, by the type of the best path.
+	// 0 means that type gets the single best path. Written once, by StartBgp,
+	// before any destination exists - like the two above, and for the same
+	// reason: a change would leave every existing destination's multipath set
+	// derived from the old value.
+	EbgpMaximumPaths uint32
+	IbgpMaximumPaths uint32
 )
 
 type BestPathReason uint8
@@ -611,12 +618,68 @@ func getMultiBestPath(id string, pathList []*Path) []*Path {
 	}
 	best := pathList[0]
 
-	// Attempt to find the first path that is both reachable and worse than the
-	// best path. Then return a slice paths from the best to that index.
-	index := sort.Search(len(pathList), func(i int) bool {
-		return pathList[i].IsNexthopInvalid || pathList[i].Compare(best) != 0
-	})
-	return pathList[:index]
+	// The multipath set is every reachable path whose cost equals the best
+	// path's, by Path.Compare - found by filtering the whole list, not by
+	// searching it.
+	//
+	// This used sort.Search, which is only valid over a list sorted by the
+	// predicate it is given. knownPathList is not: it is maintained sorted by
+	// the insert comparator chain, and that chain gates MED on the paths
+	// sharing a neighbouring AS, where Path.Compare compares MED always. So
+	// between eBGP paths from different ASes the list order and the tie
+	// relation disagree, and the binary search answered wrongly in both
+	// directions. Measured with real inserts:
+	//
+	//   [X med10, Y med20, Z med10, W med10] -> all four, Y is not a tie
+	//   [X med10, Y med20, Z med10]          -> X alone, Z is dropped
+	//
+	// A prefix scan stopping at the first non-tie would fix the first and not
+	// the second. Filtering is also what ListPath does to flag Best
+	// (server.go), so `gobgp global rib` and the multipath set now agree on
+	// which paths are best rather than disagreeing on exactly these lists.
+	//
+	// Order is preserved - best first, then knownPathList order - so a cap
+	// on the number of paths keeps the most preferred.
+	//
+	// Path.Compare's MED handling is deliberately left alone. Making it match
+	// the sort chain is a separate question with its own risk.
+	multi := make([]*Path, 0, len(pathList))
+	for _, p := range pathList {
+		if !p.IsNexthopInvalid && p.Compare(best) == 0 {
+			multi = append(multi, p)
+		}
+	}
+	return capMultiPath(best, multi)
+}
+
+// capMultiPath trims the tie set to the configured maximum for the best
+// path's type, keeping the most preferred.
+//
+// The limit is chosen once, from the best path. Path.Compare puts eBGP ahead
+// of iBGP, so a tie set never mixes the two and judging each member
+// separately would give the same answer at more cost.
+//
+// A locally originated best path is not capped. IsIBGP is false for it -
+// its source AS is zero - so it would otherwise fall under the eBGP limit,
+// which is not a statement anyone made about local routes.
+//
+// Confederation peers are external to IsIBGP and so take the eBGP limit, the
+// same classification Path.Compare gives them.
+func capMultiPath(best *Path, multi []*Path) []*Path {
+	if best.IsLocal() {
+		return multi
+	}
+	limit := EbgpMaximumPaths
+	if best.IsIBGP() {
+		limit = IbgpMaximumPaths
+	}
+	if limit == 0 {
+		limit = 1
+	}
+	if uint32(len(multi)) > limit {
+		multi = multi[:limit]
+	}
+	return multi
 }
 
 func (u *Update) GetWithdrawnPath() []*Path {

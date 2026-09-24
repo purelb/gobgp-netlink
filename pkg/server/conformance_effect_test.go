@@ -49,6 +49,7 @@ import (
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // wireEffectFields maps a per-peer setting that changes what is advertised to
@@ -77,7 +78,6 @@ var noWireEffect = map[string]string{
 	"PeerConf.peer_asn":                "session identity",
 	"PeerConf.peer_group":              "inheritance mechanism; the inherited fields carry the effect",
 	"PeerConf.type":                    "derived from the ASNs, not an input",
-	"PeerConf.route_flap_damping":      "not implemented in this daemon",
 	"PeerConf.neighbor_interface":      "transport selection, not a path attribute",
 	"PeerConf.vrf":                     "table selection; VRF import/export is covered by the RTC and VRF tests",
 	"PeerConf.allow_own_asn":           "ingress acceptance, not egress: it decides what we take, not what we send",
@@ -294,7 +294,7 @@ var peerBlockEffects = map[string]string{
 	"conf":             "classified field by field above",
 	"state":            "read-only operational state",
 	"timers":           "hold time and keepalive reach the OPEN; covered by the scenario tests",
-	"transport":        "local address, passive mode and TCP options reach the socket; mtu_discovery is recorded as inert in knownAsymmetries",
+	"transport":        "local address, passive mode and TCP options reach the socket",
 	"route_reflector":  "cluster id and client status change reflection; covered by the rr scenario test",
 	"route_server":     "decides which RIB the peer's routes enter, and whether they reach the kernel FIB",
 	"graceful_restart": "reaches the GR capability in the OPEN, per family; TestGracefulRestartSurvivesPeerGroupMembership and the oc inheritance matrix",
@@ -401,4 +401,430 @@ func TestEffectRemovePrivateAsAppliesToAlreadyAdvertisedRoutes(t *testing.T) {
 		"the route advertised before the change was never re-sent under it: %s", after)
 	assert.Contains(t, after.asPath, uint32(1000),
 		"only the private ASNs should have gone: %s", after)
+}
+
+// Sent withdrawal counters were two bugs stacked.
+//
+// counterStats.Sent.Withdraw{Update,Prefix} was declared, zeroed on reset,
+// copied into oc by toConfig and exported as bgp_sent_withdraw_update_total —
+// and incremented by nothing. Only the received side was, via bmpStatsUpdate.
+// The api literal for Sent then dropped both fields anyway, while the Received
+// literal beside it carried them.
+//
+// So the sent metrics read zero for the whole life of the fork, and would have
+// continued to read zero if only one of the two halves had been fixed.
+func TestEffectSentWithdrawCountersAreCounted(t *testing.T) {
+	const prefix = "10.67.0.0/24"
+	a, b := effectPeers(t, 10671, &api.PeerConf{})
+
+	advertise(t, a, prefix)
+	require.True(t, adjInOf(t, b, prefix).found, "the route must reach the peer first")
+
+	sentWithdraws := func(t *testing.T) (updates, prefixes uint64) {
+		t.Helper()
+		var p *api.Peer
+		require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }))
+		require.NotNil(t, p)
+		require.NotNil(t, p.State)
+		require.NotNil(t, p.State.Messages)
+		require.NotNil(t, p.State.Messages.Sent)
+		return p.State.Messages.Sent.WithdrawUpdate, p.State.Messages.Sent.WithdrawPrefix
+	}
+
+	u0, p0 := sentWithdraws(t)
+
+	// Delete the exact path that was advertised - DeletePath matches on the
+	// full path, so a bare NLRI is rejected with "nexthop not found".
+	var toDelete []*apiutil.Path
+	require.NoError(t, a.ListPath(apiutil.ListPathRequest{
+		TableType: api.TableType_TABLE_TYPE_GLOBAL,
+		Family:    bgp.RF_IPv4_UC,
+	}, func(n bgp.NLRI, paths []*apiutil.Path) {
+		if n.String() == prefix {
+			toDelete = append(toDelete, paths...)
+		}
+	}))
+	require.NotEmpty(t, toDelete, "the advertised path must be in the global RIB")
+	require.NoError(t, a.DeletePath(apiutil.DeletePathRequest{Paths: toDelete}))
+	time.Sleep(2 * time.Second)
+
+	u1, p1 := sentWithdraws(t)
+	assert.Greater(t, u1, u0, "withdrawing a route must count a sent withdraw UPDATE")
+	assert.Greater(t, p1, p0, "and the prefix it withdrew")
+}
+
+// The output queue depth is reported rather than hardcoded to zero.
+//
+// oc NeighborState.Queues was declared and written by nothing, so `gobgp
+// neighbor` printed "BGP OutQ = 0" for every peer forever, and PeerState.out_q
+// was likewise always zero.
+func TestEffectOutputQueueIsReported(t *testing.T) {
+	a, _ := effectPeers(t, 10681, &api.PeerConf{})
+
+	var p *api.Peer
+	require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+		func(x *api.Peer) { p = x }))
+	require.NotNil(t, p)
+	require.NotNil(t, p.State)
+
+	// An idle established session has an empty queue; what is asserted is that
+	// both fields are populated from the same source and agree, not that the
+	// depth is non-zero - a non-zero depth cannot be produced deterministically.
+	require.NotNil(t, p.State.Queues)
+	assert.Equal(t, p.State.Queues.Output, p.State.OutQ,
+		"out_q and queues.output are the same datum and must agree")
+}
+
+// PeerState's three netlink next-hop fields are reported.
+//
+// They have been declared since the netlink work landed and written by nothing,
+// because nothing populated table.PeerInfo either - which is the same reason
+// the RFC 2545 dual next hop this fork exists for was never emitted.
+func TestEffectNetlinkNexthopsAreReported(t *testing.T) {
+	a, _ := effectPeers(t, 10691, &api.PeerConf{})
+
+	var p *api.Peer
+	require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+		func(x *api.Peer) { p = x }))
+	require.NotNil(t, p)
+	require.NotNil(t, p.State)
+
+	// The session is over loopback, so the local address is 127.0.0.1 and the
+	// IPv4 next hop is that same address - which is exactly the invariant the
+	// preference for the local address is there to hold: a numbered session
+	// advertises the address it is sourced from, as it always did.
+	assert.Equal(t, "127.0.0.1", p.State.Ipv4Nexthop,
+		"the IPv4 next hop must be the session local address")
+
+	// lo carries no global or link-local IPv6, so these stay empty rather than
+	// reporting netip.Addr's zero value as the string "invalid IP".
+	assert.Empty(t, p.State.Ipv6Nexthop)
+	assert.Empty(t, p.State.Ipv6LinkLocalNexthop)
+}
+
+// And they survive a configuration change that rebuilds PeerInfo without
+// tearing the session down.
+//
+// updateNeighbor replaces the peer's PeerInfo snapshot wholesale when
+// remove-private-as changes on a live peer, and table.NewPeerInfo does not
+// carry the netlink next hops. Without carrying them over, an unrelated
+// configuration change silently reverts netlink-imported routes to the
+// fallback next hop and empties these three fields until the session flaps -
+// which is the same class of defect as never populating them at all, only
+// harder to notice.
+func TestEffectNetlinkNexthopsSurviveAConfigChange(t *testing.T) {
+	a, _ := effectPeers(t, 10711, &api.PeerConf{})
+
+	nexthop := func(t *testing.T) string {
+		t.Helper()
+		var p *api.Peer
+		require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }))
+		require.NotNil(t, p)
+		require.NotNil(t, p.State)
+		return p.State.Ipv4Nexthop
+	}
+
+	before := nexthop(t)
+	require.Equal(t, "127.0.0.1", before, "the next hop must be set before the change, or this proves nothing")
+
+	// remove-private-as is the one in-place change that rebuilds PeerInfo.
+	_, err := a.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "127.0.0.1",
+			PeerAsn:         65002,
+			RemovePrivate:   api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+		},
+		Transport: &api.Transport{PassiveMode: true},
+	}})
+	require.NoError(t, err)
+	time.Sleep(2 * time.Second)
+
+	assert.Equal(t, before, nexthop(t), "the next hop must survive an in-place configuration change")
+}
+
+// disconnect_reason and disconnect_message are reported by ListPeer.
+//
+// convertFSMStateReasonToAPI has existed since the fields were added, but its
+// only caller was the WatchEvent stream. A caller that polls ListPeer - which
+// is what k8gobgp does - got UNSPECIFIED and "" for every peer, up or down.
+func TestEffectDisconnectReasonIsReported(t *testing.T) {
+	a, _ := effectPeers(t, 10701, &api.PeerConf{})
+
+	peerState := func(t *testing.T) *api.PeerState {
+		t.Helper()
+		var p *api.Peer
+		require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }))
+		require.NotNil(t, p)
+		require.NotNil(t, p.State)
+		return p.State
+	}
+
+	// An established session has no disconnect to report. Asserting this is
+	// what stops the test passing on a constant.
+	st := peerState(t)
+	assert.Equal(t, api.PeerState_DISCONNECT_REASON_UNSPECIFIED, st.DisconnectReason,
+		"an established session reports no disconnect reason")
+	assert.Empty(t, st.DisconnectMessage)
+
+	require.NoError(t, a.ShutdownPeer(context.Background(),
+		&api.ShutdownPeerRequest{Address: "127.0.0.1", Communication: "test"}))
+
+	require.Eventually(t, func() bool {
+		return peerState(t).DisconnectReason != api.PeerState_DISCONNECT_REASON_UNSPECIFIED
+	}, 30*time.Second, 200*time.Millisecond, "the disconnect must be reported")
+
+	st = peerState(t)
+	assert.Equal(t, api.PeerState_DISCONNECT_REASON_NOTIFICATION_SENT, st.DisconnectReason)
+	assert.Contains(t, st.DisconnectMessage, "notification-sent",
+		"the message names the reason, not just the enum")
+}
+
+// A peer shut down for exceeding its prefix limit reports that as the reason.
+//
+// The adminStatePfxCt arm sent the CEASE and returned no state. sendNotification
+// closes the connection, so the session went down through whichever goroutine
+// noticed first - usually the reader, as read-failed - and the reason reported
+// was neither right nor stable. BMP saw the same wrong reason, so the
+// maximum-prefixes notification it should have carried to the station was
+// never attached.
+func TestEffectPrefixLimitShutdownIsReportedAsSuch(t *testing.T) {
+	const port = 10721
+
+	a := NewBgpServer()
+	go a.Serve()
+	require.NoError(t, a.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65001, RouterId: "1.1.1.1", ListenPort: port},
+	}))
+	t.Cleanup(func() { a.StopBgp(context.Background(), &api.StopBgpRequest{}) }) //nolint:errcheck
+
+	// One prefix allowed; the second one trips it.
+	require.NoError(t, a.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65002},
+		Transport: &api.Transport{PassiveMode: true},
+		AfiSafis: []*api.AfiSafi{{
+			Config: &api.AfiSafiConfig{
+				Family:  &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST},
+				Enabled: true,
+			},
+			PrefixLimits: &api.PrefixLimit{MaxPrefixes: 1},
+		}},
+	}}))
+
+	b := NewBgpServer()
+	go b.Serve()
+	require.NoError(t, b.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65002, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	t.Cleanup(func() { b.StopBgp(context.Background(), &api.StopBgpRequest{}) }) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(a, api.PeerState_SESSION_STATE_ESTABLISHED)
+	require.NoError(t, b.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65001},
+		Transport: &api.Transport{RemotePort: uint32(port)},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	advertise(t, b, "10.72.1.0/24")
+	advertise(t, b, "10.72.2.0/24")
+
+	var st *api.PeerState
+	require.Eventually(t, func() bool {
+		var p *api.Peer
+		if err := a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }); err != nil || p == nil || p.State == nil {
+			return false
+		}
+		st = p.State
+		return st.AdminState == api.PeerState_ADMIN_STATE_PFX_CT &&
+			st.DisconnectReason != api.PeerState_DISCONNECT_REASON_UNSPECIFIED
+	}, 30*time.Second, 200*time.Millisecond, "the prefix limit must shut the session down and say why")
+
+	assert.Equal(t, api.PeerState_DISCONNECT_REASON_NOTIFICATION_SENT, st.DisconnectReason,
+		"the session went down because this speaker sent a CEASE, not because a read or write failed")
+	assert.Contains(t, st.DisconnectMessage, "maximum number of prefixes reached",
+		"the message must name the CEASE subcode")
+}
+
+// Everything ListPeer reports about a live session is reported.
+//
+// The other half of the configuration-consumer registry. That one catches a
+// setting nothing acts on; this catches a value the daemon has and never
+// writes into the reply - the defect behind most of this release: description,
+// peer group, remove-private, both hold timers, the queue depth, the sent
+// withdrawal counters, the disconnect reason, the netlink next hops. Each was
+// in scope at the conversion and left out of the literal.
+//
+// The session is built to use as much as it can - a peer group, a
+// description, remove-private and send-community, routes and a withdrawal in
+// each direction - and then every scalar under PeerState and
+// TimersState must be non-zero. What legitimately stays zero on a healthy
+// session is listed with the reason and, where it matters, the test that does
+// assert it non-zero. A new field added to either message arrives here as a
+// failure until someone reports it or says why not.
+var reportedStateZeroOnAHealthySession = map[string]string{
+	"PeerState.auth_password_set":              "no MD5 on this session; server_authpassword_test.go asserts the flag",
+	"PeerState.bfd_state":                      "BFD is not run on this session; Test_BfdPeerStateSnapshotPopulatesEveryField asserts the snapshot",
+	"PeerState.disconnect_reason":              "the session has never gone down; TestEffectDisconnectReasonIsReported",
+	"PeerState.disconnect_message":             "the session has never gone down; TestEffectDisconnectReasonIsReported",
+	"PeerState.flops":                          "the session has never gone down",
+	"PeerState.ipv6_nexthop":                   "the session is over IPv4 loopback, which has no global IPv6 address; TestSetNetlinkNexthops",
+	"PeerState.ipv6_link_local_nexthop":        "as ipv6_nexthop; TestSetNetlinkNexthops",
+	"PeerState.out_q":                          "the output queue is empty on an idle session; TestEffectOutputQueueIsReported",
+	"PeerState.queues.output":                  "as out_q; TestEffectOutputQueueIsReported",
+	"PeerState.messages.received.notification": "a NOTIFICATION ends the session",
+	"PeerState.messages.sent.notification":     "a NOTIFICATION ends the session",
+	"PeerState.messages.received.discarded":    "nothing malformed was sent",
+	"PeerState.messages.sent.discarded":        "nothing was discarded",
+	"PeerState.messages.sent.refresh": "gobgpd never sends ROUTE-REFRESH: a soft reset in replays the stored " +
+		"Adj-RIB-In instead of asking the peer",
+	"PeerState.messages.received.refresh": "the peer here is gobgpd, which never sends one",
+	"TimersState.downtime":                "the session has never gone down",
+	"TimersState.uptime.nanos":            "uptime is recorded to the second",
+}
+
+func TestConformanceReportedStateIsComplete(t *testing.T) {
+	const port = 10801
+	ctx := context.Background()
+
+	a := NewBgpServer()
+	go a.Serve()
+	require.NoError(t, a.StartBgp(ctx, &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65001, RouterId: "1.1.1.1", ListenPort: port},
+	}))
+	t.Cleanup(func() { a.StopBgp(ctx, &api.StopBgpRequest{}) }) //nolint:errcheck
+
+	require.NoError(t, a.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65002},
+	}}))
+	require.NoError(t, a.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: "127.0.0.1",
+			PeerGroup:       "edge",
+			Description:     proto.String("state completeness"),
+			RemovePrivate:   api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+			SendCommunity:   proto.Uint32(2),
+		},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	b := NewBgpServer()
+	go b.Serve()
+	require.NoError(t, b.StartBgp(ctx, &api.StartBgpRequest{
+		Global: &api.Global{Asn: 65002, RouterId: "2.2.2.2", ListenPort: -1},
+	}))
+	t.Cleanup(func() { b.StopBgp(ctx, &api.StopBgpRequest{}) }) //nolint:errcheck
+
+	waiter := newPeerStateWaiter(a, api.PeerState_SESSION_STATE_ESTABLISHED)
+	require.NoError(t, b.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65001},
+		Transport: &api.Transport{RemotePort: port},
+		Timers:    &api.Timers{Config: &api.TimersConfig{ConnectRetry: 1, IdleHoldTimeAfterReset: 1}},
+	}}))
+	waiter.Wait(t, 30*time.Second)
+
+	// Traffic in both directions, and a withdrawal each way.
+	advertise(t, a, "10.80.1.0/24")
+	advertise(t, a, "10.80.2.0/24")
+	advertise(t, b, "10.80.3.0/24")
+	advertise(t, b, "10.80.4.0/24")
+	time.Sleep(2 * time.Second)
+	withdraw := func(s *BgpServer, prefix string) {
+		t.Helper()
+		var paths []*apiutil.Path
+		require.NoError(t, s.ListPath(apiutil.ListPathRequest{
+			TableType: api.TableType_TABLE_TYPE_GLOBAL, Family: bgp.RF_IPv4_UC,
+		}, func(n bgp.NLRI, ps []*apiutil.Path) {
+			if n.String() == prefix {
+				for _, p := range ps {
+					if p.PeerASN == 0 { // locally originated
+						paths = append(paths, p)
+					}
+				}
+			}
+		}))
+		require.NotEmpty(t, paths, "%s must be in the RIB to withdraw", prefix)
+		require.NoError(t, s.DeletePath(apiutil.DeletePathRequest{Paths: paths}))
+	}
+	withdraw(a, "10.80.2.0/24")
+	withdraw(b, "10.80.4.0/24")
+	time.Sleep(3 * time.Second)
+
+	var p *api.Peer
+	require.NoError(t, a.ListPeer(ctx, &api.ListPeerRequest{EnableAdvertised: true},
+		func(x *api.Peer) { p = x }))
+	require.NotNil(t, p)
+	require.NotNil(t, p.State)
+	require.NotNil(t, p.Timers)
+	require.NotNil(t, p.Timers.State)
+
+	seen := map[string]bool{}
+	var walk func(m protoreflect.Message, path string)
+	walk = func(m protoreflect.Message, path string) {
+		fields := m.Descriptor().Fields()
+		for i := range fields.Len() {
+			fd := fields.Get(i)
+			name := path + "." + string(fd.Name())
+			seen[name] = true
+			if _, ok := reportedStateZeroOnAHealthySession[name]; ok {
+				continue
+			}
+			if fd.Kind() == protoreflect.MessageKind && !fd.IsList() && !fd.IsMap() {
+				if assert.True(t, m.Has(fd), "%s is not reported", name) {
+					walk(m.Get(fd).Message(), name)
+				}
+				continue
+			}
+			assert.True(t, m.Has(fd),
+				"%s is zero on a live session that exercises it. Either the daemon knows it and does not "+
+					"write it into the reply, or it is legitimately zero here - then say why in "+
+					"reportedStateZeroOnAHealthySession.", name)
+		}
+	}
+	walk(p.State.ProtoReflect(), "PeerState")
+	walk(p.Timers.State.ProtoReflect(), "TimersState")
+
+	for name := range reportedStateZeroOnAHealthySession {
+		assert.True(t, seen[name], "reportedStateZeroOnAHealthySession names %s, which is not a reported field", name)
+	}
+}
+
+// A hold-time change on a live peer reaches the running session.
+//
+// It used to be stored and reported at once while the session kept negotiating
+// from the old value until it happened to restart: hold time is carried in the
+// OPEN and read only when the session establishes. It now rebuilds the
+// session, so the new value is negotiated immediately.
+func TestEffectHoldTimeChangeReachesTheSession(t *testing.T) {
+	a, _ := effectPeers(t, 10811, &api.PeerConf{})
+
+	negotiated := func(t *testing.T) uint64 {
+		t.Helper()
+		var p *api.Peer
+		require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }))
+		require.NotNil(t, p)
+		if p.State.SessionState != api.PeerState_SESSION_STATE_ESTABLISHED || p.Timers == nil || p.Timers.State == nil {
+			return 0
+		}
+		return p.Timers.State.NegotiatedHoldTime
+	}
+	require.EqualValues(t, 90, negotiated(t), "both sides start on the default")
+
+	_, err := a.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65002},
+		Transport: &api.Transport{PassiveMode: true},
+		// Hold time alone: keepalive stays at its default of 30, so the
+		// change to hold time is the only thing that can rebuild the session.
+		Timers: &api.Timers{Config: &api.TimersConfig{HoldTime: 60, KeepaliveInterval: 30}},
+	}})
+	require.NoError(t, err)
+
+	// The lower of the two offers is negotiated, so 60 is only reachable by a
+	// new OPEN from this side.
+	require.Eventually(t, func() bool { return negotiated(t) == 60 }, 60*time.Second, 250*time.Millisecond,
+		"the running session must renegotiate with the new hold time")
 }

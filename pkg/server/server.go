@@ -259,7 +259,10 @@ func NewBgpServer(opt ...ServerOption) *BgpServer {
 		logger:       logger,
 		logLevelVar:  lvl,
 		timingHook:   opts.timingHook,
-		shutdownWG:   &sync.WaitGroup{},
+		// Dropped once by an upstream merge, which silently turned the
+		// startup sweep off in the real daemon.
+		staleRouteCleanup: opts.staleRouteCleanup,
+		shutdownWG:        &sync.WaitGroup{},
 	}
 	s.bmpManager = newBmpClientManager(s)
 	s.mrtManager = newMrtManager(s)
@@ -976,6 +979,89 @@ func (s *BgpServer) notifyBestWatcher(best []*table.Path, multipath [][]*table.P
 	s.notifyWatcher(watchEventTypeBestPath, w)
 }
 
+// setNetlinkNexthops fills in the three nexthop addresses used to advertise a
+// route this daemon imported from the kernel.
+//
+// NewNetlinkPeerInfo says of these fields that they are "populated separately
+// when the session comes up". They were not - nothing assigned them anywhere,
+// and netutils.GetIPv4Nexthop/GetIPv6Nexthops had no callers at all. So
+// setNetlinkNexthop (table/path.go) found them nil on every netlink-originated
+// route, logged "no usable nexthop for a netlink-originated route" and fell
+// back to the plain local-address behaviour, which is why the RFC 2545 dual
+// nexthop this fork was written for has never been emitted and PeerState's
+// three nexthop fields have always been empty.
+//
+// The session's own local address is preferred wherever it is of the right
+// family, because that is the address the peer already routes to and is
+// exactly what the fallback used. The interface facing the peer supplies the
+// rest: the link-local half of the dual nexthop, and, on an unnumbered session
+// whose local address is a link-local of the other family, the global half too.
+// So a numbered session keeps the nexthop it has always advertised, and the
+// only values that change are the ones that were missing.
+//
+// Best effort: anything that cannot be resolved stays nil and setNetlinkNexthop
+// falls back exactly as before. Runs once per session establishment on the
+// server goroutine. Resolving the interface from the local address enumerates
+// every interface and its addresses, so name it in the configuration
+// (neighbor-interface or bind-interface) on a node with very many interfaces.
+func setNetlinkNexthops(logger *slog.Logger, info *table.PeerInfo, conf *oc.Neighbor) {
+	// Unmap: a session accepted on a dual-stack listener has a 16-byte
+	// IPv4-mapped local address, for which Is4 is false - so without this an
+	// ordinary IPv4 session would take the IPv6 arm below and advertise
+	// ::ffff:10.0.0.1 as its IPv6 next hop while leaving the IPv4 one unset.
+	local := conf.Transport.State.LocalAddress.Unmap()
+	if local.IsValid() {
+		switch {
+		case local.Is4():
+			info.IPv4Nexthop = net.IP(local.AsSlice())
+		case local.Is6() && local.IsGlobalUnicast():
+			info.IPv6Nexthop = net.IP(local.AsSlice())
+		}
+	}
+
+	iface := conf.Config.NeighborInterface
+	if iface == "" {
+		iface = conf.Transport.Config.BindInterface
+	}
+	if iface == "" {
+		if !local.IsValid() {
+			return
+		}
+		name, err := netutils.GetInterfaceByIP(net.IP(local.AsSlice()))
+		if err != nil {
+			logger.Debug("no interface found for the session local address; netlink nexthops left unset",
+				slog.String("Topic", "Peer"),
+				slog.String("LocalAddress", local.String()),
+				slog.Any("Error", err))
+			return
+		}
+		iface = name
+	}
+
+	if info.IPv4Nexthop == nil {
+		if v4, err := netutils.GetIPv4Nexthop(iface, logger); err == nil {
+			info.IPv4Nexthop = v4
+		}
+	}
+	v6, err := netutils.GetIPv6Nexthops(iface, logger)
+	if err != nil || v6 == nil {
+		return
+	}
+	if info.IPv6Nexthop == nil {
+		info.IPv6Nexthop = v6.Global
+	}
+	info.IPv6LinkLocalNexthop = v6.LinkLocal
+}
+
+// nexthopAddr converts one of PeerInfo's next hops for reporting. Unmap matters
+// because iface.Addrs() can hand back an IPv4 address in 16-byte form, which
+// AddrFromSlice turns into a 4-in-6 address that prints as "::ffff:10.0.0.1".
+// An unset next hop stays the zero Addr, which reports as an empty string.
+func nexthopAddr(ip net.IP) netip.Addr {
+	addr, _ := netip.AddrFromSlice(ip)
+	return addr.Unmap()
+}
+
 func (s *BgpServer) toConfig(peer *peer, getAdvertised bool) *oc.Neighbor {
 	// create copy which can be accessed without mutex
 	conf := peer.fsm.pConf.ReadCopy()
@@ -1038,6 +1124,33 @@ func (s *BgpServer) toConfig(peer *peer, getAdvertised bool) *oc.Neighbor {
 	conf.State.Messages.Sent.WithdrawPrefix = atomic.LoadUint32(&peer.fsm.counterStats.Sent.WithdrawPrefix)
 	conf.State.Messages.Sent.Discarded = atomic.LoadUint64(&peer.fsm.counterStats.Sent.Discarded)
 	conf.Timers.State.UpdateRecvTime = atomic.LoadInt64(&peer.fsm.timerStats.State.UpdateRecvTime)
+
+	// Queue depth. oc NeighborState.Queues was declared and written by nothing,
+	// so `gobgp neighbor` has always printed "BGP OutQ = 0" - it reads
+	// State.Queues.Output (cmd/gobgp/neighbor.go) - and PeerState.out_q was
+	// likewise always zero.
+	//
+	// Len() is a rendezvous with the channel's pump goroutine rather than a
+	// cached counter, but the pump's select always offers the length case so it
+	// cannot be starved, and it returns 0 promptly once the channel is closed.
+	// A hand-maintained counter would need six touch points - two enqueues, two
+	// dequeues and two bulk drains - and a counter that drifts reports a
+	// plausible wrong number, which is worse than reporting none.
+	//
+	// Input has no source: inbound messages are delivered by callback, not
+	// queued, so there is no receive queue to measure. Queues.input is removed
+	// from the proto rather than reported as a permanent zero.
+	conf.State.Queues.Output = uint32(peer.fsm.outgoingCh.Len())
+
+	// The three next hops a netlink-imported route is advertised with, resolved
+	// once at session establishment by setNetlinkNexthops. Reported so an
+	// operator can see what this session will put in NEXT_HOP before a kernel
+	// route shows up, rather than having to read it off a received update.
+	if info := peer.peerInfo.Load(); info != nil {
+		conf.State.Ipv4Nexthop = nexthopAddr(info.IPv4Nexthop)
+		conf.State.Ipv6Nexthop = nexthopAddr(info.IPv6Nexthop)
+		conf.State.Ipv6LinkLocalNexthop = nexthopAddr(info.IPv6LinkLocalNexthop)
+	}
 
 	if s.bfdServer != nil {
 		bfdPeer, err := s.bfdServer.GetPeerState(conf.State.NeighborAddress)
@@ -1586,17 +1699,10 @@ func (s *BgpServer) propagateUpdate(peer *peer, pathList []*table.Path) {
 				// and concurrent across prefixes. The export client carries its
 				// own locks (e.mu, dampenMu, statsMu); see docs/dev/locking.md.
 				if s.netlinkExportClient != nil && !rs {
-					bestList, _, _, _, _ := dstsToPaths(table.GLOBAL_RIB_NAME, 0, dsts)
-					for _, best := range bestList {
-						// nil means the best path did not change, so there is
-						// nothing to program. It does NOT mean "withdrawn": a
-						// real withdrawal arrives non-nil with IsWithdraw set.
-						// Treating nil as a withdrawal would delete the kernel
-						// route on every duplicate update.
-						if best == nil {
-							continue
+					for _, dst := range dsts {
+						if u, ok := netlinkExportUpdate(dst); ok {
+							s.netlinkExportClient.scheduleUpdate(u)
 						}
-						s.netlinkExportClient.scheduleUpdate(best)
 					}
 				}
 			}
@@ -1712,6 +1818,60 @@ func dstsToPaths(id string, as uint32, dsts []*table.Update) ([]*table.Path, []*
 		}
 	}
 	return bestList, oldList, mpathList, multipathUpdate, multipathWithdraw
+}
+
+// netlinkExportUpdate turns one destination's change into the state the kernel
+// route for it should be programmed to, or reports that there is nothing to do.
+//
+// Export used to be driven by the best path alone, so a change to the
+// multipath set that left the best path where it was - a second peer
+// advertising a tying path, or a non-best tie withdrawing - never reached the
+// kernel at all, and nor did anything but the best path's own gateway.
+//
+// With use-multiple-paths the state is the multipath set, which GetChanges
+// returns whenever it differs from before (already capped by maximum-paths).
+// Without it, the state is the best path alone, exactly as before. Either way
+// an empty set means remove the route.
+func netlinkExportUpdate(dst *table.Update) (exportUpdate, bool) {
+	best, _, multi := dst.GetChanges(table.GLOBAL_RIB_NAME, 0, false)
+
+	if table.UseMultiplePaths.Enabled {
+		// nil: the multipath set did not change. When the new set is empty,
+		// GetChanges hands back the withdrawn best path in its place.
+		if multi == nil {
+			return exportUpdate{}, false
+		}
+		var live []*table.Path
+		var ref *table.Path
+		for _, p := range multi {
+			if p == nil {
+				continue
+			}
+			if ref == nil {
+				ref = p
+			}
+			if !p.IsWithdraw {
+				live = append(live, p)
+			}
+		}
+		if ref == nil {
+			// No path now and none before: nothing was ever exported.
+			return exportUpdate{}, false
+		}
+		return exportUpdate{ref: ref, paths: live}, true
+	}
+
+	// nil means the best path did not change, so there is nothing to program.
+	// It does NOT mean "withdrawn": a real withdrawal arrives non-nil with
+	// IsWithdraw set. Treating nil as a withdrawal would delete the kernel
+	// route on every duplicate update.
+	if best == nil {
+		return exportUpdate{}, false
+	}
+	if best.IsWithdraw {
+		return exportUpdate{ref: best}, true
+	}
+	return exportUpdate{ref: best, paths: []*table.Path{best}}, true
 }
 
 func (s *BgpServer) propagateUpdateToNeighbors(rib *table.TableManager, source *peer, newPath *table.Path, dsts []*table.Update, needOld bool) {
@@ -2094,6 +2254,7 @@ func (s *BgpServer) handleFSMMessage(peer *peer, e *fsmMsg) {
 				conf.State.PeerAs, conf.Config.LocalAs,
 				conf.State.RemoteRouterId,
 				peer.fsm.gConf.Config.RouterId, conf.Transport.State.RemoteAddress, conf.Transport.State.LocalAddress)
+			setNetlinkNexthops(s.logger, peerInfo, conf)
 			peer.peerInfo.Store(peerInfo)
 
 			neighborAddress := conf.State.NeighborAddress
@@ -2570,12 +2731,18 @@ func (s *BgpServer) StopBgp(ctx context.Context, r *api.StopBgpRequest) error {
 			s.netlinkExportClient = nil
 		}
 
+		// Same reasoning, and it was missing: the ROA clients kept their
+		// goroutines, their TCP connections to the caches and an armed lifetime
+		// timer, all sending on an event channel that only Serve drains and that
+		// nothing drains once this closure returns.
+		s.roaManager.Stop()
+
 		for address, neighbor := range s.neighborMap {
 			c := &oc.Neighbor{Config: oc.NeighborConfig{
 				NeighborAddress: address,
 			}}
 			sendNotification := !r.AllowGracefulRestart || !neighbor.isGracefulRestartEnabled()
-			if err := s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, sendNotification); err != nil {
+			if err := s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, sendNotification, false); err != nil {
 				return err
 			}
 		}
@@ -3085,6 +3252,8 @@ func (s *BgpServer) StartBgp(ctx context.Context, r *api.StartBgpRequest) error 
 		// update route selection options
 		table.SelectionOptions = c.RouteSelectionOptions.Config
 		table.UseMultiplePaths = c.UseMultiplePaths.Config
+		table.EbgpMaximumPaths = c.UseMultiplePaths.Ebgp.Config.MaximumPaths
+		table.IbgpMaximumPaths = c.UseMultiplePaths.Ibgp.Config.MaximumPaths
 		if s.bfdServer != nil {
 			s.bfdServer.listenInterface = g.BindToDevice
 			if err := s.bfdServer.Start(ctx, oc.BfdConfig{Port: BfdServerPort}); err != nil {
@@ -3618,6 +3787,26 @@ func (s *BgpServer) ListPath(r apiutil.ListPathRequest, fn func(prefix bgp.NLRI,
 			knownPathList := dst.GetAllKnownPathList()
 			paths := make([]*apiutil.Path, len(knownPathList))
 
+			// The paths flagged Best beyond the first are the multipath set,
+			// taken from the function the RIB itself uses rather than
+			// re-derived here. This site used to test each path with
+			// Path.Compare against the best on its own, which disagreed with
+			// the RIB in two ways: it had no maximum-paths cap, so `gobgp
+			// global rib` would flag every tie Best while only the capped set
+			// was used; and it applied to every table type, so an adj-in view
+			// flagged tying paths Best beneath a first path that was not.
+			var multi map[*table.Path]bool
+			if table.UseMultiplePaths.Enabled {
+				switch r.TableType {
+				case api.TableType_TABLE_TYPE_LOCAL, api.TableType_TABLE_TYPE_GLOBAL:
+					set := dst.GetMultiBestPath(r.Name)
+					multi = make(map[*table.Path]bool, len(set))
+					for _, m := range set {
+						multi[m] = true
+					}
+				}
+			}
+
 			for i, path := range knownPathList {
 				p := toPathApiUtil(path)
 				if validation := getValidation(v, path); validation != nil {
@@ -3629,7 +3818,7 @@ func (s *BgpServer) ListPath(r apiutil.ListPathRequest, fn func(prefix bgp.NLRI,
 						case api.TableType_TABLE_TYPE_LOCAL, api.TableType_TABLE_TYPE_GLOBAL:
 							p.Best = true
 						}
-					} else if s.bgpConfig.Global.UseMultiplePaths.Config.Enabled && path.Compare(knownPathList[0]) == 0 {
+					} else if multi[path] {
 						p.Best = true
 					}
 				}
@@ -3816,18 +4005,13 @@ func (s *BgpServer) GetBgp(ctx context.Context, r *api.GetBgpRequest) (rsp *api.
 
 				GracefulRestartInheritToNeighbors: g.Config.GracefulRestartInheritToNeighbors,
 				Families:                          families,
+				EbgpMaximumPaths:                  g.UseMultiplePaths.Ebgp.Config.MaximumPaths,
+				IbgpMaximumPaths:                  g.UseMultiplePaths.Ibgp.Config.MaximumPaths,
 				RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 					AlwaysCompareMed:         g.RouteSelectionOptions.Config.AlwaysCompareMed,
 					IgnoreAsPathLength:       g.RouteSelectionOptions.Config.IgnoreAsPathLength,
 					ExternalCompareRouterId:  g.RouteSelectionOptions.Config.ExternalCompareRouterId,
-					AdvertiseInactiveRoutes:  g.RouteSelectionOptions.Config.AdvertiseInactiveRoutes,
-					EnableAigp:               g.RouteSelectionOptions.Config.EnableAigp,
-					IgnoreNextHopIgpMetric:   g.RouteSelectionOptions.Config.IgnoreNextHopIgpMetric,
 					DisableBestPathSelection: g.RouteSelectionOptions.Config.DisableBestPathSelection,
-				},
-				DefaultRouteDistance: &api.DefaultRouteDistance{
-					ExternalRouteDistance: uint32(g.DefaultRouteDistance.Config.ExternalRouteDistance),
-					InternalRouteDistance: uint32(g.DefaultRouteDistance.Config.InternalRouteDistance),
 				},
 				Confederation: &api.Confederation{
 					Enabled:      g.Confederation.Config.Enabled,
@@ -4121,6 +4305,13 @@ func (s *BgpServer) ListPeer(ctx context.Context, r *api.ListPeerRequest, fn fun
 			if p.Conf != nil {
 				p.Conf.AuthPassword = proto.String("")
 			}
+			// Why this session last went down. Recorded by fsm.stateChange;
+			// see the comment there for why only disconnect reasons are kept.
+			if p.State != nil {
+				reason, message := convertFSMStateReasonToAPI(peer.fsm.lastStateReason.Load())
+				p.State.DisconnectReason = reason
+				p.State.DisconnectMessage = message
+			}
 			for _, family := range peer.configuredRFlist() {
 				for i, afisafi := range p.AfiSafis {
 					if !afisafi.Config.Enabled {
@@ -4203,6 +4394,34 @@ func (s *BgpServer) setPeerPolicy(peer *peer, a oc.ApplyPolicy) error {
 	return s.policy.SetPeerPolicy(peer.ID(), a)
 }
 
+// refusePeerPolicy refuses a per-peer import or export policy on a peer that
+// would ignore it.
+//
+// setPeerPolicy installs per-peer policy only for route-server clients; every
+// other peer is governed by the global table's policy alone. That is GoBGP's
+// design, and it meant a policy attached to an ordinary neighbor or peer group
+// was accepted, stored, reported back by ListPeer, and never applied - an
+// import policy meant to filter a peer's routes filtered nothing.
+//
+// Checked on the resolved configuration, after peer-group inheritance. A
+// peer group is a template and may carry a policy for its route-server
+// members; the refusal lands on a member that would ignore it, not on the
+// group. "No policy" is an empty block: nothing defaults a per-peer policy,
+// and an absent one survives the config file's round trip through api.Peer as
+// empty.
+func refusePeerPolicy(routeServerClient bool, p oc.ApplyPolicyConfig) error {
+	if routeServerClient {
+		return nil
+	}
+	if len(p.ImportPolicyList) == 0 && len(p.ExportPolicyList) == 0 &&
+		p.DefaultImportPolicy == "" && p.DefaultExportPolicy == "" {
+		return nil
+	}
+	return fmt.Errorf("apply-policy is not supported on a peer that is not a route-server client: " +
+		"per-peer import and export policy is applied only to route-server clients, and would be ignored here; " +
+		"attach the policy to the global table instead")
+}
+
 func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 	// Resolve config defaults BEFORE extracting/validating the neighbor address.
 	// For an unnumbered (interface-only) neighbor added via the gRPC AddPeer API
@@ -4223,6 +4442,9 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 
 	if err := oc.SetDefaultNeighborConfigValues(c, pgConf, &s.bgpConfig.Global); err != nil {
 		return err
+	}
+	if err := refusePeerPolicy(c.RouteServer.Config.RouteServerClient, c.ApplyPolicy.Config); err != nil {
+		return fmt.Errorf("neighbor %s: %w", c.State.NeighborAddress, err)
 	}
 
 	addr, err := c.ExtractNeighborAddress()
@@ -4260,20 +4482,6 @@ func (s *BgpServer) addNeighbor(c *oc.Neighbor) error {
 					slog.Any("Families", inert))
 			}
 		}
-	}
-
-	// transport.mtu-discovery is declared in the proto and in the generated
-	// config model and is referenced nowhere else in the tree: no converter
-	// stores it, and no socket option is set from it. Accepting it silently
-	// leaves an operator believing path MTU discovery is on.
-	//
-	// Warned rather than rejected, because rejecting would break any config
-	// that already sets it - and those configs have been getting nothing all
-	// along, so an error now would be a new failure for no new benefit.
-	if c.Transport.Config.MtuDiscovery {
-		s.logger.Warn("transport mtu-discovery is accepted but not implemented; it has no effect. Use transport tcp-mss to constrain the segment size",
-			slog.String("Topic", "config"),
-			slog.String("Key", addr))
 	}
 
 	if vrf := c.Config.Vrf; vrf != "" {
@@ -4464,6 +4672,11 @@ func (s *BgpServer) AddDynamicNeighbor(ctx context.Context, r *api.AddDynamicNei
 		if !ok {
 			return fmt.Errorf("no such peer-group: %s", c.Config.PeerGroup)
 		}
+		// Every peer this accepts is built from the group alone, so the group's
+		// policy is exactly what each of them would ignore.
+		if err := refusePeerPolicy(pg.Conf.RouteServer.Config.RouteServerClient, pg.Conf.ApplyPolicy.Config); err != nil {
+			return fmt.Errorf("dynamic neighbor %s through peer group %s: %w", c.Config.Prefix, c.Config.PeerGroup, err)
+		}
 		pg.AddDynamicNeighbor(c)
 
 		pConf := pg.Conf
@@ -4501,7 +4714,12 @@ func (s *BgpServer) deletePeerGroup(name string) error {
 	return nil
 }
 
-func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNotification bool) error {
+// keepPresence distinguishes the two reasons this is called. Deleting a peer
+// means its configuration is gone and the field-presence recorded for it must
+// go too. Rebuilding a session during an update does not: the configuration
+// stays, and addNeighbor resolves it again on the way back in, so dropping
+// presence here hands the peer group every field the member owned.
+func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNotification, keepPresence bool) error {
 	if c.Config.PeerGroup != "" {
 		_, y := s.peerGroupMap[c.Config.PeerGroup]
 		if y {
@@ -4567,7 +4785,11 @@ func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNoti
 	// map before, so a peer deleted and re-added over the API inherited the
 	// presence of whatever TOML neighbor last held its address, and the peer
 	// group then lost fields it should have supplied.
-	oc.UnregisterConfiguredFields(addr)
+	//
+	// Not when this is the teardown half of an update: see keepPresence.
+	if !keepPresence {
+		oc.UnregisterConfiguredFields(addr)
+	}
 	return nil
 }
 
@@ -4613,7 +4835,7 @@ func (s *BgpServer) DeletePeer(ctx context.Context, r *api.DeletePeerRequest) er
 			NeighborAddress:   addr,
 			NeighborInterface: r.Interface,
 		}}
-		return s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, true)
+		return s.deleteNeighbor(c, bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_PEER_DECONFIGURED, true, false)
 	}, true)
 }
 
@@ -4706,6 +4928,9 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 	if err := oc.SetDefaultNeighborConfigValues(c, pgConf, &s.bgpConfig.Global); err != nil {
 		return needsSoftResetIn, err
 	}
+	if err := refusePeerPolicy(c.RouteServer.Config.RouteServerClient, c.ApplyPolicy.Config); err != nil {
+		return needsSoftResetIn, fmt.Errorf("neighbor %s: %w", c.State.NeighborAddress, err)
+	}
 
 	addr, err := c.ExtractNeighborAddress()
 	if err != nil {
@@ -4766,7 +4991,7 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 		peer.fsm.pConf.Update(&conf)
 		peer.fsm.lock.Unlock()
 
-		if err = s.deleteNeighbor(&conf, bgp.BGP_ERROR_CEASE, sub, true); err != nil {
+		if err = s.deleteNeighbor(&conf, bgp.BGP_ERROR_CEASE, sub, true, true); err != nil {
 			// rollback to original ApplyPolicy
 			peer.fsm.pConf.Update(original)
 
@@ -4864,10 +5089,23 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 		// the new snapshot rather than the old one.
 		if removePrivateAsChanged && peer.State() == bgp.BGP_FSM_ESTABLISHED {
 			updated := peer.fsm.pConf.ReadOnly()
-			peer.peerInfo.Store(table.NewPeerInfo(peer.fsm.gConf, updated,
+			info := table.NewPeerInfo(peer.fsm.gConf, updated,
 				updated.State.PeerAs, updated.Config.LocalAs,
 				updated.State.RemoteRouterId, peer.fsm.gConf.Config.RouterId,
-				updated.Transport.State.RemoteAddress, updated.Transport.State.LocalAddress))
+				updated.Transport.State.RemoteAddress, updated.Transport.State.LocalAddress)
+			// NewPeerInfo does not carry the netlink next hops, so replacing
+			// the snapshot wholesale would blank them until the next flap -
+			// silently reverting netlink-imported routes to the fallback next
+			// hop and emptying PeerState's three fields. The session is the
+			// same one, so the values resolved when it came up still hold and
+			// are carried over rather than re-resolved: this path must not go
+			// enumerating interfaces.
+			if prev := peer.peerInfo.Load(); prev != nil {
+				info.IPv4Nexthop = prev.IPv4Nexthop
+				info.IPv6Nexthop = prev.IPv6Nexthop
+				info.IPv6LinkLocalNexthop = prev.IPv6LinkLocalNexthop
+			}
+			peer.peerInfo.Store(info)
 		}
 
 		// Already-advertised routes were built under the old setting, so they
@@ -6839,10 +7077,21 @@ func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkE
 		// here as well as unreclaimable.
 		for prefix, entries := range vrfRoutes {
 			for _, info := range entries {
+				// An ECMP route carries its nexthops in MultiPath and leaves Gw
+				// nil, so reading Gw alone listed every ECMP route as "<nil>".
+				var nexthop string
+				var nexthops []string
+				for _, nh := range routeNexthopList(info.Route) {
+					nexthops = append(nexthops, nh.Gw.String())
+				}
+				if len(nexthops) == 1 {
+					nexthop = nexthops[0]
+				}
 				fn(&api.ListNetlinkExportResponse{
 					Route: &api.ListNetlinkExportResponse_ExportedRoute{
 						Prefix:     prefix,
-						Nexthop:    info.Route.Gw.String(),
+						Nexthop:    nexthop,
+						Nexthops:   nexthops,
 						Vrf:        vrfName,
 						TableId:    int32(info.Route.Table),
 						Metric:     uint32(info.Route.Priority),
@@ -7079,12 +7328,22 @@ func (s *BgpServer) startNetlink(ctx context.Context) error {
 		// Re-evaluate all existing RIB routes with the new rules
 		// This ensures routes are exported/withdrawn based on the updated configuration
 		if s.globalRib != nil {
-			pathList := s.globalRib.GetBestPathList(table.GLOBAL_RIB_NAME, 0, nil)
+			// The same selected sets steady-state export programs: the
+			// multipath set per prefix when use-multiple-paths is on, the best
+			// path alone otherwise.
+			var sets [][]*table.Path
+			if table.UseMultiplePaths.Enabled {
+				sets = s.globalRib.GetBestMultiPathList(table.GLOBAL_RIB_NAME, nil)
+			} else {
+				for _, best := range s.globalRib.GetBestPathList(table.GLOBAL_RIB_NAME, 0, nil) {
+					sets = append(sets, []*table.Path{best})
+				}
+			}
 			s.logger.Info("Triggering route re-evaluation after rule update",
 				slog.String("Topic", "netlink"),
-				slog.Int("PathCount", len(pathList)))
-			if len(pathList) > 0 {
-				s.netlinkExportClient.reEvaluateAllRoutes(pathList)
+				slog.Int("PrefixCount", len(sets)))
+			if len(sets) > 0 {
+				s.netlinkExportClient.reEvaluateAllRoutes(sets)
 			} else {
 				s.logger.Info("No routes in RIB to re-evaluate",
 					slog.String("Topic", "netlink"))

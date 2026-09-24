@@ -1084,51 +1084,18 @@ func readApplyPolicyFromAPIStruct(c *oc.ApplyPolicy, a *api.ApplyPolicy) {
 	}
 }
 
-func readRouteSelectionOptionsFromAPIStruct(c *oc.RouteSelectionOptions, a *api.RouteSelectionOptions) {
+func readRouteTargetMembershipFromAPIStruct(c *oc.RouteTargetMembership, a *api.RouteTargetMembership) error {
 	if c == nil || a == nil {
-		return
+		return nil
 	}
 	if a.Config != nil {
-		c.Config.AlwaysCompareMed = a.Config.AlwaysCompareMed
-		c.Config.IgnoreAsPathLength = a.Config.IgnoreAsPathLength
-		c.Config.ExternalCompareRouterId = a.Config.ExternalCompareRouterId
-		c.Config.AdvertiseInactiveRoutes = a.Config.AdvertiseInactiveRoutes
-		c.Config.EnableAigp = a.Config.EnableAigp
-		c.Config.IgnoreNextHopIgpMetric = a.Config.IgnoreNextHopIgpMetric
-	}
-}
-
-func readUseMultiplePathsFromAPIStruct(c *oc.UseMultiplePaths, a *api.UseMultiplePaths) {
-	if c == nil || a == nil {
-		return
-	}
-	if a.Config != nil {
-		c.Config.Enabled = a.Config.Enabled
-	}
-	if a.Ebgp != nil && a.Ebgp.Config != nil {
-		c.Ebgp = oc.Ebgp{
-			Config: oc.EbgpConfig{
-				AllowMultipleAs: a.Ebgp.Config.AllowMultipleAsn,
-				MaximumPaths:    a.Ebgp.Config.MaximumPaths,
-			},
+		v, err := narrowUint16("route_target_membership.deferral_time", a.Config.DeferralTime)
+		if err != nil {
+			return err
 		}
+		c.Config.DeferralTime = v
 	}
-	if a.Ibgp != nil && a.Ibgp.Config != nil {
-		c.Ibgp = oc.Ibgp{
-			Config: oc.IbgpConfig{
-				MaximumPaths: a.Ibgp.Config.MaximumPaths,
-			},
-		}
-	}
-}
-
-func readRouteTargetMembershipFromAPIStruct(c *oc.RouteTargetMembership, a *api.RouteTargetMembership) {
-	if c == nil || a == nil {
-		return
-	}
-	if a.Config != nil {
-		c.Config.DeferralTime = uint16(a.Config.DeferralTime)
-	}
+	return nil
 }
 
 func readLongLivedGracefulRestartFromAPIStruct(c *oc.LongLivedGracefulRestart, a *api.LongLivedGracefulRestart) {
@@ -1141,14 +1108,19 @@ func readLongLivedGracefulRestartFromAPIStruct(c *oc.LongLivedGracefulRestart, a
 	}
 }
 
-func readAddPathsFromAPIStruct(c *oc.AddPaths, a *api.AddPaths) {
+func readAddPathsFromAPIStruct(c *oc.AddPaths, a *api.AddPaths) error {
 	if c == nil || a == nil {
-		return
+		return nil
 	}
 	if a.Config != nil {
 		c.Config.Receive = a.Config.Receive
-		c.Config.SendMax = uint8(a.Config.SendMax)
+		v, err := narrowUint8("add_paths.send_max", a.Config.SendMax)
+		if err != nil {
+			return err
+		}
+		c.Config.SendMax = v
 	}
+	return nil
 }
 
 func PeerTypeFromApi(a api.PeerType) (oc.PeerType, error) {
@@ -1202,56 +1174,56 @@ func newBfdConfigFromAPIStruct(a *api.BfdPeerConfig) (oc.BfdConfig, error) {
 // to live in a second switch keyed by the same names, which returned nil for a
 // block it did not know - and MarkBlockConfigured panics on nil. Two lists that
 // had to agree, with nothing making them.
-var neighborPresenceBlocks = map[string]func(*api.Peer) map[string]any{
-	"timers": func(a *api.Peer) map[string]any {
+var neighborPresenceBlocks = map[string]func(*api.Peer) any{
+	"timers": func(a *api.Peer) any {
 		if a.Timers == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.TimersConfig{})
 	},
-	"transport": func(a *api.Peer) map[string]any {
+	"transport": func(a *api.Peer) any {
 		if a.Transport == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.TransportConfig{})
 	},
-	"ebgp-multihop": func(a *api.Peer) map[string]any {
+	"ebgp-multihop": func(a *api.Peer) any {
 		if a.EbgpMultihop == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.EbgpMultihopConfig{})
 	},
-	"route-reflector": func(a *api.Peer) map[string]any {
+	"route-reflector": func(a *api.Peer) any {
 		if a.RouteReflector == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.RouteReflectorConfig{})
 	},
-	"route-server": func(a *api.Peer) map[string]any {
+	"route-server": func(a *api.Peer) any {
 		if a.RouteServer == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.RouteServerConfig{})
 	},
-	"graceful-restart": func(a *api.Peer) map[string]any {
+	"graceful-restart": func(a *api.Peer) any {
 		if a.GracefulRestart == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.GracefulRestartConfig{})
 	},
-	"ttl-security": func(a *api.Peer) map[string]any {
+	"ttl-security": func(a *api.Peer) any {
 		if a.TtlSecurity == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.TtlSecurityConfig{})
 	},
-	"bfd": func(a *api.Peer) map[string]any {
+	"bfd": func(a *api.Peer) any {
 		if a.Bfd == nil {
 			return nil
 		}
 		return oc.MarkBlockConfigured(oc.BfdConfig{})
 	},
-	"apply-policy": func(a *api.Peer) map[string]any {
+	"apply-policy": func(a *api.Peer) any {
 		if a.ApplyPolicy == nil {
 			return nil
 		}
@@ -1263,7 +1235,7 @@ var neighborPresenceBlocks = map[string]func(*api.Peer) map[string]any{
 	// sent" is meaningless here and the fields carry explicit presence
 	// individually instead. Any one of them being present means the client is
 	// stating its as-path options, and the peer group does not override them.
-	"as-path-options": func(a *api.Peer) map[string]any {
+	"as-path-options": func(a *api.Peer) any {
 		if a.Conf == nil {
 			return nil
 		}
@@ -1278,7 +1250,36 @@ var neighborPresenceBlocks = map[string]func(*api.Peer) map[string]any{
 	// peer group name, so every request has one and "the block was sent" would
 	// mean no NeighborConfig field ever inherits. Presence is therefore taken
 	// per field, and flat - see configFieldsPresent.
-	configBlock: configFieldsPresent,
+	configBlock: func(a *api.Peer) any {
+		if f := configFieldsPresent(a); len(f) > 0 {
+			return f
+		}
+		return nil
+	},
+
+	// afi-safis is a list, not a block of fields, and inheritance replaces it
+	// wholesale: OverwriteNeighborConfigWithPeerGroup copies the group's list
+	// unless "neighbor.afi-safis" is set. Nothing ever set it, so a grouped
+	// neighbor's address families were always replaced by its group's.
+	//
+	// The value has to be a slice. setDefaultNeighborConfigValuesWithViper
+	// reads this same key back through extractArray, which rejects anything
+	// that is not []any or []map[string]any - a map here would turn AddPeer
+	// into an error rather than a silent overwrite.
+	//
+	// One empty entry per family sent. That is enough for IsSet to gate the
+	// inheritance, and leaves the per-family defaults deriving exactly as they
+	// do today, when extractArray gets nil and produces an empty list.
+	"afi-safis": func(a *api.Peer) any {
+		if len(a.AfiSafis) == 0 {
+			return nil
+		}
+		out := make([]any, len(a.AfiSafis))
+		for i := range out {
+			out[i] = map[string]any{}
+		}
+		return out
+	},
 }
 
 // configBlock is the NeighborConfig block's name, shared by the tables above
@@ -1297,7 +1298,6 @@ var neighborConfigFieldPresence = map[string]func(*api.Peer) bool{
 	"local-as":              func(a *api.Peer) bool { return a.Conf.LocalAsn != nil },
 	"auth-password":         func(a *api.Peer) bool { return a.Conf.AuthPassword != nil },
 	"remove-private-as":     func(a *api.Peer) bool { return a.Conf.RemovePrivate != nil },
-	"route-flap-damping":    func(a *api.Peer) bool { return a.Conf.RouteFlapDamping != nil },
 	"send-software-version": func(a *api.Peer) bool { return a.Conf.SendSoftwareVersion != nil },
 
 	// send_community has carried presence since it was added, for its own
@@ -1349,9 +1349,6 @@ func configFieldsPresent(a *api.Peer) map[string]any {
 var neighborBlocksWithNothingToRecord = map[string]string{
 	"add-paths": "add_paths exists only on api.AfiSafi, not on api.Peer, and readAddPathsFromAPIStruct is only " +
 		"called per family. Nothing can set the neighbor-level block over the API, so there is nothing to record.",
-	"error-handling":     "no field on api.Peer; nothing can set it over the API",
-	"logging-options":    "no field on api.Peer; nothing can set it over the API",
-	"use-multiple-paths": "no field on api.Peer; nothing can set it over the API",
 }
 
 // recordNeighborPresence tells the peer-group inheritance which blocks this
@@ -1375,7 +1372,7 @@ func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 	}
 	presence := map[string]any{}
 	for block, presenceOf := range neighborPresenceBlocks {
-		if v := presenceOf(a); len(v) > 0 {
+		if v := presenceOf(a); v != nil {
 			presence[block] = v
 		}
 	}
@@ -1385,14 +1382,37 @@ func recordNeighborPresence(a *api.Peer, pconf *oc.Neighbor) {
 	oc.RegisterConfiguredFields(key, presence)
 }
 
+// narrowUint8 and narrowUint16 convert an API-supplied integer to the narrower
+// type the configuration structs use, rejecting anything that would wrap.
+//
+// A plain conversion is silent and non-monotonic: ttl_min 257 became 1, which
+// reports GTSM as enabled while accepting from any hop count, and
+// multihop_ttl 256 became 0. The failure is always in the dangerous direction -
+// the operator asks for a strict value and gets a permissive one - and nothing
+// in the response says so.
+func narrowUint8(field string, v uint32) (uint8, error) {
+	if v > math.MaxUint8 {
+		return 0, fmt.Errorf("%s is out of range: %d", field, v)
+	}
+	return uint8(v), nil
+}
+
+func narrowUint16(field string, v uint32) (uint16, error) {
+	if v > math.MaxUint16 {
+		return 0, fmt.Errorf("%s is out of range: %d", field, v)
+	}
+	return uint16(v), nil
+}
+
 func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	pconf := &oc.Neighbor{}
+	// Function-scoped: the range-checked conversions below sit outside the
+	// a.Conf block and share it.
+	var err error
 	if a.Conf != nil {
-		var err error
 		pconf.Config.PeerAs = a.Conf.PeerAsn
 		pconf.Config.LocalAs = a.Conf.GetLocalAsn()
 		pconf.Config.AuthPassword = a.Conf.GetAuthPassword()
-		pconf.Config.RouteFlapDamping = a.Conf.GetRouteFlapDamping()
 		pconf.Config.SendCommunity = oc.SendCommunityFromAPI(a.Conf.SendCommunity)
 		pconf.Config.Description = a.Conf.GetDescription()
 		pconf.Config.PeerGroup = a.Conf.PeerGroup
@@ -1448,13 +1468,14 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 			readMpGracefulRestartFromAPIStruct(&afiSafi.MpGracefulRestart, af.MpGracefulRestart)
 			readAfiSafiConfigFromAPIStruct(&afiSafi.Config, af.Config)
 			readAfiSafiStateFromAPIStruct(&afiSafi.State, af.Config)
-			readApplyPolicyFromAPIStruct(&afiSafi.ApplyPolicy, af.ApplyPolicy)
-			readRouteSelectionOptionsFromAPIStruct(&afiSafi.RouteSelectionOptions, af.RouteSelectionOptions)
-			readUseMultiplePathsFromAPIStruct(&afiSafi.UseMultiplePaths, af.UseMultiplePaths)
 			readPrefixLimitFromAPIStruct(&afiSafi.PrefixLimit, af.PrefixLimits)
-			readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership)
+			if err := readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership); err != nil {
+				return nil, err
+			}
 			readLongLivedGracefulRestartFromAPIStruct(&afiSafi.LongLivedGracefulRestart, af.LongLivedGracefulRestart)
-			readAddPathsFromAPIStruct(&afiSafi.AddPaths, af.AddPaths)
+			if err := readAddPathsFromAPIStruct(&afiSafi.AddPaths, af.AddPaths); err != nil {
+				return nil, err
+			}
 			pconf.AfiSafis = append(pconf.AfiSafis, afiSafi)
 		}
 	}
@@ -1464,7 +1485,6 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 			pconf.Timers.Config.ConnectRetry = float64(a.Timers.Config.ConnectRetry)
 			pconf.Timers.Config.HoldTime = float64(a.Timers.Config.HoldTime)
 			pconf.Timers.Config.KeepaliveInterval = float64(a.Timers.Config.KeepaliveInterval)
-			pconf.Timers.Config.MinimumAdvertisementInterval = float64(a.Timers.Config.MinimumAdvertisementInterval)
 			pconf.Timers.Config.IdleHoldTimeAfterReset = float64(a.Timers.Config.IdleHoldTimeAfterReset)
 		}
 		if a.Timers.State != nil {
@@ -1484,9 +1504,13 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 	}
 	if a.GracefulRestart != nil {
 		pconf.GracefulRestart.Config.Enabled = a.GracefulRestart.Enabled
-		pconf.GracefulRestart.Config.RestartTime = uint16(a.GracefulRestart.RestartTime)
+		if pconf.GracefulRestart.Config.RestartTime, err = narrowUint16("graceful_restart.restart_time", a.GracefulRestart.RestartTime); err != nil {
+			return nil, err
+		}
 		pconf.GracefulRestart.Config.HelperOnly = a.GracefulRestart.HelperOnly
-		pconf.GracefulRestart.Config.DeferralTime = uint16(a.GracefulRestart.DeferralTime)
+		if pconf.GracefulRestart.Config.DeferralTime, err = narrowUint16("graceful_restart.deferral_time", a.GracefulRestart.DeferralTime); err != nil {
+			return nil, err
+		}
 		pconf.GracefulRestart.Config.StaleRoutesTime = float64(a.GracefulRestart.StaleRoutesTime)
 		pconf.GracefulRestart.Config.NotificationEnabled = a.GracefulRestart.NotificationEnabled
 		pconf.GracefulRestart.Config.LongLivedEnabled = a.GracefulRestart.LonglivedEnabled
@@ -1504,12 +1528,19 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		// is visible in ListPeer and "gobgp config running" and addNeighbor can
 		// warn that it does nothing. Dropping it silently was the worse option:
 		// the operator could not tell it had been ignored.
-		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
-		pconf.Transport.Config.RemotePort = uint16(a.Transport.RemotePort)
-		pconf.Transport.Config.LocalPort = uint16(a.Transport.LocalPort)
+		if pconf.Transport.Config.RemotePort, err = narrowUint16("transport.remote_port", a.Transport.RemotePort); err != nil {
+			return nil, err
+		}
+		if pconf.Transport.Config.LocalPort, err = narrowUint16("transport.local_port", a.Transport.LocalPort); err != nil {
+			return nil, err
+		}
 		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
-		pconf.Transport.Config.TcpMss = uint16(a.Transport.TcpMss)
-		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
+		if pconf.Transport.Config.TcpMss, err = narrowUint16("transport.tcp_mss", a.Transport.TcpMss); err != nil {
+			return nil, err
+		}
+		if pconf.Transport.Config.IpTos, err = narrowUint8("transport.ip_tos", a.Transport.IpTos); err != nil {
+			return nil, err
+		}
 	}
 	if a.EbgpMultihop != nil {
 		if a.EbgpMultihop.MultihopTtl > math.MaxUint8 {
@@ -1597,11 +1628,11 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 
 func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 	pconf := &oc.PeerGroup{}
+	var err error
 	if a.Conf != nil {
 		pconf.Config.PeerAs = a.Conf.PeerAsn
 		pconf.Config.LocalAs = a.Conf.LocalAsn
 		pconf.Config.AuthPassword = a.Conf.AuthPassword
-		pconf.Config.RouteFlapDamping = a.Conf.RouteFlapDamping
 		pconf.Config.SendCommunity = oc.SendCommunityFromAPI(a.Conf.SendCommunity)
 		pconf.Config.Description = a.Conf.Description
 		pconf.Config.PeerGroupName = a.Conf.PeerGroupName
@@ -1625,13 +1656,14 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 			readMpGracefulRestartFromAPIStruct(&afiSafi.MpGracefulRestart, af.MpGracefulRestart)
 			readAfiSafiConfigFromAPIStruct(&afiSafi.Config, af.Config)
 			readAfiSafiStateFromAPIStruct(&afiSafi.State, af.Config)
-			readApplyPolicyFromAPIStruct(&afiSafi.ApplyPolicy, af.ApplyPolicy)
-			readRouteSelectionOptionsFromAPIStruct(&afiSafi.RouteSelectionOptions, af.RouteSelectionOptions)
-			readUseMultiplePathsFromAPIStruct(&afiSafi.UseMultiplePaths, af.UseMultiplePaths)
 			readPrefixLimitFromAPIStruct(&afiSafi.PrefixLimit, af.PrefixLimits)
-			readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership)
+			if err := readRouteTargetMembershipFromAPIStruct(&afiSafi.RouteTargetMembership, af.RouteTargetMembership); err != nil {
+				return nil, err
+			}
 			readLongLivedGracefulRestartFromAPIStruct(&afiSafi.LongLivedGracefulRestart, af.LongLivedGracefulRestart)
-			readAddPathsFromAPIStruct(&afiSafi.AddPaths, af.AddPaths)
+			if err := readAddPathsFromAPIStruct(&afiSafi.AddPaths, af.AddPaths); err != nil {
+				return nil, err
+			}
 			pconf.AfiSafis = append(pconf.AfiSafis, afiSafi)
 		}
 	}
@@ -1641,7 +1673,6 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 			pconf.Timers.Config.ConnectRetry = float64(a.Timers.Config.ConnectRetry)
 			pconf.Timers.Config.HoldTime = float64(a.Timers.Config.HoldTime)
 			pconf.Timers.Config.KeepaliveInterval = float64(a.Timers.Config.KeepaliveInterval)
-			pconf.Timers.Config.MinimumAdvertisementInterval = float64(a.Timers.Config.MinimumAdvertisementInterval)
 			pconf.Timers.Config.IdleHoldTimeAfterReset = float64(a.Timers.Config.IdleHoldTimeAfterReset)
 		}
 		if a.Timers.State != nil {
@@ -1661,9 +1692,13 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 	}
 	if a.GracefulRestart != nil {
 		pconf.GracefulRestart.Config.Enabled = a.GracefulRestart.Enabled
-		pconf.GracefulRestart.Config.RestartTime = uint16(a.GracefulRestart.RestartTime)
+		if pconf.GracefulRestart.Config.RestartTime, err = narrowUint16("graceful_restart.restart_time", a.GracefulRestart.RestartTime); err != nil {
+			return nil, err
+		}
 		pconf.GracefulRestart.Config.HelperOnly = a.GracefulRestart.HelperOnly
-		pconf.GracefulRestart.Config.DeferralTime = uint16(a.GracefulRestart.DeferralTime)
+		if pconf.GracefulRestart.Config.DeferralTime, err = narrowUint16("graceful_restart.deferral_time", a.GracefulRestart.DeferralTime); err != nil {
+			return nil, err
+		}
 		pconf.GracefulRestart.Config.StaleRoutesTime = float64(a.GracefulRestart.StaleRoutesTime)
 		pconf.GracefulRestart.Config.NotificationEnabled = a.GracefulRestart.NotificationEnabled
 		pconf.GracefulRestart.Config.LongLivedEnabled = a.GracefulRestart.LonglivedEnabled
@@ -1681,11 +1716,16 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		// is visible in ListPeer and "gobgp config running" and addNeighbor can
 		// warn that it does nothing. Dropping it silently was the worse option:
 		// the operator could not tell it had been ignored.
-		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
-		pconf.Transport.Config.RemotePort = uint16(a.Transport.RemotePort)
+		if pconf.Transport.Config.RemotePort, err = narrowUint16("transport.remote_port", a.Transport.RemotePort); err != nil {
+			return nil, err
+		}
 		pconf.Transport.Config.BindInterface = a.Transport.BindInterface
-		pconf.Transport.Config.TcpMss = uint16(a.Transport.TcpMss)
-		pconf.Transport.Config.IpTos = uint8(a.Transport.IpTos)
+		if pconf.Transport.Config.TcpMss, err = narrowUint16("transport.tcp_mss", a.Transport.TcpMss); err != nil {
+			return nil, err
+		}
+		if pconf.Transport.Config.IpTos, err = narrowUint8("transport.ip_tos", a.Transport.IpTos); err != nil {
+			return nil, err
+		}
 	}
 	if a.EbgpMultihop != nil {
 		if a.EbgpMultihop.MultihopTtl > math.MaxUint8 {
@@ -1788,11 +1828,19 @@ func newPrefixFromApiStruct(a *api.Prefix) (*table.Prefix, error) {
 	default:
 		return nil, fmt.Errorf("prefix requires ip-prefix or rtc-prefix")
 	}
+	minLen, err := narrowUint8("prefix.mask_length_min", a.MaskLengthMin)
+	if err != nil {
+		return nil, err
+	}
+	maxLen, err := narrowUint8("prefix.mask_length_max", a.MaskLengthMax)
+	if err != nil {
+		return nil, err
+	}
 	return &table.Prefix{
 		Prefix:             prefix,
 		AddressFamily:      rf,
-		MasklengthRangeMin: uint8(a.MaskLengthMin),
-		MasklengthRangeMax: uint8(a.MaskLengthMax),
+		MasklengthRangeMin: minLen,
+		MasklengthRangeMax: maxLen,
 	}, nil
 }
 
@@ -2565,8 +2613,14 @@ func newAsPathPrependActionFromApiStruct(a *api.AsPrependAction) (*table.AsPathP
 	if a == nil {
 		return nil, nil
 	}
+	// 256 repeats became 0, which is "do not prepend at all" - the opposite of
+	// a very long prepend, and invisible in the response.
+	repeat, err := narrowUint8("as_prepend.repeat", a.Repeat)
+	if err != nil {
+		return nil, err
+	}
 	return table.NewAsPathPrependAction(oc.SetAsPathPrepend{
-		RepeatN: uint8(a.Repeat),
+		RepeatN: repeat,
 		As: func() string {
 			if a.UseLeftMost {
 				return "last-as"
@@ -2958,6 +3012,8 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 			Config: oc.UseMultiplePathsConfig{
 				Enabled: a.UseMultiplePaths,
 			},
+			Ebgp: oc.Ebgp{Config: oc.EbgpConfig{MaximumPaths: a.EbgpMaximumPaths}},
+			Ibgp: oc.Ibgp{Config: oc.IbgpConfig{MaximumPaths: a.IbgpMaximumPaths}},
 		},
 	}
 	if a.RouteSelectionOptions != nil {
@@ -2966,18 +3022,7 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 				AlwaysCompareMed:         a.RouteSelectionOptions.AlwaysCompareMed,
 				IgnoreAsPathLength:       a.RouteSelectionOptions.IgnoreAsPathLength,
 				ExternalCompareRouterId:  a.RouteSelectionOptions.ExternalCompareRouterId,
-				AdvertiseInactiveRoutes:  a.RouteSelectionOptions.AdvertiseInactiveRoutes,
-				EnableAigp:               a.RouteSelectionOptions.EnableAigp,
-				IgnoreNextHopIgpMetric:   a.RouteSelectionOptions.IgnoreNextHopIgpMetric,
 				DisableBestPathSelection: a.RouteSelectionOptions.DisableBestPathSelection,
-			},
-		}
-	}
-	if a.DefaultRouteDistance != nil {
-		global.DefaultRouteDistance = oc.DefaultRouteDistance{
-			Config: oc.DefaultRouteDistanceConfig{
-				ExternalRouteDistance: uint8(a.DefaultRouteDistance.ExternalRouteDistance),
-				InternalRouteDistance: uint8(a.DefaultRouteDistance.InternalRouteDistance),
 			},
 		}
 	}
@@ -2991,13 +3036,21 @@ func newGlobalFromAPIStruct(a *api.Global) (*oc.Global, error) {
 		}
 	}
 	if a.GracefulRestart != nil {
+		gRestart, err := narrowUint16("graceful_restart.restart_time", a.GracefulRestart.RestartTime)
+		if err != nil {
+			return nil, err
+		}
+		gDeferral, err := narrowUint16("graceful_restart.deferral_time", a.GracefulRestart.DeferralTime)
+		if err != nil {
+			return nil, err
+		}
 		global.GracefulRestart = oc.GracefulRestart{
 			Config: oc.GracefulRestartConfig{
 				Enabled:             a.GracefulRestart.Enabled,
-				RestartTime:         uint16(a.GracefulRestart.RestartTime),
+				RestartTime:         gRestart,
 				StaleRoutesTime:     float64(a.GracefulRestart.StaleRoutesTime),
 				HelperOnly:          a.GracefulRestart.HelperOnly,
-				DeferralTime:        uint16(a.GracefulRestart.DeferralTime),
+				DeferralTime:        gDeferral,
 				NotificationEnabled: a.GracefulRestart.NotificationEnabled,
 				LongLivedEnabled:    a.GracefulRestart.LonglivedEnabled,
 			},

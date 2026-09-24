@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"github.com/stretchr/testify/assert"
@@ -365,4 +366,32 @@ func Test_ParseFlowSpecRedirectToIP(t *testing.T) {
 	assert.Len(exts, 1)
 	_, isNew := exts[0].(*bgp.FlowSpecRedirectToIPv4Extended)
 	assert.False(isNew, "plain redirect must not produce the redirect-to-ip action")
+}
+
+// use-multipath always failed: the daemon refuses multipath without a limit,
+// and the CLI had no way to send one.
+func TestGlobalStartSendsTheMultipathLimits(t *testing.T) {
+	req, err := globalStartRequest(strings.Fields(
+		"as 65000 router-id 10.0.0.1 use-multipath ebgp-maximum-paths 4 ibgp-maximum-paths 2"))
+	assert.NoError(t, err)
+	assert.True(t, req.Global.UseMultiplePaths)
+	assert.Equal(t, uint32(4), req.Global.EbgpMaximumPaths)
+	assert.Equal(t, uint32(2), req.Global.IbgpMaximumPaths)
+
+	req, err = globalStartRequest(strings.Fields("as 65000 router-id 10.0.0.1 use-multipath ebgp-maximum-paths 4"))
+	assert.NoError(t, err)
+	assert.Equal(t, uint32(4), req.Global.EbgpMaximumPaths)
+	assert.Zero(t, req.Global.IbgpMaximumPaths, "an unset limit is sent as unset")
+
+	_, err = globalStartRequest(strings.Fields("as 65000 router-id 10.0.0.1 use-multipath ebgp-maximum-paths four"))
+	assert.ErrorContains(t, err, "invalid ebgp-maximum-paths")
+}
+
+// gobgp global printed "Multipath: enabled" and nothing about the limits,
+// which decide how many paths it selects.
+func TestGlobalShowsTheMultipathLimits(t *testing.T) {
+	assert.Equal(t, "Multipath: enabled, eBGP maximum-paths 2, iBGP maximum-paths not set",
+		multipathLine(&api.Global{UseMultiplePaths: true, EbgpMaximumPaths: 2}))
+	assert.Equal(t, "Multipath: enabled, eBGP maximum-paths not set, iBGP maximum-paths 8",
+		multipathLine(&api.Global{UseMultiplePaths: true, IbgpMaximumPaths: 8}))
 }

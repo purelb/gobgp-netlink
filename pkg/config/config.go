@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"reflect"
 
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/internal/pkg/table"
@@ -432,6 +433,58 @@ func InitialConfig(ctx context.Context, bgpServer *server.BgpServer, newConfig *
 	return newConfig, nil
 }
 
+// globalFieldsAppliedOnReload is the part of the [global] block a reload can
+// act on. Keyed by mapstructure tag, and deliberately the short list: the
+// fields are derived from oc.Global by reflection so that one added by an
+// upstream catch-up merge is reported as ignored by default rather than
+// silently joining the settings a reload drops on the floor.
+var globalFieldsAppliedOnReload = map[string]bool{
+	"apply-policy": true, // UpdateConfig applies it, just below
+	"state":        true, // read-only
+}
+
+// reportIgnoredGlobalChanges logs the [global] settings this reload will not
+// apply.
+//
+// StartBgp is the only writer of the server's global config, of
+// table.SelectionOptions and of table.UseMultiplePaths, and UpdateConfig
+// touches none of them. So editing any of [global] except apply-policy and
+// sending SIGHUP changed nothing at all, with no error and no log line, while
+// `gobgp global` went on reporting the old value - correctly, because the old
+// value is the one in force.
+//
+// Route selection in particular is restart-only by necessity rather than by
+// omission. A destination's knownPathList is *maintained* sorted by the
+// comparator chain and never re-sorted, and the comparators read these
+// globals, so flipping always-compare-med, ignore-as-path-length or
+// external-compare-router-id on a running daemon would leave every existing
+// destination ordered by the old relation while new insertions binary-search
+// with the new one: element 0 stops being the best path and nothing repairs
+// it. Applying the change needs a full RIB rebuild - re-sort every
+// destination, recompute best and multipath, re-advertise. Refusing it and
+// saying so is the honest alternative.
+//
+// Logged and never returned: main.go treats an error from UpdateConfig as a
+// reason to log a warning and continue, abandoning the rest of the reload, so
+// returning one would let a single unchangeable setting silently block every
+// other change in the file.
+func reportIgnoredGlobalChanges(logger *slog.Logger, old, new *oc.Global) {
+	o, n := reflect.ValueOf(*old), reflect.ValueOf(*new)
+	t := o.Type()
+	for i := range t.NumField() {
+		tag := t.Field(i).Tag.Get("mapstructure")
+		if tag == "" || globalFieldsAppliedOnReload[tag] {
+			continue
+		}
+		if reflect.DeepEqual(o.Field(i).Interface(), n.Field(i).Interface()) {
+			continue
+		}
+		logger.Error("global setting changed in the config file but cannot be applied to a running daemon; restart gobgpd for it to take effect. The rest of the reload is applied",
+			slog.String("Topic", "config"),
+			slog.String("Setting", "global."+tag))
+	}
+}
+
 // UpdateConfig updates the configuration of a running gobgp instance.
 // InitialConfig must have been called once before this can be called for
 // subsequent changes to config. The differences are that this call 1) does not
@@ -441,6 +494,8 @@ func InitialConfig(ctx context.Context, bgpServer *server.BgpServer, newConfig *
 // Reload keeps the previous runtime behavior: config apply errors are logged,
 // but they do not abort the running daemon or reject the whole reload.
 func UpdateConfig(ctx context.Context, bgpServer *server.BgpServer, c, newConfig *oc.BgpConfigSet) (*oc.BgpConfigSet, error) {
+	reportIgnoredGlobalChanges(bgpServer.Log(), &c.Global, &newConfig.Global)
+
 	addedPg, deletedPg, updatedPg := oc.UpdatePeerGroupConfig(bgpServer.Log(), c, newConfig)
 	added, deleted, updated := oc.UpdateNeighborConfig(bgpServer.Log(), c, newConfig)
 	addedVrf, deletedVrf, updatedVrf := oc.UpdateVrfConfig(bgpServer.Log(), c, newConfig)

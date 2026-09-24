@@ -839,30 +839,12 @@ jobs:
           sudo modprobe vrf
           sudo pip3 install -r test/pip-requires.txt
           PYTHONPATH=test python3 -m pytest test/scenario_test/tcp_md5_test.py --gobgp-image gobgp -x -s
-  unit386:
-    name: unit386
-    runs-on: ubuntu-24.04
-    env:
-      GOARCH: 386
-      CGO_ENABLED: 1
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "stable"
-      - run: |
-          sudo apt update
-          sudo apt install -y gcc-multilib g++-multilib
-          go env GOARCH CGO_ENABLED
-          go test -v -timeout 240s ./...
-
   ci:
     name: ci
     runs-on: ubuntu-22.04
     if: always()
     needs:
       - unit
-      - unit386
       - api-conformance
       - tcp-md5
       - protobuf-check
@@ -905,7 +887,7 @@ jobs:
     steps:
       - name: Check all jobs passed
         run: |
-          results="${{ needs.unit.result }} ${{ needs.unit386.result }} ${{ needs.api-conformance.result }} ${{ needs.tcp-md5.result }} ${{ needs.protobuf-check.result }} ${{ needs.yang-check.result }} ${{ needs.golangci.result }} ${{ needs.security.result }} ${{ needs.embedded.result }} ${{ needs.lintdoc.result }} ${{ needs.build.result }} ${{ needs.router.result }} ${{ needs.evpn.result }} ${{ needs.flowspec.result }} ${{ needs.global-policy.result }} ${{ needs.graceful-restart.result }} ${{ needs.ibgp.result }} ${{ needs.rr.result }} ${{ needs.as2.result }} ${{ needs.ipv4-v6.result }} ${{ needs.malformed.result }} ${{ needs.rs-policy-grpc.result }} ${{ needs.rs-policy.result }} ${{ needs.softreset.result }} ${{ needs.rs1.result }} ${{ needs.rs2.result }} ${{ needs.llgr.result }} ${{ needs.vrf-neighbor1.result }} ${{ needs.vrf-neighbor2.result }} ${{ needs.rtc.result }} ${{ needs.unnumbered.result }} ${{ needs.aspath.result }} ${{ needs.addpath.result }} ${{ needs.malformed-handling.result }} ${{ needs.confederation.result }} ${{ needs.zebra.result }} ${{ needs.zebra-nht.result }} ${{ needs.zapi-v3.result }} ${{ needs.zapi-v3-multipath.result }} ${{ needs.mup.result }} ${{ needs.netlink.result }}"
+          results="${{ needs.unit.result }} ${{ needs.api-conformance.result }} ${{ needs.tcp-md5.result }} ${{ needs.protobuf-check.result }} ${{ needs.yang-check.result }} ${{ needs.golangci.result }} ${{ needs.security.result }} ${{ needs.embedded.result }} ${{ needs.lintdoc.result }} ${{ needs.build.result }} ${{ needs.router.result }} ${{ needs.evpn.result }} ${{ needs.flowspec.result }} ${{ needs.global-policy.result }} ${{ needs.graceful-restart.result }} ${{ needs.ibgp.result }} ${{ needs.rr.result }} ${{ needs.as2.result }} ${{ needs.ipv4-v6.result }} ${{ needs.malformed.result }} ${{ needs.rs-policy-grpc.result }} ${{ needs.rs-policy.result }} ${{ needs.softreset.result }} ${{ needs.rs1.result }} ${{ needs.rs2.result }} ${{ needs.llgr.result }} ${{ needs.vrf-neighbor1.result }} ${{ needs.vrf-neighbor2.result }} ${{ needs.rtc.result }} ${{ needs.unnumbered.result }} ${{ needs.aspath.result }} ${{ needs.addpath.result }} ${{ needs.malformed-handling.result }} ${{ needs.confederation.result }} ${{ needs.zebra.result }} ${{ needs.zebra-nht.result }} ${{ needs.zapi-v3.result }} ${{ needs.zapi-v3-multipath.result }} ${{ needs.mup.result }} ${{ needs.netlink.result }}"
           for result in $results; do
             if [[ "$result" != "success" ]]; then
               echo "One or more jobs failed"

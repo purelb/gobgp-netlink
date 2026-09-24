@@ -20,11 +20,13 @@ package server
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"syscall"
 	"time"
 
 	go_netlink "github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // fakeNetlink is an in-memory stand-in for the kernel routing tables, satisfying
@@ -32,8 +34,9 @@ import (
 //
 // It models enough of the kernel's behaviour to make the export path testable:
 // routes are keyed the way the kernel identifies them (table, destination and
-// metric), RouteReplace is an upsert, and deleting an absent route returns ESRCH
-// as the kernel does.
+// metric), RouteReplace is an upsert, deleting an absent route returns ESRCH
+// as the kernel does, and an ONLINK nexthop without a device is refused as the
+// kernel refuses it.
 type fakeNetlink struct {
 	mu sync.Mutex
 
@@ -42,8 +45,12 @@ type fakeNetlink struct {
 	// links is the set of interfaces, by name. Only VRF links matter here.
 	links map[string]go_netlink.Link
 	// reachable lists nexthops RouteGet resolves, and the table it resolves them
-	// in. A nexthop absent from this map is unreachable.
+	// in. A nexthop absent from this map and from connected is unreachable.
 	reachable map[string]go_netlink.Route
+	// connected lists directly attached prefixes by device index. RouteGet
+	// resolves an address inside one in the main table, without a gateway, as
+	// the kernel resolves an on-link address.
+	connected map[netip.Prefix]int
 
 	// Injectable failures, so error paths are reachable from tests.
 	routeListErr    error
@@ -70,6 +77,7 @@ func newFakeNetlink() *fakeNetlink {
 		routes:    make(map[fakeRouteKey]go_netlink.Route),
 		links:     make(map[string]go_netlink.Link),
 		reachable: make(map[string]go_netlink.Route),
+		connected: make(map[netip.Prefix]int),
 	}
 }
 
@@ -104,6 +112,32 @@ func (f *fakeNetlink) setReachable(nh string, table int, routeType int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reachable[nh] = go_netlink.Route{Table: table, Type: routeType}
+}
+
+// setVia makes a nexthop resolvable in the main table through a gateway on a
+// device, as the kernel resolves an address that is not on any attached link.
+func (f *fakeNetlink) setVia(nh, gw string, linkIndex int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reachable[nh] = go_netlink.Route{
+		Table: unix_RT_TABLE_MAIN, Type: unix.RTN_UNICAST, Gw: net.ParseIP(gw), LinkIndex: linkIndex,
+	}
+}
+
+// setLocal makes an address resolve as one of this host's own, a local route
+// on the loopback device, as the kernel resolves it.
+func (f *fakeNetlink) setLocal(addr string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reachable[addr] = go_netlink.Route{Table: unix_RT_TABLE_MAIN, Type: unix.RTN_LOCAL, LinkIndex: 1}
+}
+
+// addConnected attaches a prefix to a device: addresses inside it resolve in the
+// main table on that device, without a gateway.
+func (f *fakeNetlink) addConnected(prefix string, linkIndex int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connected[netip.MustParsePrefix(prefix)] = linkIndex
 }
 
 // routeFor returns the installed route for a destination in a table.
@@ -156,7 +190,9 @@ func (f *fakeNetlink) LinkByName(name string) (go_netlink.Link, error) {
 	defer f.mu.Unlock()
 	l, ok := f.links[name]
 	if !ok {
-		return nil, go_netlink.LinkNotFoundError{}
+		// The library's message. Its LinkNotFoundError cannot be built outside
+		// the package with one, and the zero value panics when printed.
+		return nil, fmt.Errorf("Link %s not found", name)
 	}
 	return l, nil
 }
@@ -194,14 +230,22 @@ func (f *fakeNetlink) RouteGet(destination net.IP) ([]go_netlink.Route, error) {
 func (f *fakeNetlink) RouteGetWithOptions(destination net.IP, options *go_netlink.RouteGetOptions) ([]go_netlink.Route, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	unscoped := options == nil || options.VrfName == ""
 	r, ok := f.reachable[destination.String()]
 	if !ok {
+		if addr, valid := netip.AddrFromSlice(destination); valid && unscoped {
+			for p, idx := range f.connected {
+				if p.Contains(addr.Unmap()) {
+					return []go_netlink.Route{{Table: unix_RT_TABLE_MAIN, Type: unix.RTN_UNICAST, LinkIndex: idx}}, nil
+				}
+			}
+		}
 		return nil, fmt.Errorf("no route to %s", destination)
 	}
 	// Without a VRF option the kernel resolves in the main table, which is what
 	// makes unqualified validation fail for VRF-scoped rules.
-	if options == nil || options.VrfName == "" {
-		return []go_netlink.Route{{Table: unix_RT_TABLE_MAIN, Type: r.Type}}, nil
+	if unscoped {
+		return []go_netlink.Route{{Table: unix_RT_TABLE_MAIN, Type: r.Type, Gw: r.Gw, LinkIndex: r.LinkIndex}}, nil
 	}
 	return []go_netlink.Route{r}, nil
 }
@@ -248,6 +292,15 @@ func (f *fakeNetlink) RouteReplace(route *go_netlink.Route) error {
 	f.replaceCalls++
 	if f.routeReplaceErr != nil {
 		return f.routeReplaceErr
+	}
+	// "Nexthop device required for onlink", for a single gateway and for each
+	// nexthop of a multipath route alike. The fake accepting this is how
+	// skip-nexthop-validation on a non-VRF rule stayed broken with every test
+	// green.
+	for _, nh := range routeNexthopList(route) {
+		if nh.Flags&int(go_netlink.FLAG_ONLINK) != 0 && nh.LinkIndex == 0 {
+			return syscall.ENODEV
+		}
 	}
 	f.routes[fakeKey(route)] = *route
 	return nil

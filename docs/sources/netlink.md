@@ -215,6 +215,8 @@ The netlink export feature allows GoBGP to export BGP routes from the RIB to the
 - **Startup cleanup**: Stale routes from previous runs are cleaned up on startup
 - **Statistics and monitoring**: Track export operations, errors, and nexthop validation
 - **Multi-table support**: Single route can export to multiple tables if matching multiple rules
+- **ECMP**: With `use-multiple-paths`, every path in a prefix's multipath set becomes a nexthop of one kernel route (see [Multipath (ECMP) Export](#multipath-ecmp-export))
+- **Address families**: IPv4 and IPv6 unicast export through the global rules, IPv4 and IPv6 VPN through their VRF's. No other family is exported: RTC, EVPN and FlowSpec carry nothing the kernel can forward as a route, and labelled unicast would lose its label
 
 ## Configuration
 
@@ -291,18 +293,22 @@ Configure export within a VRF definition using `[vrfs.netlink-export]`:
 
 **Standard Communities (32-bit):**
 ```toml
-community-list = [
-  "65000:100",      # AS:VALUE format
-  "4259905636"      # Decimal format
-]
+[[netlink.export.rules]]
+  name = "standard"
+  community-list = [
+    "65000:100",      # AS:VALUE format
+    "4259905636"      # Decimal format
+  ]
 ```
 
 **Large Communities (96-bit):**
 ```toml
-large-community-list = [
-  "65000:1:100",    # ASN:LocalData1:LocalData2
-  "65000:2:200"
-]
+[[netlink.export.rules]]
+  name = "large"
+  large-community-list = [
+    "65000:1:100",    # ASN:LocalData1:LocalData2
+    "65000:2:200"
+  ]
 ```
 
 ### Community Matching Logic
@@ -395,6 +401,9 @@ For specific use cases where nexthop validation should be skipped:
     table-id = 400
     skip-nexthop-validation = true  # Skip nexthop validation
 ```
+
+Each nexthop is installed on-link on the device it is on; one whose device
+cannot be determined is left out. See [Nexthop Validation](#nexthop-validation).
 
 ### Example 6: Zebra/FRR Coexistence
 
@@ -547,17 +556,27 @@ On startup, GoBGP:
 
 The export client tracks all exported routes to ensure:
 - Routes are not re-exported if already present with same parameters
-- Parameter changes (metric, table-id) trigger delete + re-add
+- A change of table or metric is a different kernel route, so the old one is
+  deleted and the new one added
+- A change of nexthops alone replaces the route in place with one
+  `RouteReplace()`, so the prefix is never without a route
 - Only changed routes trigger netlink syscalls
 - Efficient operation at scale
 
 ### Route Withdrawal
 
-When a BGP route is withdrawn:
-1. Path withdrawal is detected in export hook
-2. Route is looked up in export tracking map
-3. Route is deleted from Linux kernel via `RouteDel()`
+When the last path for a prefix is withdrawn:
+1. The empty selected set is detected in the export hook
+2. Every rule's route for the prefix is looked up in the export tracking map
+3. Each is deleted from the Linux kernel via `RouteDel()`
 4. Tracking metadata is cleaned up
+
+When a path is withdrawn and others remain, the route is replaced, not
+deleted - see [Multipath (ECMP) Export](#multipath-ecmp-export).
+
+When a rule's filter no longer matches any selected path - the best path moved
+to one without the rule's community - that rule's route is deleted, and the
+other rules' routes for the prefix are left alone.
 
 ### Dynamic Configuration Reload
 
@@ -582,10 +601,76 @@ Nexthop validation ensures that routes are only exported if the nexthop is reach
 
 **When to disable:**
 - Nexthops are known to be reachable via other mechanisms
-- Performance is critical and validation overhead is too high
 - Using route servers where nexthops may not be directly reachable
 
 **Default behavior:** Enabled (recommended for most deployments)
+
+**What skipping does.** With `skip-nexthop-validation = true` the nexthop is
+installed *on-link* (`onlink`): the kernel is told the nexthop is directly
+reachable on a device, even where no connected prefix covers it. The kernel
+refuses an on-link nexthop without a device, so gobgpd has to choose one, and
+a wrong choice would send the prefix's traffic out of a link its nexthop is
+not on. It chooses:
+
+1. For a VRF rule, the VRF device.
+2. For a link-local nexthop, the interface of the session it was learned on.
+3. Otherwise, the device the kernel itself resolves the nexthop on, when it
+   resolves it without a gateway - the nexthop is on that device's link.
+4. Otherwise, for a path learned from a directly connected eBGP peer (not
+   multihop, not iBGP), the peer's link: a third-party nexthop from such a peer
+   is on the link it shares with that peer.
+
+A nexthop none of these places is left out, with the reason in the export
+error and the log - never installed on the device of a route through a
+gateway, where it is not. For a non-VRF rule this still does one route
+lookup per nexthop, to find its device, so skipping validation there saves
+no work.
+
+### Multipath (ECMP) Export
+
+With `use-multiple-paths` enabled, a prefix's selected set is its multipath
+set - every path that ties with the best path, capped by `maximum-paths` - and
+export installs one kernel route with a nexthop for each:
+
+```toml
+[global.use-multiple-paths.config]
+  enabled = true
+[global.use-multiple-paths.ebgp.config]
+  maximum-paths = 4
+[global.use-multiple-paths.ibgp.config]
+  maximum-paths = 2
+```
+
+```text
+$ ip route show 10.0.0.0/24
+10.0.0.0/24 proto 186 metric 20
+        nexthop via 192.168.1.2 dev eth0 weight 1
+        nexthop via 192.168.1.3 dev eth0 weight 1
+```
+
+Without `use-multiple-paths` the selected set is the best path alone, and the
+route is the single-gateway form it has always been.
+
+**How many nexthops.** At most `maximum-paths` for the best path's type - eBGP
+or iBGP. There is no separate netlink limit. A path whose nexthop cannot be
+used - unreachable when validation is on, or link-local with no interface - is
+left out and the others kept; if none is usable the export fails as it would
+for a single path. Two paths with the same nexthop (two sessions to one router)
+install it once.
+
+**Losing a path is a replace, not a delete.** When one of N paths is withdrawn
+the route is replaced in place with the remaining N-1 nexthops, in one
+netlink operation. It is deleted only when the last path goes. A service
+address therefore stays reachable through the paths that remain for the whole
+of a peer flap.
+
+**Each rule installs the part of the set it matches.** Export rules match
+paths, not prefixes: if three paths tie and a rule's community filter accepts
+two, that rule's route has two nexthops. Another rule without a filter, on the
+same prefix, has all three.
+
+**Nexthops are sorted**, so the same set always produces the same kernel route
+and a reordering among ties does not reprogram the FIB.
 
 ### Dampening
 
@@ -599,7 +684,8 @@ Dampening prevents flapping routes from causing excessive kernel updates:
 
 **Configuration:**
 ```toml
-dampening-interval = 100  # milliseconds
+[netlink.export]
+  dampening-interval = 100  # milliseconds
 ```
 
 **Set to 0 to disable dampening** (immediate export on every update)
@@ -643,6 +729,10 @@ A route with community `65000:999` will be exported to **both** table 100 and ta
 ---
 
 ## CLI Commands
+
+Every command below that shows state takes `-j` to print the API response as
+JSON instead, for scripts: `gobgp -j netlink export` prints an array of the
+exported routes, `[]` when there are none.
 
 ## Netlink Status
 
@@ -717,7 +807,12 @@ Prefix                                   Nexthop              VRF              T
 10.0.0.0/24                             192.168.1.1          customer-a       100      20     export-customer-a    2025-11-11 15:04:05
 10.0.1.0/24                             192.168.1.1          customer-a       100      20     export-customer-a    2025-11-11 15:04:12
 192.168.100.0/24                        10.0.0.1             customer-b       200      20     export-customer-b    2025-11-11 15:05:23
+10.0.2.0/24                             192.168.1.1,192.168.1.2 customer-a    100      20     export-customer-a    2025-11-11 15:06:01
 ```
+
+An ECMP route lists every nexthop, comma-separated. Over the API they are
+`ExportedRoute.nexthops`; `nexthop` holds the gateway only for a route that has
+exactly one.
 
 ### View Export Rules
 
@@ -1503,7 +1598,7 @@ Export service mesh routes to Linux kernel:
 ```toml
 [[netlink.export.rules]]
   name = "service-mesh-routes"
-  large-community-list = ["65000:mesh:1"]
+  large-community-list = ["65000:1:1"]
   table-id = 500
 ```
 

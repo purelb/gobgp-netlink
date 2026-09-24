@@ -117,7 +117,6 @@ individually instead:
 | `local_asn` | inherits the group | the neighbor's, including `0` |
 | `auth_password` | inherits the group | the neighbor's, including `""` |
 | `remove_private` | inherits the group | the neighbor's, including unspecified |
-| `route_flap_damping` | inherits the group | the neighbor's, including `false` |
 | `send_software_version` | inherits the group | the neighbor's, including `false` |
 | `send_community` | inherits the group | the neighbor's, including `0` |
 | `allow_own_asn` | inherits the group | the neighbor's, including `0` |
@@ -165,14 +164,22 @@ is advertised does not, and is applied to the running session instead:
 | `auth_password` | rebuilt (TCP-MD5 is a socket option) |
 | `send_software_version` | rebuilt (it is an OPEN capability) |
 | `ttl_security`, `ebgp_multihop`, `transport`, `graceful_restart`, `afi_safis` | rebuilt |
+| `route_server`, `route_reflector` | rebuilt (see below) |
 | `description` | kept |
 | `send_community`, `remove_private` | kept, and already-advertised routes are re-sent |
-| `timers`, `bfd`, `apply_policy` | kept |
+| `timers.hold_time`, `timers.keepalive_interval` | rebuilt (negotiated in the OPEN) |
+| `timers.connect_retry`, `timers.idle_hold_time_after_reset` | kept (read live) |
+| `bfd` | kept |
+| `apply_policy` | kept - route-server clients only; refused on any other peer |
 
 This matters most through a peer group, because one edit runs the same decision
 for every member. Renaming a group - changing only its `description` - leaves
 every session up.
 
-`route_flap_damping` is currently in the first group. Nothing in this daemon
-reads it, so the reset buys nothing, but it is left there rather than carved
-out so the question gets asked again if damping is ever implemented.
+`route_server` and `route_reflector` change neither the OPEN message nor the
+socket, and are rebuilt anyway. `route_server` decides which RIB the peer's
+routes live in, and flipping it in place would leave routes already installed
+in the wrong one. `route_reflector` is read from a snapshot taken when the
+session comes up, so an in-place change would keep deciding ORIGINATOR_ID and
+CLUSTER_LIST by the old value until the session happened to flap. Before 1.3.5
+a change to either was accepted and did nothing at all.

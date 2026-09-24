@@ -127,9 +127,12 @@
     [neighbors.ebgp-multihop.config]
         enabled = true #directly connection should be set false，if not ，peer will be deleted after hold-time
         multihop-ttl = 100
-    [neighbors.route-reflector.config]
-        route-reflector-client = true
-        route-reflector-cluster-id = "192.168.0.1"
+    # To make this neighbor a route-reflector client, uncomment the following.
+    # Please note that this is mutually exclusive with
+    # "neighbors.route-server.config" below.
+    #[neighbors.route-reflector.config]
+    #    route-reflector-client = true
+    #    route-reflector-cluster-id = "192.168.0.1"
     [neighbors.add-paths.config]
         send-max = 8
         receive = true
@@ -483,6 +486,50 @@ Precedence is the neighbor, then its peer group, then this.
 
 `long-lived-enabled` is not propagated, because the per-family long-lived flag
 is not derived from it and the capability would go out carrying no families.
+Since it could never take effect, gobgpd refuses it on the global block - over
+the API and in a config file - rather than accept it and do nothing. Set it per
+neighbor or peer group.
+
+## Multipath
+
+Multipath is global. It selects every path that ties with the best one, up to a
+limit per peer type, and both advertises the set and - with netlink export -
+installs it into the kernel as one route with a nexthop per path.
+
+```toml
+[global.use-multiple-paths.config]
+  enabled = true
+[global.use-multiple-paths.ebgp.config]
+  maximum-paths = 4
+[global.use-multiple-paths.ibgp.config]
+  maximum-paths = 2
+```
+
+The limit is chosen from the best path: a best path learned over eBGP selects
+up to the eBGP limit, one learned over iBGP up to the iBGP limit. A type with no
+limit gets the single best path. Locally originated best paths are not capped.
+
+| configuration | eBGP | iBGP |
+|---|---|---|
+| `ebgp maximum-paths = 4` only | up to 4 paths | best path only |
+| `ibgp maximum-paths = 2` only | best path only | up to 2 paths |
+| both set | up to 4 | up to 2 |
+| `enabled = true`, neither set | refused at startup | |
+
+`enabled = true` with neither limit is refused, because it would select nothing
+the daemon does not select already. A configuration that enabled multipath
+before 1.3.5 had no limit and must add one.
+
+A limit without `enabled = true` is refused too: it caps the multipath set, so
+on its own it would do nothing.
+
+The limits are read at startup; changing them, like any global setting, needs
+a restart - a reload logs an error naming the setting and applies the rest.
+
+Over the API they are `Global.ebgp_maximum_paths` and
+`Global.ibgp_maximum_paths`. `use-multiple-paths` exists only here: the
+per-neighbor, per-peer-group and per-address-family blocks were removed in
+1.3.5, since the RIB never read them.
 
 ## Settings gobgpd fills in for you
 

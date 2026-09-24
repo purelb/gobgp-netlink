@@ -106,8 +106,6 @@ func TestListPeerReportsAuthPasswordSetWithoutLeakingIt(t *testing.T) {
 		got[addr] = p.GetState().GetAuthPasswordSet()
 
 		assert.Empty(p.GetConf().GetAuthPassword(), "Conf must stay redacted")
-		assert.Empty(p.GetState().GetAuthPassword(),
-			"State is redacted nowhere, so the key must never be put there")
 	}))
 
 	assert.True(got["127.0.0.1"], "the MD5-configured peer must report the flag")

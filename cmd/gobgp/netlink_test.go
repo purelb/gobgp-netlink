@@ -16,11 +16,19 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"os"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+
+	"github.com/osrg/gobgp/v4/api"
 )
 
 func findSubcommand(t *testing.T, parent *cobra.Command, name string) *cobra.Command {
@@ -128,4 +136,119 @@ func TestSplitList(t *testing.T) {
 	assert.Nil(t, splitList(""))
 	assert.Equal(t, []string{"65000:1"}, splitList("65000:1"))
 	assert.Equal(t, []string{"65000:1", "65000:2"}, splitList("65000:1,65000:2"))
+}
+
+// fakeNetlinkClient answers the netlink reads. Any other call reaches the nil
+// embedded client and panics, which is what a test that strays should do.
+type fakeNetlinkClient struct {
+	api.GoBgpServiceClient
+	routes []*api.ListNetlinkExportResponse_ExportedRoute
+}
+
+func (fakeNetlinkClient) GetNetlink(context.Context, *api.GetNetlinkRequest, ...grpc.CallOption) (*api.GetNetlinkResponse, error) {
+	return &api.GetNetlinkResponse{ImportEnabled: true, Vrf: "vrf1", ExportEnabled: true}, nil
+}
+
+func (fakeNetlinkClient) GetNetlinkImportStats(context.Context, *api.GetNetlinkImportStatsRequest, ...grpc.CallOption) (*api.GetNetlinkImportStatsResponse, error) {
+	return &api.GetNetlinkImportStatsResponse{Imported: 7}, nil
+}
+
+func (fakeNetlinkClient) ListNetlinkExportRules(context.Context, *api.ListNetlinkExportRulesRequest, ...grpc.CallOption) (*api.ListNetlinkExportRulesResponse, error) {
+	return &api.ListNetlinkExportRulesResponse{
+		Rules: []*api.ListNetlinkExportRulesResponse_ExportRule{{Name: "lab", Metric: 20}},
+	}, nil
+}
+
+func (fakeNetlinkClient) GetNetlinkExportStats(context.Context, *api.GetNetlinkExportStatsRequest, ...grpc.CallOption) (*api.GetNetlinkExportStatsResponse, error) {
+	return &api.GetNetlinkExportStatsResponse{Exported: 45}, nil
+}
+
+func (f fakeNetlinkClient) ListNetlinkExport(context.Context, *api.ListNetlinkExportRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[api.ListNetlinkExportResponse], error) {
+	return &fakeExportStream{routes: f.routes}, nil
+}
+
+type fakeExportStream struct {
+	grpc.ClientStream
+	routes []*api.ListNetlinkExportResponse_ExportedRoute
+}
+
+func (s *fakeExportStream) Recv() (*api.ListNetlinkExportResponse, error) {
+	if len(s.routes) == 0 {
+		return nil, io.EOF
+	}
+	r := s.routes[0]
+	s.routes = s.routes[1:]
+	return &api.ListNetlinkExportResponse{Route: r}, nil
+}
+
+// captureStdout returns what fn prints.
+func captureStdout(t *testing.T, fn func() error) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	orig := os.Stdout
+	os.Stdout = w
+	runErr := fn()
+	os.Stdout = orig
+	require.NoError(t, w.Close())
+	require.NoError(t, runErr)
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+	return string(out)
+}
+
+// Every netlink show command ignored -j and printed its table. Each now prints
+// its API response as JSON, which a script can parse.
+func TestNetlinkShowCommandsHonourJson(t *testing.T) {
+	origClient, origJson := client, globalOpts.Json
+	t.Cleanup(func() { client, globalOpts.Json = origClient, origJson })
+	globalOpts.Json = true
+	client = fakeNetlinkClient{routes: []*api.ListNetlinkExportResponse_ExportedRoute{
+		{Prefix: "10.0.0.0/24", Nexthops: []string{"192.168.1.1", "192.168.1.2"}, RuleName: "lab"},
+		{Prefix: "10.0.1.0/24", Nexthop: "192.168.1.1", Nexthops: []string{"192.168.1.1"}, RuleName: "lab"},
+	}}
+
+	object := func(t *testing.T, out string) map[string]any {
+		t.Helper()
+		var m map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &m), "not JSON: %q", out)
+		return m
+	}
+
+	for _, tt := range []struct {
+		name  string
+		run   func() error
+		key   string
+		value any
+	}{
+		{"netlink", showNetlink, "vrf", "vrf1"},
+		{"netlink import", showNetlinkImport, "import_enabled", true},
+		{"netlink import stats", showNetlinkImportStats, "imported", float64(7)},
+		{"netlink export stats", showNetlinkExportStats, "exported", float64(45)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.value, object(t, captureStdout(t, tt.run))[tt.key])
+		})
+	}
+
+	t.Run("netlink export rules", func(t *testing.T) {
+		rules := object(t, captureStdout(t, showNetlinkExportRules))["rules"].([]any)
+		require.Len(t, rules, 1)
+		assert.Equal(t, "lab", rules[0].(map[string]any)["name"])
+	})
+
+	t.Run("netlink export", func(t *testing.T) {
+		out := captureStdout(t, func() error { return showNetlinkExport("") })
+		var routes []map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &routes), "not JSON: %q", out)
+		require.Len(t, routes, 2)
+		assert.Equal(t, "10.0.0.0/24", routes[0]["prefix"])
+		assert.Equal(t, []any{"192.168.1.1", "192.168.1.2"}, routes[0]["nexthops"])
+	})
+
+	t.Run("netlink export, nothing exported", func(t *testing.T) {
+		client = fakeNetlinkClient{}
+		assert.Equal(t, "[]\n", captureStdout(t, func() error { return showNetlinkExport("") }),
+			"an empty list, not null")
+	})
 }

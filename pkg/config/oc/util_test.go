@@ -584,6 +584,10 @@ func TestNeedsResendOpenMessageCarveOuts(t *testing.T) {
 			// An egress AS_PATH rewrite, read per advertisement from
 			// State.RemovePrivateAs. Same shape as send-community.
 			"remove-private-as": func(n *Neighbor) { n.Config.RemovePrivateAs = REMOVE_PRIVATE_AS_OPTION_ALL },
+			// Local timers, read live: the connect loop reads connect-retry on
+			// each attempt, and an administrative reset reads the idle hold.
+			"connect-retry":              func(n *Neighbor) { n.Timers.Config.ConnectRetry = 7 },
+			"idle-hold-time-after-reset": func(n *Neighbor) { n.Timers.Config.IdleHoldTimeAfterReset = 7 },
 		} {
 			n := base()
 			mutate(n)
@@ -604,12 +608,26 @@ func TestNeedsResendOpenMessageCarveOuts(t *testing.T) {
 			"auth-password": func(n *Neighbor) { n.Config.AuthPassword = "different" },
 			// Emits a capability in the OPEN.
 			"send-software-version": func(n *Neighbor) { n.Config.SendSoftwareVersion = true },
-			// Read by nothing in this tree today, so the reset buys nothing -
-			// but it is left in place deliberately rather than carved out,
-			// because a carve-out would have to be revisited the day damping
-			// is implemented.
-			"route-flap-damping": func(n *Neighbor) { n.Config.RouteFlapDamping = true },
-			"admin-down":         func(n *Neighbor) { n.Config.AdminDown = true },
+			"admin-down":            func(n *Neighbor) { n.Config.AdminDown = true },
+			// Sets peer.tableId at peer construction, so the peer's routes
+			// live in the global RIB or in its own. Flipping it in place
+			// would strand the routes already installed in the wrong table.
+			"route-server-client": func(n *Neighbor) { n.RouteServer.Config.RouteServerClient = true },
+			"secondary-route":     func(n *Neighbor) { n.RouteServer.Config.SecondaryRoute = true },
+			// Stamped into the peer's PeerInfo snapshot, which UpdatePathAttrs
+			// reads to decide whether ORIGINATOR_ID and CLUSTER_LIST survive
+			// and whether to add them. An in-place change would leave the
+			// snapshot answering with the old value until the session flapped
+			// - silent iBGP routing loops.
+			"route-reflector-client": func(n *Neighbor) { n.RouteReflector.Config.RouteReflectorClient = true },
+			// Carried in the OPEN and negotiated from it, and read only when
+			// the session establishes: an in-place change was reported at
+			// once and ignored by the running session until it restarted.
+			"hold-time":          func(n *Neighbor) { n.Timers.Config.HoldTime = 180 },
+			"keepalive-interval": func(n *Neighbor) { n.Timers.Config.KeepaliveInterval = 60 },
+			"route-reflector-cluster-id": func(n *Neighbor) {
+				n.RouteReflector.Config.RouteReflectorClusterId = netip.MustParseAddr("10.9.9.9")
+			},
 		} {
 			n := base()
 			mutate(n)

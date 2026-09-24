@@ -83,6 +83,29 @@ func newfsmStateReason(typ fsmStateReasonType, notif *bgp.BGPNotification, data 
 	}
 }
 
+// isDisconnect reports whether r answers "why is this session not up", as
+// opposed to naming a step on the way up.
+//
+// Written as the short exclusion list rather than the long inclusion list: a
+// reason added later is then reported by default instead of being silently
+// dropped, and the four excluded here are the only unambiguous ones. In
+// particular fsmIdleTimerExpired is the IDLE -> ACTIVE transition every session
+// makes while connecting, so treating it as a disconnect would have every
+// healthy peer reporting idle-hold-timer-expired.
+func (r *fsmStateReason) isDisconnect() bool {
+	if r == nil {
+		return false
+	}
+	switch r.Type {
+	case fsmNewConnection, fsmOpenMsgReceived, fsmOpenMsgNegotiated, fsmIdleTimerExpired:
+		return false
+	case fsmDying:
+		// Daemon shutdown - nothing to say about this peer.
+		return false
+	}
+	return true
+}
+
 // notificationBody returns the NOTIFICATION body of m, or nil when m is nil.
 // m must be a NOTIFICATION message.
 func notificationBody(m *bgp.BGPMessage) *bgp.BGPNotification {
@@ -139,6 +162,11 @@ func (r fsmStateReason) String() string {
 		return "hard-reset"
 	case fsmBadPeerAS:
 		return "bad-peer-as"
+	case fsmDeConfigured:
+		// Reachable at fsm.go:2068 and classified by both bmp.go:437 and
+		// server.go:5625, but missing here - so a peer removed from the
+		// configuration reported its disconnect_message as "unknown".
+		return "deconfigured"
 	default:
 		return "unknown"
 	}
@@ -438,6 +466,7 @@ type fsm struct {
 
 	// safe for concurrent access
 	state                    fsmState
+	lastStateReason          atomic.Pointer[fsmStateReason]
 	familyMap                atomic.Value // map[bgp.Family]bgp.BGPAddPathMode
 	rtcEORWait               atomic.Bool
 	logger                   *slog.Logger
@@ -638,6 +667,18 @@ func (fsm *fsm) stateChange(nextState bgp.FSMState, reason *fsmStateReason) {
 		slog.String("new", nextState.String()),
 		slog.String("reason", reason.String()))
 
+	// Remember why the session last went down, so ListPeer can report it.
+	// disconnect_reason and disconnect_message have only ever been filled in on
+	// the WatchEvent stream; a caller that polls ListPeer - which is what
+	// k8gobgp does - saw UNSPECIFIED and "" for every peer, up or down.
+	//
+	// Only reasons that name an actual disconnect are kept: a session that is
+	// flapping passes through the way-up transitions on its way back, which
+	// would otherwise erase the reason it went down in the first place.
+	if reason.isDisconnect() {
+		fsm.lastStateReason.Store(reason)
+	}
+
 	switch nextState {
 	case bgp.BGP_FSM_ESTABLISHED:
 		remoteTCP := fsm.conn.RemoteAddr().(*net.TCPAddr)
@@ -775,7 +816,13 @@ func (fsm *fsm) stateChange(nextState bgp.FSMState, reason *fsmStateReason) {
 
 		fsm.isEBGP = conf.IsEBGPPeer(fsm.gConf)
 		fsm.isConfed = fsm.gConf.IsConfederationMember(conf.Config.PeerAs)
-		fsm.isTreatAsWithdraw = conf.ErrorHandling.Config.TreatAsWithdraw
+		// RFC 7606 revised error handling, always. The error-handling block
+		// that appeared to switch it off was removed from the model in 1.3.5:
+		// api.Peer never had a field for it, so a config file's
+		// treat-as-withdraw = false was dropped on the way to the daemon and
+		// defaulting put true back on every path. This is the value every
+		// session has always run with.
+		fsm.isTreatAsWithdraw = true
 		// reset the state set by the previous session
 		fsm.twoByteAsTrans = false
 		if _, y := fsm.capMap[bgp.BGP_CAP_FOUR_OCTET_AS_NUMBER]; !y {
@@ -1818,6 +1865,26 @@ func (h *fsmHandler) sendMessageloop(ctx context.Context, conn net.Conn, stateRe
 				slog.Any("nlri", update.NLRI),
 				slog.Any("withdrawals", update.WithdrawnRoutes),
 				slog.Any("attributes", update.PathAttributes))
+			// counterStats.Sent.Withdraw{Update,Prefix} existed, was zeroed on
+			// reset, was copied into oc by toConfig and was exported as
+			// bgp_sent_withdraw_update_total - and nothing ever incremented it.
+			// Only the received side was, via bmpStatsUpdate. So the sent
+			// metrics have always read zero.
+			//
+			// MP_UNREACH_NLRI counts too: for every family except IPv4 unicast
+			// the withdrawals are carried there, not in WithdrawnRoutes, so
+			// counting only the latter would leave EVPN, VPN and IPv6 sessions
+			// reporting zero exactly as before.
+			withdrawn := len(update.WithdrawnRoutes)
+			for _, attr := range update.PathAttributes {
+				if unreach, ok := attr.(*bgp.PathAttributeMpUnreachNLRI); ok {
+					withdrawn += len(unreach.Value)
+				}
+			}
+			if withdrawn > 0 {
+				atomic.AddUint32(&fsm.counterStats.Sent.WithdrawUpdate, 1)
+				atomic.AddUint32(&fsm.counterStats.Sent.WithdrawPrefix, uint32(withdrawn))
+			}
 		case bgp.BGP_MSG_KEEPALIVE:
 			// nothing to do
 		default:
@@ -2130,7 +2197,24 @@ func (h *fsmHandler) established(ctx context.Context) (bgp.FSMState, *fsmStateRe
 					_ = fsm.sendNotification(fsm.conn, m)
 					return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmAdminDown, notificationBody(m), nil)
 				case adminStatePfxCt:
-					_ = fsm.sendNotification(fsm.conn, bgp.NewBGPNotificationMessage(bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_MAXIMUM_NUMBER_OF_PREFIXES_REACHED, nil))
+					// Return a state, as the adminStateDown arm does. This used
+					// to send the CEASE and fall through, and sendNotification
+					// closes the connection - so the session went down through
+					// whichever goroutine noticed first, usually the reader
+					// with fsmReadFailed, sometimes a writer. The reason
+					// reported was not this one, and was not even stable.
+					//
+					// fsmNotificationSent rather than fsmAdminDown, which would
+					// be wrong twice over: BMP maps fsmAdminDown to reason 2,
+					// LOCAL_NO_NOTIFICATION, which carries no PDU, so the
+					// maximum-prefixes CEASE would never reach the station; and
+					// the API would report ADMIN_DOWN beside an admin_state
+					// already saying PFX_CT. fsmNotificationSent is BMP reason
+					// 1, which carries the notification, and renders in
+					// disconnect_message as the CEASE subcode.
+					m := bgp.NewBGPNotificationMessage(bgp.BGP_ERROR_CEASE, bgp.BGP_ERROR_SUB_MAXIMUM_NUMBER_OF_PREFIXES_REACHED, nil)
+					_ = fsm.sendNotification(fsm.conn, m)
+					return bgp.BGP_FSM_IDLE, newfsmStateReason(fsmNotificationSent, notificationBody(m), nil)
 				}
 			}
 		}
@@ -2225,6 +2309,15 @@ func (h *fsmHandler) loop(ctx context.Context, wg *sync.WaitGroup) {
 func (h *fsmHandler) changeadminState(s adminState) error {
 	fsm := h.fsm
 	old := fsm.adminState.Load()
+	// The guard below used to be the CompareAndSwap alone, which cannot detect
+	// this: old was just loaded, so CAS(old, s) succeeds even when s == old.
+	// "cannot change to the same state" therefore only ever fired on a
+	// concurrent writer, and two consecutive requests for the same state both
+	// "succeeded".
+	if old == s {
+		fsm.logger.Warn("cannot change to the same state", slog.String("State", fsm.state.String()))
+		return fmt.Errorf("cannot change to the same state")
+	}
 	if fsm.adminState.CompareAndSwap(old, s) {
 		fsm.logger.Debug("admin state changed",
 			slog.String("State", fsm.state.String()),
@@ -2232,7 +2325,15 @@ func (h *fsmHandler) changeadminState(s adminState) error {
 
 		h.fsm.lock.Lock()
 		conf := fsm.pConf.ReadCopy()
-		conf.State.AdminDown = !conf.State.AdminDown
+		// Derived from the new state, not toggled. Two transitions that both
+		// leave the peer down - adminStateDown then adminStatePfxCt - flipped
+		// it twice and left it claiming the peer was up.
+		//
+		// Internal only: nothing reads oc NeighborState.AdminDown. The API
+		// reports admin_state, derived from fsm.adminState, which was always
+		// correct. Fixed here because it is four lines in a function this
+		// branch edits anyway, not because it was visible.
+		conf.State.AdminDown = s != adminStateUp
 		fsm.pConf.Update(&conf)
 		h.fsm.lock.Unlock()
 

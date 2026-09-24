@@ -16,7 +16,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -1239,6 +1238,14 @@ func TestListPathEnableMultipath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Enabling multipath requires a limit, and a limit without
+			// multipath is refused. These tests are about which paths are
+			// flagged Best, not about the cap, so the limit is set above
+			// anything they add.
+			var maxPaths uint32
+			if tt.useMultiPath {
+				maxPaths = 64
+			}
 			server := NewBgpServer()
 			go server.Serve()
 			err = server.StartBgp(context.Background(), &api.StartBgpRequest{
@@ -1247,6 +1254,8 @@ func TestListPathEnableMultipath(t *testing.T) {
 					RouterId:         "1.1.1.1",
 					UseMultiplePaths: tt.useMultiPath,
 					ListenPort:       -1,
+					EbgpMaximumPaths: maxPaths,
+					IbgpMaximumPaths: maxPaths,
 				},
 			})
 			require.NoError(t, err)
@@ -1355,6 +1364,8 @@ func TestListPathEnableMultipath_DifferentLocalPref(t *testing.T) {
 			RouterId:         "1.1.1.1",
 			UseMultiplePaths: true,
 			ListenPort:       -1,
+			EbgpMaximumPaths: 64,
+			IbgpMaximumPaths: 64,
 		},
 	})
 	require.NoError(t, err)
@@ -4856,64 +4867,72 @@ func TestRTCShouldNotAdvertiseVPNRouteWhenRTCIsNotPassImportPolicies(t *testing.
 		"VPN route should not appear at s2 adj-in from s1 after second VPN prefix is added")
 }
 
+// Per-peer import and export policy is applied only to route-server clients.
+// It used to be accepted on any peer and silently ignored on the rest - stored,
+// reported back by ListPeer, and never installed - so an import policy meant to
+// filter a peer's routes filtered nothing. It is now refused where it would be
+// ignored, over AddPeer and UpdatePeer alike; a route-server client still gets
+// it, and a peer that states no policy is unaffected.
 func TestPerPeerPolicyIsRouteServerOnly(t *testing.T) {
-	for _, rs := range []bool{false, true} {
-		name := "non-rs-client"
-		if rs {
-			name = "rs-client"
+	policy := func() *api.ApplyPolicy {
+		return &api.ApplyPolicy{
+			ImportPolicy: &api.PolicyAssignment{
+				Direction:     api.PolicyDirection_POLICY_DIRECTION_IMPORT,
+				DefaultAction: api.RouteAction_ROUTE_ACTION_ACCEPT,
+				Policies:      []*api.Policy{{Name: "p1"}},
+			},
 		}
-		t.Run(name, func(t *testing.T) {
-			assert := assert.New(t)
-
-			s := NewBgpServer()
-			go s.Serve()
-			err := s.StartBgp(context.Background(), &api.StartBgpRequest{
-				Global: &api.Global{
-					Asn:        1,
-					RouterId:   "1.1.1.1",
-					ListenPort: -1,
-				},
-			})
-			assert.NoError(err)
-			defer s.StopBgp(context.Background(), &api.StopBgpRequest{})
-
-			err = s.AddPolicy(context.Background(),
-				&api.AddPolicyRequest{Policy: table.NewAPIPolicyFromTableStruct(&table.Policy{Name: "p1"})})
-			assert.NoError(err)
-
-			err = s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
-				Conf: &api.PeerConf{
-					NeighborAddress: "127.0.0.1",
-					PeerAsn:         2,
-				},
-				RouteServer: &api.RouteServer{
-					RouteServerClient: rs,
-				},
-				ApplyPolicy: &api.ApplyPolicy{
-					ImportPolicy: &api.PolicyAssignment{
-						Direction:     api.PolicyDirection_POLICY_DIRECTION_IMPORT,
-						DefaultAction: api.RouteAction_ROUTE_ACTION_ACCEPT,
-						Policies:      []*api.Policy{{Name: "p1"}},
-					},
-				},
-			}})
-			assert.NoError(err)
-
-			// A route server client keeps the policy in use. Any other peer
-			// never reads the assignment, so nothing holds the policy.
-			err = s.DeletePolicy(context.Background(), &api.DeletePolicyRequest{
-				Policy:             &api.Policy{Name: "p1"},
-				All:                true,
-				PreserveStatements: true,
-			})
-			if rs {
-				assert.Error(err)
-				assert.Contains(err.Error(), "in use")
-			} else {
-				assert.NoError(err)
-			}
-		})
 	}
+	newServer := func(t *testing.T) *BgpServer {
+		t.Helper()
+		s := NewBgpServer()
+		go s.Serve()
+		require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+			Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+		}))
+		t.Cleanup(func() { _ = s.StopBgp(context.Background(), &api.StopBgpRequest{}) })
+		require.NoError(t, s.AddPolicy(context.Background(),
+			&api.AddPolicyRequest{Policy: table.NewAPIPolicyFromTableStruct(&table.Policy{Name: "p1"})}))
+		return s
+	}
+
+	t.Run("rs-client keeps its policy", func(t *testing.T) {
+		s := newServer(t)
+		require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+			Conf:        &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+			RouteServer: &api.RouteServer{RouteServerClient: true},
+			ApplyPolicy: policy(),
+		}}))
+		// The policy is installed, so it is in use and cannot be deleted.
+		err := s.DeletePolicy(context.Background(), &api.DeletePolicyRequest{
+			Policy: &api.Policy{Name: "p1"}, All: true, PreserveStatements: true,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "in use")
+	})
+
+	t.Run("ordinary peer is refused rather than ignored", func(t *testing.T) {
+		s := newServer(t)
+		err := s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+			Conf:        &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+			ApplyPolicy: policy(),
+		}})
+		require.Error(t, err, "a policy the peer would ignore must be refused, not stored")
+		assert.Contains(t, err.Error(), "route-server client")
+
+		// Without a policy the same peer is accepted.
+		require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+			Conf: &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+		}}))
+
+		// And attaching one later is refused too.
+		_, err = s.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: &api.Peer{
+			Conf:        &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 2},
+			ApplyPolicy: policy(),
+		}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "route-server client")
+	})
 }
 
 func TestDeletePeerDropsPolicyAssignment(t *testing.T) {
@@ -5475,16 +5494,13 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 		RouterId:         "1.1.1.1",
 		ListenPort:       -1,
 		UseMultiplePaths: true,
+		EbgpMaximumPaths: 4,
+		IbgpMaximumPaths: 2,
 		Families:         []uint32{0, 1}, // ipv4-unicast, ipv6-unicast
 		RouteSelectionOptions: &api.RouteSelectionOptionsConfig{
 			AlwaysCompareMed:        true,
 			IgnoreAsPathLength:      true,
 			ExternalCompareRouterId: true,
-			EnableAigp:              true,
-		},
-		DefaultRouteDistance: &api.DefaultRouteDistance{
-			ExternalRouteDistance: 20,
-			InternalRouteDistance: 200,
 		},
 		Confederation: &api.Confederation{
 			Enabled:      true,
@@ -5496,7 +5512,6 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 			RestartTime:         120,
 			DeferralTime:        360,
 			NotificationEnabled: true,
-			LonglivedEnabled:    true,
 		},
 	}
 	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{Global: sent}))
@@ -5509,17 +5524,14 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 	assert.Equal(sent.Asn, got.Asn)
 	assert.Equal(sent.RouterId, got.RouterId)
 	assert.Equal(sent.UseMultiplePaths, got.UseMultiplePaths)
+	assert.Equal(sent.EbgpMaximumPaths, got.EbgpMaximumPaths, "ebgp_maximum_paths")
+	assert.Equal(sent.IbgpMaximumPaths, got.IbgpMaximumPaths, "ibgp_maximum_paths")
 	assert.ElementsMatch(sent.Families, got.Families, "families")
 
 	if assert.NotNil(got.RouteSelectionOptions, "route_selection_options") {
 		assert.True(got.RouteSelectionOptions.AlwaysCompareMed)
 		assert.True(got.RouteSelectionOptions.IgnoreAsPathLength)
 		assert.True(got.RouteSelectionOptions.ExternalCompareRouterId)
-		assert.True(got.RouteSelectionOptions.EnableAigp)
-	}
-	if assert.NotNil(got.DefaultRouteDistance, "default_route_distance") {
-		assert.Equal(uint32(20), got.DefaultRouteDistance.ExternalRouteDistance)
-		assert.Equal(uint32(200), got.DefaultRouteDistance.InternalRouteDistance)
 	}
 	if assert.NotNil(got.Confederation, "confederation") {
 		assert.True(got.Confederation.Enabled)
@@ -5531,8 +5543,33 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 		assert.Equal(uint32(120), got.GracefulRestart.RestartTime)
 		assert.Equal(uint32(360), got.GracefulRestart.DeferralTime)
 		assert.True(got.GracefulRestart.NotificationEnabled)
-		assert.True(got.GracefulRestart.LonglivedEnabled)
 	}
+}
+
+// Long-lived graceful restart on the global block is refused over the API too.
+//
+// Inheritance copies the rest of the global graceful-restart block to peers and
+// forces this one off - long-lived retention is hours, and one global line
+// should not commit a fleet to it - so it was accepted, echoed by GetBgp, and
+// did nothing. The field is shared with the per-peer block, where it works, so
+// it cannot be removed from the proto; StartBgp refuses it instead.
+func TestGlobalLongLivedGracefulRestartIsRefused(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	defer s.Stop()
+
+	err := s.StartBgp(context.Background(), &api.StartBgpRequest{Global: &api.Global{
+		Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1,
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120, LonglivedEnabled: true},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "long-lived")
+
+	// The rest of the global block is still accepted.
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{Global: &api.Global{
+		Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1,
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120},
+	}}))
 }
 
 // GetRunningConfig composes the running configuration. The trap it exists to
@@ -5808,36 +5845,213 @@ func TestStaleRoutesTimeLeavesCompletedFamiliesAlone(t *testing.T) {
 		"End-of-RIB was received, so these are live routes and must not be purged")
 }
 
-// mtu-discovery is declared in api.Transport and in the generated config model
-// and referenced nowhere else: no converter stores it and no socket option is
-// set from it. Accepting it silently leaves an operator believing path MTU
-// discovery is enabled.
+// setNetlinkNexthops fills in the three next hops a netlink-imported route is
+// advertised with. Before this they were nil on every peer, so
+// table.setNetlinkNexthop logged a warning and fell back on every kernel route
+// and PeerState's three next-hop fields were always empty.
 //
-// Warned rather than rejected: configs that already set it have been getting
-// nothing all along, so an error now would be a new failure for no new benefit.
-func TestMtuDiscoveryIsWarnedAsUnimplemented(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+// The session local address is preferred wherever it is of the right family,
+// which is what keeps a numbered session advertising exactly what it always
+// did; only the values that were missing come from the interface.
+func TestSetNetlinkNexthops(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
 
-	s := NewBgpServer(LoggerOption(logger, new(slog.LevelVar)))
+	// A name no interface can have, so the interface half is a guaranteed
+	// miss and each case asserts only what the local address contributes.
+	const noSuchIface = "gobgp-test-absent0"
+
+	neighbor := func(local string) *oc.Neighbor {
+		n := &oc.Neighbor{}
+		n.Config.NeighborInterface = noSuchIface
+		if local != "" {
+			n.Transport.State.LocalAddress = netip.MustParseAddr(local)
+		}
+		return n
+	}
+
+	for _, tt := range []struct {
+		name              string
+		local             string
+		v4, v6, linkLocal string
+	}{
+		{
+			name:  "an IPv4 session advertises its own local address",
+			local: "10.1.2.3",
+			v4:    "10.1.2.3",
+		},
+		{
+			name:  "a global IPv6 session advertises its own local address",
+			local: "2001:db8::1",
+			v6:    "2001:db8::1",
+		},
+		{
+			// An unnumbered session's local address is not a next hop any
+			// peer can route to, so it must not be used as the global one.
+			name:  "a link-local session contributes nothing",
+			local: "fe80::1",
+		},
+		{
+			// A dual-stack listener hands back a 16-byte IPv4-mapped local
+			// address; it is still an IPv4 session and must set the IPv4
+			// next hop, not the IPv6 one.
+			name:  "an IPv4-mapped local address is an IPv4 session",
+			local: "::ffff:10.1.2.3",
+			v4:    "10.1.2.3",
+		},
+		{
+			name:  "no local address at all",
+			local: "",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			info := &table.PeerInfo{}
+			setNetlinkNexthops(logger, info, neighbor(tt.local))
+
+			check := func(field string, got net.IP, want string) {
+				t.Helper()
+				if want == "" {
+					assert.Nil(t, got, "%s must stay unset", field)
+					return
+				}
+				require.NotNil(t, got, "%s must be set", field)
+				assert.True(t, got.Equal(net.ParseIP(want)), "%s: got %s want %s", field, got, want)
+			}
+			check("IPv4Nexthop", info.IPv4Nexthop, tt.v4)
+			check("IPv6Nexthop", info.IPv6Nexthop, tt.v6)
+			check("IPv6LinkLocalNexthop", info.IPv6LinkLocalNexthop, tt.linkLocal)
+		})
+	}
+
+	// The interface half, against a real interface, so the two zero-caller
+	// netutils helpers are exercised rather than only stubbed out above.
+	t.Run("the interface supplies what the local address cannot", func(t *testing.T) {
+		iface, want := interfaceWithGlobalIPv4(t)
+		n := &oc.Neighbor{}
+		n.Config.NeighborInterface = iface
+
+		info := &table.PeerInfo{}
+		setNetlinkNexthops(logger, info, n)
+
+		require.NotNil(t, info.IPv4Nexthop, "a session with no local address takes the interface address")
+		assert.True(t, info.IPv4Nexthop.Equal(want), "got %s want %s", info.IPv4Nexthop, want)
+	})
+}
+
+// interfaceWithGlobalIPv4 returns an interface on this machine carrying a
+// global unicast IPv4 address, skipping the test when there is none.
+func interfaceWithGlobalIPv4(t *testing.T) (string, net.IP) {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	require.NoError(t, err)
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if !ok || ipnet.IP.To4() == nil || !ipnet.IP.IsGlobalUnicast() {
+				continue
+			}
+			return iface.Name, ipnet.IP
+		}
+	}
+	t.Skip("no interface with a global unicast IPv4 address")
+	return "", nil
+}
+
+// ListPath flags as Best exactly the multipath set the RIB uses - including
+// the maximum-paths cap.
+//
+// It used to test each path against the best with Path.Compare on its own, so
+// with a cap in force `gobgp global rib` would have flagged every tie Best
+// while only the capped set was selected.
+func TestListPathBestFlagsHonourMaximumPaths(t *testing.T) {
+	s := NewBgpServer()
 	go s.Serve()
 	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
-		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
+		Global: &api.Global{
+			Asn:              65001,
+			RouterId:         "1.1.1.1",
+			ListenPort:       -1,
+			UseMultiplePaths: true,
+			EbgpMaximumPaths: 2,
+		},
 	}))
 	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
 
-	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
-		Conf:      &api.PeerConf{NeighborAddress: "10.96.0.1", PeerAsn: 65001},
-		Transport: &api.Transport{PassiveMode: true, MtuDiscovery: true},
-	}}))
-	assert.Contains(t, buf.String(), "mtu-discovery is accepted but not implemented",
-		"setting it must say so rather than being silently ignored")
+	const prefix = "10.60.0.0/24"
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix(prefix))
+	require.NoError(t, err)
 
-	// And a peer that does not set it gets no warning.
-	buf.Reset()
+	// Three eBGP paths from three peers, equal on every cost attribute, so
+	// all three tie and the cap alone decides how many are selected.
+	for i, peer := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
+		nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr(fmt.Sprintf("192.168.60.%d", i+1)))
+		require.NoError(t, err)
+		addr := netip.MustParseAddr(peer)
+		p := table.NewPath(bgp.RF_IPv4_UC,
+			&table.PeerInfo{AS: 65002 + uint32(i), ID: addr, Address: addr},
+			bgp.PathNLRI{NLRI: nlri}, false,
+			[]bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), nh},
+			time.Now(), false)
+		require.NotNil(t, p)
+		require.False(t, p.IsLocal(), "the cap does not apply to local paths, so these must be peer-sourced")
+		s.shared.mu.Lock()
+		s.propagateUpdate(nil, []*table.Path{p})
+		s.shared.mu.Unlock()
+	}
+
+	var best []bool
+	require.NoError(t, s.ListPath(apiutil.ListPathRequest{
+		TableType: api.TableType_TABLE_TYPE_GLOBAL,
+		Family:    bgp.RF_IPv4_UC,
+	}, func(_ bgp.NLRI, paths []*apiutil.Path) {
+		for _, p := range paths {
+			best = append(best, p.Best)
+		}
+	}))
+
+	require.Len(t, best, 3, "all three paths are in the RIB")
+	assert.Equal(t, []bool{true, true, false}, best,
+		"the two most preferred ties are the multipath set; the third is capped out and must not be flagged Best")
+}
+
+// A peer group's policy is refused on the peers that would ignore it: an
+// ordinary member, and every dynamic neighbor built from the group. The group
+// itself is accepted - it is a template, and may serve route-server members.
+func TestPeerGroupPolicyIsRefusedWhereItWouldBeIgnored(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+	require.NoError(t, s.AddPolicy(context.Background(),
+		&api.AddPolicyRequest{Policy: table.NewAPIPolicyFromTableStruct(&table.Policy{Name: "p1"})}))
+
+	require.NoError(t, s.AddPeerGroup(context.Background(), &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "g", PeerAsn: 2},
+		ApplyPolicy: &api.ApplyPolicy{ImportPolicy: &api.PolicyAssignment{
+			Direction: api.PolicyDirection_POLICY_DIRECTION_IMPORT,
+			Policies:  []*api.Policy{{Name: "p1"}},
+		}},
+	}}), "the group is a template and must be accepted")
+
+	err := s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: "10.98.0.1", PeerGroup: "g"},
+	}})
+	require.Error(t, err, "an ordinary member would ignore the inherited policy")
+	assert.Contains(t, err.Error(), "route-server client")
+
 	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
-		Conf:      &api.PeerConf{NeighborAddress: "10.96.0.2", PeerAsn: 65001},
-		Transport: &api.Transport{PassiveMode: true},
-	}}))
-	assert.NotContains(t, buf.String(), "mtu-discovery")
+		Conf:        &api.PeerConf{NeighborAddress: "10.98.0.2", PeerGroup: "g"},
+		RouteServer: &api.RouteServer{RouteServerClient: true},
+	}}), "a route-server member applies the inherited policy")
+
+	err = s.AddDynamicNeighbor(context.Background(), &api.AddDynamicNeighborRequest{
+		DynamicNeighbor: &api.DynamicNeighbor{Prefix: "10.99.0.0/24", PeerGroup: "g"},
+	})
+	require.Error(t, err, "every dynamic neighbor built from this group would ignore its policy")
+	assert.Contains(t, err.Error(), "route-server client")
 }

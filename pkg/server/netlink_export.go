@@ -18,6 +18,7 @@
 package server
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/osrg/gobgp/v4/internal/pkg/table"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	go_netlink "github.com/vishvananda/netlink"
@@ -163,9 +165,43 @@ func exportPrefixKey(path *table.Path) (string, error) {
 	}
 }
 
+// exportsFamily reports whether paths of a family can become kernel routes:
+// IPv4 and IPv6 unicast through the global rules, IPv4 and IPv6 VPN through
+// their VRF's.
+//
+// Every family used to be offered to the global rules, and a rule with no
+// community filter matches every path. RTC, EVPN, FlowSpec and the rest carry
+// nothing forwardable - an RTC route is a route-target subscription - so each
+// update failed, logged a warning and counted an export error. Labelled
+// unicast was worse: its prefix parses as a plain one, so it went into the
+// kernel without its label, keyed and dampened by the same prefix as the
+// unicast route it can coexist with.
+func exportsFamily(f bgp.Family) bool {
+	switch f {
+	case bgp.RF_IPv4_UC, bgp.RF_IPv6_UC, bgp.RF_IPv4_VPN, bgp.RF_IPv6_VPN:
+		return true
+	}
+	return false
+}
+
+// exportUpdate is the state one prefix should be programmed to.
+//
+// The export pipeline used to carry a single path from the RIB to the kernel,
+// so it could only ever install one gateway. It carries the prefix's selected
+// set instead: the best path alone, or with use-multiple-paths the capped
+// multipath set. Without multipath that is a set of one, and nothing about the
+// kernel route changes.
+type exportUpdate struct {
+	// ref identifies the prefix - family, NLRI and, for a VPN path, the RD and
+	// so the VRF. When paths is empty it is the withdrawn path.
+	ref *table.Path
+	// paths is what the kernel route should forward over. Empty removes it.
+	paths []*table.Path
+}
+
 // dampenEntry tracks pending route updates for dampening
 type dampenEntry struct {
-	path      *table.Path
+	update    exportUpdate
 	updatedAt time.Time
 	// dueAt is when this prefix may be written. Entries no longer carry their
 	// own timer; a single flush timer walks the map. See flushDampened.
@@ -698,10 +734,14 @@ func (e *netlinkExportClient) lookupLinuxVrfTableId(vrfName string) (int, error)
 // reEvaluateAllRoutes re-evaluates all routes in the RIB against new rules
 // This should be called after rules are updated to ensure existing routes
 // are exported/withdrawn according to the new rules
-func (e *netlinkExportClient) reEvaluateAllRoutes(pathList []*table.Path) {
+//
+// sets holds one selected set per prefix - the best path alone, or the
+// multipath set - so re-evaluation programs the same routes steady-state
+// export would.
+func (e *netlinkExportClient) reEvaluateAllRoutes(sets [][]*table.Path) {
 	e.logger.Info("Re-evaluating all routes with new export rules",
 		slog.String("Topic", "netlink"),
-		slog.Int("PathCount", len(pathList)))
+		slog.Int("PrefixCount", len(sets)))
 
 	// exportKey identifies one installed route: which tracking bucket, which
 	// prefix, which rule. It must be built the same way here as on the export
@@ -713,12 +753,12 @@ func (e *netlinkExportClient) reEvaluateAllRoutes(pathList []*table.Path) {
 	}
 	shouldExport := make(map[exportKey]bool)
 
-	for _, path := range pathList {
-		if path.IsWithdraw {
+	for _, set := range sets {
+		if len(set) == 0 || set[0].IsWithdraw || !exportsFamily(set[0].GetFamily()) {
 			continue
 		}
 
-		prefix, err := exportPrefixKey(path)
+		prefix, err := exportPrefixKey(set[0])
 		if err != nil {
 			e.logger.Warn("Skipping path with unusable prefix during re-evaluation",
 				slog.String("Topic", "netlink"),
@@ -734,7 +774,7 @@ func (e *netlinkExportClient) reEvaluateAllRoutes(pathList []*table.Path) {
 		// while VPN paths were simultaneously matched against unicast rules and
 		// dumped into those rules' tables. Steady state and re-evaluation
 		// disagreed.
-		for _, applied := range e.exportPathToRules(path) {
+		for _, applied := range e.exportSetToRules(set) {
 			shouldExport[exportKey{vrf: applied.VrfName, prefix: prefix, rule: applied.Name}] = true
 		}
 	}
@@ -786,12 +826,13 @@ func (e *netlinkExportClient) reEvaluateAllRoutes(pathList []*table.Path) {
 				slog.String("VRF", w.vrf),
 				slog.Any("Error", err))
 		} else {
-			// Remove from tracking
+			// Remove this rule's entry only. This deleted the whole prefix
+			// from the bucket, dropping the tracking of every other rule's
+			// route for it - routes still in the kernel, and from then on
+			// invisible to withdraw, flush and re-evaluation. Two rules
+			// sharing a bucket is the default for global rules.
 			e.mu.Lock()
-			delete(e.exported[w.vrf], w.prefix)
-			if len(e.exported[w.vrf]) == 0 {
-				delete(e.exported, w.vrf)
-			}
+			e.untrackExportedLocked(w.vrf, w.prefix, w.rule)
 			e.mu.Unlock()
 
 			e.statsMu.Lock()
@@ -837,24 +878,28 @@ func (e *netlinkExportClient) vrfExportRule(path *table.Path) *exportRule {
 	}
 }
 
-// exportPathToRules programs a path into the kernel through every rule that
-// matches it, and returns those rules.
+// exportSetToRules programs a prefix's selected set into the kernel through
+// every rule that matches any of it, and returns those rules.
 //
 // This is the single dispatch point for export. Steady-state updates and
 // re-evaluation both go through it, so they cannot disagree about which rules
-// apply to a path - which they did: VPN paths went only to the per-VRF path on
-// one route and only to the global rules on the other.
+// apply - which they did: VPN paths went only to the per-VRF path on one route
+// and only to the global rules on the other.
+//
+// Rules match paths, not prefixes, so each rule installs the subset of the set
+// it matches. If three paths tie and a rule's community filter accepts two, that
+// rule's route has two nexthops.
 //
 // A rule whose export attempt fails is still returned. The caller uses the
 // result to decide what to keep, and a transient failure to re-program a route
 // must not be read as "this rule no longer wants it" and turned into a
 // withdrawal.
-func (e *netlinkExportClient) exportPathToRules(path *table.Path) []*exportRule {
+func (e *netlinkExportClient) exportSetToRules(paths []*table.Path) []*exportRule {
 	var applied []*exportRule
 
-	export := func(rule *exportRule) {
+	export := func(subset []*table.Path, rule *exportRule) {
 		applied = append(applied, rule)
-		if err := e.exportRoute(path, rule); err != nil {
+		if err := e.exportRoute(subset, rule); err != nil {
 			e.logger.Warn("Failed to export route",
 				slog.String("Topic", "netlink"),
 				slog.String("Rule", rule.Name),
@@ -863,24 +908,104 @@ func (e *netlinkExportClient) exportPathToRules(path *table.Path) []*exportRule 
 		}
 	}
 
-	switch path.GetFamily() {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	switch paths[0].GetFamily() {
 	case bgp.RF_IPv4_VPN, bgp.RF_IPv6_VPN:
-		// VPN paths are exported only through their VRF's configuration.
-		if rule := e.vrfExportRule(path); rule != nil {
-			export(rule)
+		// VPN paths are exported only through their VRF's configuration. Every
+		// path in a set shares one NLRI, so one RD and one VRF; only the VRF's
+		// community filters can tell them apart.
+		var subset []*table.Path
+		var rule *exportRule
+		for _, path := range paths {
+			if r := e.vrfExportRule(path); r != nil {
+				subset = append(subset, path)
+				rule = r
+			}
+		}
+		if rule != nil {
+			export(subset, rule)
 		}
 	default:
 		e.mu.RLock()
 		rules := slices.Clone(e.rules)
 		e.mu.RUnlock()
 		for _, rule := range rules {
-			if e.matchesRule(path, rule) {
-				export(rule)
+			var subset []*table.Path
+			for _, path := range paths {
+				if e.matchesRule(path, rule) {
+					subset = append(subset, path)
+				}
+			}
+			if len(subset) > 0 {
+				export(subset, rule)
 			}
 		}
 	}
 
 	return applied
+}
+
+// withdrawUnappliedRules removes the routes a prefix still has through rules
+// its new set no longer matches.
+//
+// Export only ever added or replaced; nothing removed a rule's route when the
+// paths it matched left the selected set. So when the best path moved from one
+// carrying a rule's community to one without it, that rule's route stayed in
+// the kernel pointing at the old path's nexthop - even after that path was
+// withdrawn from BGP altogether. With a set it is the same question asked per
+// rule: a rule whose subset is now empty must give its route up.
+func (e *netlinkExportClient) withdrawUnappliedRules(ref *table.Path, applied []*exportRule) {
+	prefix, err := exportPrefixKey(ref)
+	if err != nil {
+		return
+	}
+	keep := make(map[[2]string]bool, len(applied))
+	for _, rule := range applied {
+		keep[[2]string{rule.VrfName, rule.Name}] = true
+	}
+
+	for _, vrfName := range e.withdrawTargets(ref) {
+		e.mu.RLock()
+		tracked := slices.Clone(e.exported[vrfName][prefix])
+		e.mu.RUnlock()
+
+		for _, info := range tracked {
+			if keep[[2]string{vrfName, info.RuleName}] {
+				continue
+			}
+			if err := e.client.RouteDel(info.Route); err != nil && !isRouteAbsent(err) {
+				e.statsMu.Lock()
+				e.stats.Errors++
+				e.stats.LastError = time.Now()
+				e.stats.LastErrorMsg = fmt.Sprintf("RouteDel failed for %s: %v", prefix, err)
+				e.statsMu.Unlock()
+				e.logger.Warn("Failed to remove a route its rule no longer matches",
+					slog.String("Topic", "netlink"),
+					slog.String("Prefix", prefix),
+					slog.String("VRF", vrfName),
+					slog.String("Rule", info.RuleName),
+					slog.Any("Error", err))
+				continue
+			}
+			e.mu.Lock()
+			e.untrackExportedLocked(vrfName, prefix, info.RuleName)
+			e.mu.Unlock()
+
+			e.statsMu.Lock()
+			e.stats.Withdrawn++
+			e.stats.LastWithdraw = time.Now()
+			e.statsMu.Unlock()
+
+			e.logger.Info("Removed a route its rule no longer matches",
+				slog.String("Topic", "netlink"),
+				slog.String("Prefix", prefix),
+				slog.String("VRF", vrfName),
+				slog.String("Rule", info.RuleName))
+		}
+	}
 }
 
 // matchesRule checks if a path matches an export rule's community filters
@@ -961,6 +1086,46 @@ func (e *netlinkExportClient) outgoingInterface(path *table.Path, rule *exportRu
 	return rule.VrfName
 }
 
+// onlinkDevice finds the device a nexthop can be installed ONLINK on, for a
+// non-VRF rule without validation. ONLINK tells the kernel to trust that the
+// nexthop is on that device's link, so the device has to be one it really is
+// on, or the route black-holes:
+//
+//  1. The kernel's own answer. A route lookup that resolves the nexthop
+//     without a gateway means the nexthop is on that device's link.
+//  2. For a single-hop eBGP session, the link the peer is on. A third-party
+//     nexthop from such a peer is on the shared link (RFC 4271 5.1.3), which
+//     is the case ONLINK exists for: on the link, but covered by no connected
+//     prefix. Not for multihop or iBGP, where the peer may be anywhere.
+//
+// Never the device of a route via a gateway: the nexthop is not on that link.
+func (e *netlinkExportClient) onlinkDevice(path *table.Path, nh net.IP) (int, error) {
+	onLink := func(dst net.IP) int {
+		routes, err := e.client.RouteGetWithOptions(dst, nil)
+		if err != nil {
+			return 0
+		}
+		for _, r := range routes {
+			if r.Type == unix.RTN_UNICAST && r.Gw == nil && r.LinkIndex > 0 {
+				return r.LinkIndex
+			}
+		}
+		return 0
+	}
+
+	if idx := onLink(nh); idx > 0 {
+		return idx, nil
+	}
+	if src := path.GetSource(); src != nil && src.PeerType == oc.PEER_TYPE_EXTERNAL &&
+		src.MultihopTtl == 0 && src.Address.IsValid() && !src.Address.IsLinkLocalUnicast() {
+		if idx := onLink(net.IP(src.Address.AsSlice())); idx > 0 {
+			return idx, nil
+		}
+	}
+	return 0, fmt.Errorf("skip-nexthop-validation installs nexthop %s on-link, which needs an output device: "+
+		"it is not on a connected link, and the path was not learned from a directly connected eBGP peer", nh)
+}
+
 // isNexthopReachable checks whether a nexthop is reachable in the table the rule
 // exports into.
 //
@@ -1015,95 +1180,167 @@ func (e *netlinkExportClient) isNexthopReachable(nh net.IP, rule *exportRule) bo
 	return true
 }
 
-// exportRoute exports a BGP path to the Linux routing table according to a rule
-func (e *netlinkExportClient) exportRoute(path *table.Path, rule *exportRule) error {
-	// Get prefix - handle both regular and VPN families
-	nlri := path.GetNlri()
-	var prefix string
-	family := path.GetFamily()
+// routeNexthops resolves the kernel nexthops for a set of paths through one
+// rule: one per distinct usable nexthop, in a stable order.
+//
+// A path whose nexthop cannot be used is left out rather than failing the
+// whole route - unspecified, unreachable when validation is on, or link-local
+// with no interface to scope it to - and the reason is returned. With one path
+// that is the same outcome as before: no nexthops, and the caller reports why.
+// With several, the route carries the ones that work, which is what ECMP is for.
+//
+// Sorted so the same set always produces the same route. Selection order can
+// reshuffle among ties without the set changing, and reprogramming the kernel
+// for a reorder would churn the FIB for nothing.
+func (e *netlinkExportClient) routeNexthops(prefix string, paths []*table.Path, rule *exportRule) ([]*go_netlink.NexthopInfo, []error) {
+	seen := make(map[string]bool, len(paths))
+	nexthops := make([]*go_netlink.NexthopInfo, 0, len(paths))
+	var skipped []error
 
-	if family == bgp.RF_IPv4_VPN || family == bgp.RF_IPv6_VPN {
-		// VPN family - extract plain prefix without RD
-		if vpnNlri, ok := nlri.(*bgp.LabeledVPNIPAddrPrefix); ok {
-			prefix = vpnNlri.IPPrefix()
-			e.logger.Debug("Processing VPN family path",
+	for _, path := range paths {
+		nexthop := path.GetNexthop()
+		if nexthop.IsUnspecified() {
+			e.logger.Debug("Leaving out a path with no nexthop",
 				slog.String("Topic", "netlink"),
 				slog.String("Prefix", prefix),
-				slog.String("RD", vpnNlri.RD.String()),
-				slog.String("Family", family.String()))
-		} else {
-			return fmt.Errorf("unexpected VPN NLRI type for family %s", family.String())
+				slog.String("Rule", rule.Name))
+			skipped = append(skipped, fmt.Errorf("no valid nexthop"))
+			continue
 		}
-	} else {
-		// Regular unicast family
-		prefix = nlri.String()
-	}
+		nexthopIP := net.IP(nexthop.AsSlice())
 
-	// Get nexthop - always require a valid nexthop
-	nexthop := path.GetNexthop()
-	if nexthop.IsUnspecified() {
-		return fmt.Errorf("no valid nexthop for %s", prefix)
-	}
-
-	// Convert nexthop to net.IP
-	nexthopIP := net.IP(nexthop.AsSlice())
-
-	// Validate nexthop if enabled (default: true)
-	if rule.ValidateNexthop {
-		if !e.isNexthopReachable(nexthopIP, rule) {
+		if rule.ValidateNexthop && !e.isNexthopReachable(nexthopIP, rule) {
 			e.logger.Debug("Nexthop validation failed",
 				slog.String("Topic", "netlink"),
 				slog.String("Prefix", prefix),
 				slog.String("Nexthop", nexthop.String()),
 				slog.String("Rule", rule.Name),
 				slog.String("VRF", rule.VrfName))
-			return fmt.Errorf("nexthop %s not reachable", nexthop.String())
-		}
-	}
-
-	// Check whether this rule already installed this prefix (idempotency).
-	//
-	// The lookup is per rule, not per prefix: another rule may have its own
-	// kernel route for the same prefix in a different table, and that one is not
-	// ours to reason about here.
-	e.mu.RLock()
-	existingInfo := e.findExportedLocked(rule.VrfName, prefix, rule.Name)
-	e.mu.RUnlock()
-
-	if existingInfo != nil {
-		existingRoute := existingInfo.Route
-		if existingRoute.Table == rule.TableId &&
-			existingRoute.Priority == int(rule.Metric) &&
-			existingRoute.Gw.Equal(nexthopIP) {
-			// Already installed with identical parameters.
-			return nil
+			skipped = append(skipped, fmt.Errorf("nexthop %s not reachable", nexthop.String()))
+			continue
 		}
 
-		// Parameters changed. The kernel identifies a route by table and metric,
-		// so the old one is a distinct entry and RouteReplace would leave it
-		// behind; delete it explicitly.
-		e.logger.Info("Route parameters changed, deleting old route before re-export",
-			slog.String("Topic", "netlink"),
-			slog.String("Prefix", prefix),
-			slog.String("Rule", rule.Name),
-			slog.Int("OldMetric", existingRoute.Priority),
-			slog.Any("NewMetric", rule.Metric),
-			slog.Int("OldTable", existingRoute.Table),
-			slog.Int("NewTable", rule.TableId))
-
-		if err := e.client.RouteDel(existingRoute); err != nil && !isRouteAbsent(err) {
-			e.logger.Warn("Failed to delete old route during parameter change",
+		// Resolve the output interface.
+		//
+		// This is independent of ONLINK, and it used to be conflated with it:
+		// the device was looked up only when validation was disabled. A
+		// link-local nexthop needs an output interface in every case, because
+		// the kernel rejects a link-local gateway carrying RTA_OIF=0 with
+		// EINVAL. That is exactly the unnumbered-peer case this fork exists to
+		// support.
+		linkIndex := 0
+		if linkName := e.outgoingInterface(path, rule, nexthopIP); linkName != "" {
+			link, err := e.client.LinkByName(linkName)
+			if err != nil {
+				e.logger.Warn("Failed to look up outgoing interface for route",
+					slog.String("Topic", "netlink"),
+					slog.String("Prefix", prefix),
+					slog.String("Interface", linkName),
+					slog.Any("Error", err))
+				if isLinkLocal(nexthopIP) {
+					// Without a device the kernel refuses this outright.
+					skipped = append(skipped, fmt.Errorf("link-local nexthop %s needs an output interface, %q not found",
+						nexthop.String(), linkName))
+					continue
+				}
+			} else {
+				linkIndex = link.Attrs().Index
+			}
+		} else if isLinkLocal(nexthopIP) {
+			e.logger.Warn("Leaving out a link-local nexthop with no known output interface",
 				slog.String("Topic", "netlink"),
 				slog.String("Prefix", prefix),
-				slog.Any("Error", err))
+				slog.String("Nexthop", nexthop.String()))
+			skipped = append(skipped, fmt.Errorf("link-local nexthop %s has no known output interface", nexthop.String()))
+			continue
+		} else if !rule.ValidateNexthop {
+			// A non-VRF rule without validation installs the nexthop ONLINK,
+			// and the kernel refuses ONLINK without a device - so until this
+			// found one, skip-nexthop-validation on a non-VRF rule could never
+			// install a route. VRF rules have the VRF device and link-local
+			// nexthops the session's interface, both above.
+			idx, err := e.onlinkDevice(path, nexthopIP)
+			if err != nil {
+				e.logger.Warn("Leaving out a nexthop with no device to install it on-link",
+					slog.String("Topic", "netlink"),
+					slog.String("Prefix", prefix),
+					slog.String("Nexthop", nexthop.String()),
+					slog.String("Rule", rule.Name),
+					slog.Any("Error", err))
+				skipped = append(skipped, err)
+				continue
+			}
+			linkIndex = idx
 		}
 
-		e.mu.Lock()
-		e.untrackExportedLocked(rule.VrfName, prefix, rule.Name)
-		e.mu.Unlock()
+		key := fmt.Sprintf("%s%%%d", nexthopIP, linkIndex)
+		if seen[key] {
+			// Two sessions to one router: the same nexthop twice would weight
+			// the route toward it, which no one asked for.
+			continue
+		}
+		seen[key] = true
+
+		nh := &go_netlink.NexthopInfo{Gw: nexthopIP, LinkIndex: linkIndex}
+		// ONLINK tells the kernel to accept a nexthop that is not covered by an
+		// on-link prefix. It is a separate decision from whether we validated
+		// reachability ourselves, and pairing the two meant that turning
+		// validation back on silently dropped the flag.
+		if !rule.ValidateNexthop {
+			nh.Flags = int(go_netlink.FLAG_ONLINK)
+		}
+		nexthops = append(nexthops, nh)
 	}
 
-	// Create netlink route
+	slices.SortFunc(nexthops, func(a, b *go_netlink.NexthopInfo) int {
+		if c := bytes.Compare(a.Gw.To16(), b.Gw.To16()); c != 0 {
+			return c
+		}
+		return a.LinkIndex - b.LinkIndex
+	})
+	return nexthops, skipped
+}
+
+// routeNexthopList is a route's nexthops as one list, whichever form it was
+// built in.
+func routeNexthopList(r *go_netlink.Route) []*go_netlink.NexthopInfo {
+	if len(r.MultiPath) > 0 {
+		return r.MultiPath
+	}
+	return []*go_netlink.NexthopInfo{{Gw: r.Gw, LinkIndex: r.LinkIndex, Flags: r.Flags}}
+}
+
+// sameNexthops reports whether two routes forward the same way.
+func sameNexthops(a, b *go_netlink.Route) bool {
+	return slices.EqualFunc(routeNexthopList(a), routeNexthopList(b), func(x, y *go_netlink.NexthopInfo) bool {
+		return x.Gw.Equal(y.Gw) && x.LinkIndex == y.LinkIndex && x.Flags == y.Flags
+	})
+}
+
+// exportRoute programs one prefix into the kernel through one rule, with a
+// nexthop for each usable path in paths.
+//
+// paths is the prefix's selected set: the best path alone, or with
+// use-multiple-paths the whole multipath set, already capped by
+// maximum-paths. The export used to take a single path and install a single
+// gateway, so a node running multipath advertised and selected several paths
+// and forwarded over one. More than one usable nexthop now installs an ECMP
+// route; exactly one installs the single-gateway form it always did, so a node
+// that does not run multipath programs byte-identical routes.
+func (e *netlinkExportClient) exportRoute(paths []*table.Path, rule *exportRule) error {
+	if len(paths) == 0 {
+		return fmt.Errorf("no paths to export")
+	}
+	prefix, err := exportPrefixKey(paths[0])
+	if err != nil {
+		return err
+	}
+
+	nexthops, skipped := e.routeNexthops(prefix, paths, rule)
+	if len(nexthops) == 0 {
+		return fmt.Errorf("no usable nexthop for %s through rule %s: %w", prefix, rule.Name, errors.Join(skipped...))
+	}
+
 	_, ipNet, err := net.ParseCIDR(prefix)
 	if err != nil {
 		return fmt.Errorf("failed to parse CIDR %s: %w", prefix, err)
@@ -1111,62 +1348,74 @@ func (e *netlinkExportClient) exportRoute(path *table.Path, rule *exportRule) er
 
 	route := &go_netlink.Route{
 		Dst:      ipNet,
-		Gw:       nexthopIP,
 		Table:    rule.TableId,
 		Priority: int(rule.Metric),
 		Protocol: go_netlink.RouteProtocol(e.routeProtocol),
 	}
+	if len(nexthops) == 1 {
+		route.Gw = nexthops[0].Gw
+		route.LinkIndex = nexthops[0].LinkIndex
+		route.Flags = nexthops[0].Flags
+	} else {
+		route.MultiPath = nexthops
+	}
 
-	// Resolve the output interface.
+	// Check whether this rule already installed this prefix (idempotency).
 	//
-	// This is independent of ONLINK, and it used to be conflated with it: the
-	// device was looked up only when validation was disabled. A route whose
-	// nexthop is an IPv6 link-local address needs an output interface in every
-	// case, because the kernel rejects a link-local gateway carrying RTA_OIF=0
-	// with EINVAL. That is exactly the unnumbered-peer case this fork exists to
-	// support, so with validation on - the default - those routes could not be
-	// installed at all.
-	if linkName := e.outgoingInterface(path, rule, nexthopIP); linkName != "" {
-		link, err := e.client.LinkByName(linkName)
-		if err != nil {
-			e.logger.Warn("Failed to look up outgoing interface for route",
-				slog.String("Topic", "netlink"),
-				slog.String("Prefix", prefix),
-				slog.String("Interface", linkName),
-				slog.Any("Error", err))
-			if isLinkLocal(nexthopIP) {
-				// Without a device the kernel will refuse this outright; say so
-				// rather than letting RouteReplace fail with a bare EINVAL.
-				return fmt.Errorf("link-local nexthop %s needs an output interface, %q not found",
-					nexthop.String(), linkName)
-			}
-		} else {
-			route.LinkIndex = link.Attrs().Index
-			e.logger.Debug("Set outgoing interface for route",
-				slog.String("Topic", "netlink"),
-				slog.String("Prefix", prefix),
-				slog.String("Interface", linkName),
-				slog.Int("LinkIndex", route.LinkIndex))
+	// The lookup is per rule, not per prefix: another rule may have its own
+	// kernel route for the same prefix in a different table, and that one is
+	// not ours to reason about here.
+	e.mu.RLock()
+	existingInfo := e.findExportedLocked(rule.VrfName, prefix, rule.Name)
+	e.mu.RUnlock()
+
+	if existingInfo != nil {
+		existingRoute := existingInfo.Route
+		sameKey := existingRoute.Table == rule.TableId && existingRoute.Priority == int(rule.Metric)
+		if sameKey && sameNexthops(existingRoute, route) {
+			// Already installed with identical parameters.
+			return nil
 		}
-	} else if isLinkLocal(nexthopIP) {
-		return fmt.Errorf("link-local nexthop %s has no known output interface", nexthop.String())
+
+		// A change of table or metric is a different kernel route, so
+		// RouteReplace would leave the old one behind; delete it explicitly.
+		//
+		// A change of nexthops alone is not, and must not be done that way.
+		// It used to be: any gateway change deleted the route and then added
+		// it back, leaving the prefix with no route in between. With ECMP,
+		// losing one of N paths is exactly this case, and a delete-then-add
+		// would drop a service VIP from the node's FIB on every peer flap.
+		// RouteReplace swaps the nexthops of the same kernel route in one
+		// operation.
+		if !sameKey {
+			e.logger.Info("Route table or metric changed, deleting old route before re-export",
+				slog.String("Topic", "netlink"),
+				slog.String("Prefix", prefix),
+				slog.String("Rule", rule.Name),
+				slog.Int("OldMetric", existingRoute.Priority),
+				slog.Any("NewMetric", rule.Metric),
+				slog.Int("OldTable", existingRoute.Table),
+				slog.Int("NewTable", rule.TableId))
+
+			if err := e.client.RouteDel(existingRoute); err != nil && !isRouteAbsent(err) {
+				e.logger.Warn("Failed to delete old route during parameter change",
+					slog.String("Topic", "netlink"),
+					slog.String("Prefix", prefix),
+					slog.Any("Error", err))
+			}
+
+			e.mu.Lock()
+			e.untrackExportedLocked(rule.VrfName, prefix, rule.Name)
+			e.mu.Unlock()
+		}
 	}
 
-	// ONLINK tells the kernel to accept a nexthop that is not covered by an
-	// on-link prefix. It is a separate decision from whether we validated
-	// reachability ourselves, and pairing the two meant that turning validation
-	// back on silently dropped the flag and changed forwarding behaviour.
-	if !rule.ValidateNexthop {
-		route.Flags = int(go_netlink.FLAG_ONLINK)
-		e.logger.Debug("Setting ONLINK flag for route with unvalidated nexthop",
-			slog.String("Topic", "netlink"),
-			slog.String("Prefix", prefix),
-			slog.String("Nexthop", nexthop.String()))
+	gateways := make([]string, 0, len(nexthops))
+	for _, nh := range nexthops {
+		gateways = append(gateways, nh.Gw.String())
 	}
 
-	// Add the route
-	err = e.client.RouteReplace(route)
-	if err != nil {
+	if err := e.client.RouteReplace(route); err != nil {
 		e.statsMu.Lock()
 		e.stats.Errors++
 		e.stats.LastError = time.Now()
@@ -1176,14 +1425,13 @@ func (e *netlinkExportClient) exportRoute(path *table.Path, rule *exportRule) er
 		e.logger.Warn("Failed to export route",
 			slog.String("Topic", "netlink"),
 			slog.String("Prefix", prefix),
-			slog.String("Nexthop", nexthop.String()),
+			slog.Any("Nexthops", gateways),
 			slog.String("Rule", rule.Name),
 			slog.String("VRF", rule.VrfName),
 			slog.Any("Error", err))
 		return fmt.Errorf("failed to add route %s: %w", prefix, err)
 	}
 
-	// Track exported route
 	e.mu.Lock()
 	e.trackExportedLocked(rule.VrfName, prefix, &exportedRouteInfo{
 		Route:      route,
@@ -1200,7 +1448,7 @@ func (e *netlinkExportClient) exportRoute(path *table.Path, rule *exportRule) er
 	e.logger.Info("Exported route to Linux",
 		slog.String("Topic", "netlink"),
 		slog.String("Prefix", prefix),
-		slog.String("Nexthop", nexthop.String()),
+		slog.Any("Nexthops", gateways),
 		slog.String("Rule", rule.Name),
 		slog.String("VRF", rule.VrfName),
 		slog.Int("Table", rule.TableId),
@@ -1285,8 +1533,8 @@ func (e *netlinkExportClient) withdrawRoute(path *table.Path, vrfName string) er
 // flushDampened programs the prefixes whose deferral has elapsed, at most
 // dampenFlushBudget of them, then re-arms for whatever is left.
 //
-// It reads each entry's current path rather than one captured when the update
-// was scheduled, so the newest update for a prefix always wins.
+// It reads each entry's current update rather than one captured when it was
+// first scheduled, so the newest state for a prefix always wins.
 func (e *netlinkExportClient) flushDampened() {
 	now := time.Now()
 
@@ -1305,8 +1553,8 @@ func (e *netlinkExportClient) flushDampened() {
 
 	// Outside the lock: each of these is a netlink syscall.
 	for _, entry := range due {
-		if entry.path != nil {
-			e.processUpdate(entry.path)
+		if entry.update.ref != nil {
+			e.processUpdate(entry.update)
 		}
 	}
 
@@ -1382,14 +1630,19 @@ func (e *netlinkExportClient) armFlushAtLocked(at time.Time) {
 // interval had its timer cancelled and restarted on every update and was
 // therefore never programmed at all - dampening turned into permanent
 // suppression, which is the opposite of what it is for.
-func (e *netlinkExportClient) scheduleUpdate(path *table.Path) {
+func (e *netlinkExportClient) scheduleUpdate(u exportUpdate) {
+	// Before dampening, which is keyed by prefix: another family's update for
+	// the same prefix would replace a pending unicast one.
+	if !exportsFamily(u.ref.GetFamily()) {
+		return
+	}
 	if e.dampeningInterval == 0 {
 		// No dampening, process immediately
-		e.processUpdate(path)
+		e.processUpdate(u)
 		return
 	}
 
-	prefix, err := exportPrefixKey(path)
+	prefix, err := exportPrefixKey(u.ref)
 	if err != nil {
 		e.logger.Warn("Skipping update with unusable prefix",
 			slog.String("Topic", "netlink"),
@@ -1403,7 +1656,7 @@ func (e *netlinkExportClient) scheduleUpdate(path *table.Path) {
 	now := time.Now()
 
 	if entry, exists := e.pendingUpdates[prefix]; exists {
-		entry.path = path
+		entry.update = u
 
 		// Once the first deferral of a run has been outstanding for the maximum
 		// delay, stop pushing it back and let the next flush take it.
@@ -1425,7 +1678,7 @@ func (e *netlinkExportClient) scheduleUpdate(path *table.Path) {
 	}
 
 	entry := &dampenEntry{
-		path:          path,
+		update:        u,
 		updatedAt:     now,
 		dueAt:         now.Add(e.dampeningInterval),
 		firstDeferred: now,
@@ -1490,19 +1743,20 @@ func (e *netlinkExportClient) withdrawTargets(path *table.Path) []string {
 	}
 }
 
-// processUpdate processes a route update (export or withdrawal)
-func (e *netlinkExportClient) processUpdate(path *table.Path) {
-	family := path.GetFamily()
-	nlri := path.GetNlri()
+// processUpdate programs a prefix to the state in u: its selected set, or
+// removed when the set is empty.
+func (e *netlinkExportClient) processUpdate(u exportUpdate) {
+	family := u.ref.GetFamily()
+	nlri := u.ref.GetNlri()
 
 	e.logger.Debug("processUpdate called",
 		slog.String("Topic", "netlink"),
 		slog.String("Family", family.String()),
 		slog.String("NLRI", nlri.String()),
-		slog.Bool("IsWithdraw", path.IsWithdraw))
+		slog.Int("Paths", len(u.paths)))
 
-	if path.IsWithdraw {
-		prefix, err := exportPrefixKey(path)
+	if len(u.paths) == 0 {
+		prefix, err := exportPrefixKey(u.ref)
 		if err != nil {
 			e.logger.Warn("Skipping withdrawal with unusable prefix",
 				slog.String("Topic", "netlink"),
@@ -1510,7 +1764,7 @@ func (e *netlinkExportClient) processUpdate(path *table.Path) {
 			return
 		}
 
-		vrfsToWithdraw := e.withdrawTargets(path)
+		vrfsToWithdraw := e.withdrawTargets(u.ref)
 
 		e.logger.Debug("Processing withdrawal",
 			slog.String("Topic", "netlink"),
@@ -1519,7 +1773,7 @@ func (e *netlinkExportClient) processUpdate(path *table.Path) {
 			slog.Any("VRFs", vrfsToWithdraw))
 
 		for _, vrfName := range vrfsToWithdraw {
-			if err := e.withdrawRoute(path, vrfName); err != nil {
+			if err := e.withdrawRoute(u.ref, vrfName); err != nil {
 				e.logger.Warn("Failed to withdraw route",
 					slog.String("Topic", "netlink"),
 					slog.String("Prefix", prefix),
@@ -1531,9 +1785,10 @@ func (e *netlinkExportClient) processUpdate(path *table.Path) {
 	}
 
 	// Steady-state export goes through the same dispatch as re-evaluation, so
-	// the two cannot disagree about which rules apply to a path.
-	applied := e.exportPathToRules(path)
-	e.logger.Debug("Processed path for export",
+	// the two cannot disagree about which rules apply to a prefix.
+	applied := e.exportSetToRules(u.paths)
+	e.withdrawUnappliedRules(u.ref, applied)
+	e.logger.Debug("Processed prefix for export",
 		slog.String("Topic", "netlink"),
 		slog.String("Family", family.String()),
 		slog.String("NLRI", nlri.String()),

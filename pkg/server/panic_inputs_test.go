@@ -17,6 +17,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net/netip"
 	"strings"
@@ -532,7 +533,6 @@ func TestNeighborConfigFieldsSurvivePeerGroupMembership(t *testing.T) {
 			Description:         proto.String("Spine uplink 1"),
 			LocalAsn:            proto.Uint32(65002),
 			AuthPassword:        proto.String("correct-horse-battery-staple"),
-			RouteFlapDamping:    proto.Bool(true),
 			SendSoftwareVersion: proto.Bool(true),
 			RemovePrivate:       api.RemovePrivate_REMOVE_PRIVATE_REPLACE.Enum(),
 			SendCommunity:       proto.Uint32(1),
@@ -546,7 +546,6 @@ func TestNeighborConfigFieldsSurvivePeerGroupMembership(t *testing.T) {
 
 	assert.Equal(t, "Spine uplink 1", got.Conf.GetDescription())
 	assert.EqualValues(t, 65002, got.Conf.GetLocalAsn())
-	assert.True(t, got.Conf.GetRouteFlapDamping())
 	assert.True(t, got.Conf.GetSendSoftwareVersion())
 	assert.Equal(t, api.RemovePrivate_REMOVE_PRIVATE_REPLACE, got.Conf.GetRemovePrivate())
 	assert.EqualValues(t, 1, got.Conf.GetSendCommunity())
@@ -936,4 +935,369 @@ func TestPeerGroupDescriptionChangeDoesNotResetMembers(t *testing.T) {
 		assert.Equal(t, "Spine fabric (renamed)", p.Conf.GetDescription(),
 			"the inherited description still has to be applied, not merely not-reset")
 	}))
+}
+
+// A session reset must not cost a grouped neighbor the settings it owns.
+//
+// updateNeighbor rebuilds the session for any change that reaches the OPEN
+// message, and it does that by calling deleteNeighbor and addNeighbor.
+// deleteNeighbor drops the field-presence recorded for the neighbor - correct
+// when a peer is genuinely being deleted, so a later peer reusing the address
+// does not inherit it - and addNeighbor then resolves the configuration again.
+// With the presence already gone, that second resolve handed the peer group
+// every field the member owned: its MD5 key, its local AS, graceful restart,
+// ebgp-multihop, passive mode.
+//
+// It did not self-heal, because every attempt to put the value back is itself
+// a change that resets the session. And through updatePeerGroup one edit does
+// it to every member of the group at once.
+//
+// v1.3.3 survived this by accident: SetDefaultNeighborConfigValues skipped any
+// neighbor it had already resolved, so addNeighbor's second resolve did
+// nothing. Removing that short-circuit is what makes peer-group edits reach
+// existing members, and it is what exposed this - the presence has to be kept
+// deliberately now rather than protected by a guard that also broke
+// propagation.
+func TestSessionResetKeepsTheFieldsAMemberOwns(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const addr = "198.51.100.120"
+
+	// A group that sets its own values for everything the member overrides, so
+	// "the member kept its own" and "the group had nothing to give" cannot be
+	// confused.
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:            &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001, AuthPassword: "grouppw"},
+		GracefulRestart: &api.GracefulRestart{Enabled: false},
+		EbgpMultihop:    &api.EbgpMultihop{Enabled: false},
+		Transport:       &api.Transport{PassiveMode: false},
+	}}))
+
+	member := func(localAs uint32) *api.Peer {
+		return &api.Peer{
+			Conf: &api.PeerConf{
+				NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+				AuthPassword: proto.String("memberpw"),
+				LocalAsn:     proto.Uint32(localAs),
+			},
+			GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120},
+			EbgpMultihop:    &api.EbgpMultihop{Enabled: true, MultihopTtl: 5},
+			Transport:       &api.Transport{PassiveMode: true},
+		}
+	}
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: member(65042)}))
+
+	// Read the resolved configuration the FSM holds. ListPeer blanks the
+	// password on the way out, and the password is the setting whose loss is
+	// worst: the session stays up, unauthenticated or authenticated with a key
+	// the operator did not choose.
+	type owned struct {
+		authPassword string
+		localAs      uint32
+		gr           bool
+		multihop     bool
+		multihopTTL  uint8
+		passive      bool
+	}
+	read := func(t *testing.T) owned {
+		t.Helper()
+		var got owned
+		require.NoError(t, s.mgmtOperation(func() error {
+			c := s.neighborMap[netip.MustParseAddr(addr)].fsm.pConf.ReadOnly()
+			got = owned{
+				authPassword: c.Config.AuthPassword,
+				localAs:      c.Config.LocalAs,
+				gr:           c.GracefulRestart.Config.Enabled,
+				multihop:     c.EbgpMultihop.Config.Enabled,
+				multihopTTL:  c.EbgpMultihop.Config.MultihopTtl,
+				passive:      c.Transport.Config.PassiveMode,
+			}
+			return nil
+		}, false))
+		return got
+	}
+
+	require.Equal(t, owned{"memberpw", 65042, true, true, 5, true}, read(t),
+		"the member's own settings at AddPeer")
+
+	// Change local-as. It is carried in this speaker's OPEN, so the session is
+	// rebuilt - which is the path under test, not the change itself.
+	p := member(65043)
+	_, err := s.UpdatePeer(ctx, &api.UpdatePeerRequest{Peer: p})
+	require.NoError(t, err)
+
+	assert.Equal(t, owned{"memberpw", 65043, true, true, 5, true}, read(t),
+		"rebuilding the session handed the peer group the fields this member owns")
+}
+
+// A grouped neighbor's address families were always the peer group's.
+//
+// Inheritance replaces the afi-safi list wholesale unless "neighbor.afi-safis"
+// is set, and nothing ever set it - the presence table had an entry for every
+// block except this one. It was also excused from the coverage guard, on the
+// grounds that a list is not a block, which is precisely why nobody noticed.
+//
+// A neighbor asking for IPv6 in a group configured for IPv4 got IPv4, with no
+// error: the families it asked for simply were not negotiated.
+func TestNeighborKeepsItsOwnAfiSafis(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+		AfiSafis: []*api.AfiSafi{{Config: &api.AfiSafiConfig{
+			Family: &api.Family{Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST}, Enabled: true,
+		}}},
+	}}))
+
+	families := func(t *testing.T, addr string) []string {
+		t.Helper()
+		var out []string
+		require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) {
+			if p.Conf.NeighborAddress != addr {
+				return
+			}
+			for _, af := range p.AfiSafis {
+				out = append(out, fmt.Sprintf("%v/%v", af.Config.Family.Afi, af.Config.Family.Safi))
+			}
+		}))
+		return out
+	}
+
+	// States its own family: IPv6, where the group says IPv4.
+	const own = "198.51.100.130"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: own, PeerAsn: 65001, PeerGroup: "edge"},
+		AfiSafis: []*api.AfiSafi{{Config: &api.AfiSafiConfig{
+			Family: &api.Family{Afi: api.Family_AFI_IP6, Safi: api.Family_SAFI_UNICAST}, Enabled: true,
+		}}},
+	}}))
+	assert.Equal(t, []string{"AFI_IP6/SAFI_UNICAST"}, families(t, own),
+		"the neighbor asked for IPv6 and the peer group replaced it with its own families")
+
+	// States nothing: still inherits, which is the half that must not regress.
+	const inherits = "198.51.100.131"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: inherits, PeerAsn: 65001, PeerGroup: "edge"},
+	}}))
+	assert.Equal(t, []string{"AFI_IP/SAFI_UNICAST"}, families(t, inherits),
+		"a neighbor that stated no families must still take the group's")
+}
+
+// Out-of-range integers on the API input path must be refused, not wrapped.
+//
+// The configuration structs use uint8 and uint16 where the proto uses uint32,
+// and the conversions were plain casts. A wrap is silent, non-monotonic, and
+// always fails in the dangerous direction: the operator asks for a strict or
+// large value and gets a permissive or small one, with a success response.
+//
+// ttl_min 257 -> 1 was the case that made this concrete - GTSM reported as
+// enabled while accepting from any hop count. These are its siblings.
+func TestOutOfRangeIntegersAreRejectedNotWrapped(t *testing.T) {
+	const addr = "198.51.100.140"
+	base := func() *api.Peer {
+		return &api.Peer{Conf: &api.PeerConf{NeighborAddress: addr, PeerAsn: 65001}}
+	}
+
+	for name, mutate := range map[string]func(*api.Peer){
+		"graceful_restart.restart_time": func(p *api.Peer) {
+			p.GracefulRestart = &api.GracefulRestart{Enabled: true, RestartTime: 131072}
+		},
+		"graceful_restart.deferral_time": func(p *api.Peer) {
+			p.GracefulRestart = &api.GracefulRestart{Enabled: true, DeferralTime: 131072}
+		},
+		"transport.remote_port": func(p *api.Peer) {
+			p.Transport = &api.Transport{RemotePort: 131072}
+		},
+		"transport.tcp_mss": func(p *api.Peer) {
+			p.Transport = &api.Transport{TcpMss: 131072}
+		},
+		"transport.ip_tos": func(p *api.Peer) {
+			p.Transport = &api.Transport{IpTos: 256}
+		},
+		"ebgp_multihop.multihop_ttl": func(p *api.Peer) {
+			p.EbgpMultihop = &api.EbgpMultihop{Enabled: true, MultihopTtl: 256}
+		},
+		"bfd.detection_multiplier": func(p *api.Peer) {
+			p.Bfd = &api.BfdPeerConfig{Enabled: true, DetectionMultiplier: 256}
+		},
+		"add_paths.send_max": func(p *api.Peer) {
+			p.AfiSafis = []*api.AfiSafi{{
+				Config: &api.AfiSafiConfig{Family: &api.Family{
+					Afi: api.Family_AFI_IP, Safi: api.Family_SAFI_UNICAST,
+				}, Enabled: true},
+				AddPaths: &api.AddPaths{Config: &api.AddPathsConfig{SendMax: 256}},
+			}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := base()
+			mutate(p)
+			_, err := newNeighborFromAPIStruct(p)
+			require.Error(t, err, "an out-of-range %s must be refused", name)
+			// Wording varies - some of these had explicit checks already - but
+			// every one must name the offending value rather than wrap it.
+			assert.Regexp(t, `256|131072`, err.Error(),
+				"the error should name the value it refused: %v", err)
+		})
+	}
+
+	// The boundary is still accepted and not truncated.
+	p := base()
+	p.EbgpMultihop = &api.EbgpMultihop{Enabled: true, MultihopTtl: 255}
+	p.Transport = &api.Transport{TcpMss: 65535}
+	n, err := newNeighborFromAPIStruct(p)
+	require.NoError(t, err)
+	assert.EqualValues(t, 255, n.EbgpMultihop.Config.MultihopTtl)
+	assert.EqualValues(t, 65535, n.Transport.Config.TcpMss)
+}
+
+// A peer group that does not state a remote AS must not zero its members'.
+//
+// peer-as is owned by the peer group, which is right when the group names an
+// AS: a member of that group peers with that AS. It was owned unconditionally,
+// so a group configuring timers and policy while leaving the remote AS to its
+// members - an ordinary shape - overwrote every member's peer-as with zero.
+//
+// peer-as 0 makes the FSM skip ASN negotiation entirely and let the peer
+// choose its own type from the OPEN it sends. A peer claiming our local AS is
+// then treated as iBGP, which keeps LOCAL_PREF across the session and drops
+// the eBGP TTL clamp. The member asked for validation against 65001 and
+// silently got none.
+func TestPeerGroupWithoutAnASNDoesNotZeroItsMembers(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+
+	peerAs := func(t *testing.T, addr string) uint32 {
+		t.Helper()
+		var got uint32
+		require.NoError(t, s.mgmtOperation(func() error {
+			got = s.neighborMap[netip.MustParseAddr(addr)].fsm.pConf.ReadOnly().Config.PeerAs
+			return nil
+		}, false))
+		return got
+	}
+
+	// A group with no remote AS of its own.
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf:   &api.PeerGroupConf{PeerGroupName: "silent"},
+		Timers: &api.Timers{Config: &api.TimersConfig{HoldTime: 90, KeepaliveInterval: 30}},
+	}}))
+	const own = "198.51.100.160"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: own, PeerAsn: 65001, PeerGroup: "silent"},
+	}}))
+	assert.EqualValues(t, 65001, peerAs(t, own),
+		"the group named no AS and still zeroed the member's, disabling ASN validation")
+
+	// A group that does name one still owns it - that half must not regress.
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "stated", PeerAsn: 64512},
+	}}))
+	const overridden = "198.51.100.161"
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: overridden, PeerAsn: 65001, PeerGroup: "stated"},
+	}}))
+	assert.EqualValues(t, 64512, peerAs(t, overridden),
+		"a group that names an AS owns it; members peer with the AS the group names")
+}
+
+// Fields the daemon knows and never reported.
+//
+// Each of these is a value already present in the neighbor or peer-group
+// struct that the read path simply did not copy, so a controller diffing
+// desired against observed saw an empty field and could not converge on it.
+func TestStateFieldsAreReported(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const addr = "198.51.100.170"
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{
+			PeerGroupName: "edge",
+			PeerAsn:       65001,
+			LocalAsn:      65002,
+			Description:   "Spine fabric",
+		},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{
+			NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge",
+			Description:   proto.String("Spine uplink 1"),
+			RemovePrivate: api.RemovePrivate_REMOVE_PRIVATE_ALL.Enum(),
+		},
+		Timers: &api.Timers{Config: &api.TimersConfig{
+			HoldTime: 90, KeepaliveInterval: 30, ConnectRetry: 7,
+		}},
+	}}))
+
+	var peer *api.Peer
+	require.NoError(t, s.ListPeer(ctx, &api.ListPeerRequest{}, func(p *api.Peer) { peer = p }))
+	require.NotNil(t, peer)
+	require.NotNil(t, peer.State)
+
+	assert.Equal(t, "Spine uplink 1", peer.State.Description, "PeerState.description")
+	assert.Equal(t, "edge", peer.State.PeerGroup, "PeerState.peer_group")
+	assert.Equal(t, api.RemovePrivate_REMOVE_PRIVATE_ALL, peer.State.RemovePrivate,
+		"PeerState.remove_private")
+
+	require.NotNil(t, peer.Timers)
+	require.NotNil(t, peer.Timers.State)
+	assert.EqualValues(t, 90, peer.Timers.State.HoldTime, "TimersState.hold_time")
+	assert.EqualValues(t, 7, peer.Timers.State.ConnectRetry, "TimersState.connect_retry")
+
+	var group *api.PeerGroup
+	require.NoError(t, s.ListPeerGroup(ctx, &api.ListPeerGroupRequest{},
+		func(g *api.PeerGroup) { group = g }))
+	require.NotNil(t, group)
+	require.NotNil(t, group.Info)
+
+	assert.Equal(t, "edge", group.Info.PeerGroupName, "PeerGroupState.peer_group_name")
+	assert.Equal(t, "Spine fabric", group.Info.Description, "PeerGroupState.description")
+	assert.EqualValues(t, 65002, group.Info.LocalAsn, "PeerGroupState.local_asn")
+}
+
+// WatchEvent's peer-group filter matched nothing at all.
+//
+// WatchUpdate(current, peerAddress, peerGroup) filters by comparing the
+// requested group against ev.Neighbor.State.PeerGroup (server.go:5971 and
+// :6008). Nothing ever assigned that field, so the comparison was always
+// against "" and a client watching a peer group received no updates - not a
+// subset, none. The filter had no test, and an empty stream is indistinguishable
+// from an idle one, so it never looked broken.
+//
+// State.PeerGroup is now mirrored from Config.PeerGroup the way State.Description
+// already was, which fixes the filter and the reporting gap together.
+func TestWatchEventPeerGroupFilterMatches(t *testing.T) {
+	s := newPanicTestServer(t)
+	ctx := context.Background()
+	const addr = "198.51.100.171"
+
+	require.NoError(t, s.AddPeerGroup(ctx, &api.AddPeerGroupRequest{PeerGroup: &api.PeerGroup{
+		Conf: &api.PeerGroupConf{PeerGroupName: "edge", PeerAsn: 65001},
+	}}))
+	require.NoError(t, s.AddPeer(ctx, &api.AddPeerRequest{Peer: &api.Peer{
+		Conf: &api.PeerConf{NeighborAddress: addr, PeerAsn: 65001, PeerGroup: "edge"},
+	}}))
+
+	// The filter is a pure function of the neighbor's resolved config, so it can
+	// be exercised directly - no session required, which is what makes this
+	// testable at all.
+	var opts watchOptions
+	WatchUpdate(false, "", "edge")(&opts)
+	require.NotNil(t, opts.preUpdateFilter)
+
+	var n *oc.Neighbor
+	require.NoError(t, s.mgmtOperation(func() error {
+		n = s.neighborMap[netip.MustParseAddr(addr)].fsm.pConf.ReadOnly()
+		return nil
+	}, false))
+
+	assert.True(t, opts.preUpdateFilter(&watchEventUpdate{Neighbor: n}),
+		"a member of the watched peer group must match the filter")
+
+	var other watchOptions
+	WatchUpdate(false, "", "not-edge")(&other)
+	assert.False(t, other.preUpdateFilter(&watchEventUpdate{Neighbor: n}),
+		"a different peer group must not match")
 }
