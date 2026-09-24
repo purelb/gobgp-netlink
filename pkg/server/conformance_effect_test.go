@@ -647,3 +647,40 @@ func TestEffectPrefixLimitShutdownIsReportedAsSuch(t *testing.T) {
 	assert.Contains(t, st.DisconnectMessage, "maximum number of prefixes reached",
 		"the message must name the CEASE subcode")
 }
+
+// A hold-time change on a live peer reaches the running session.
+//
+// It used to be stored and reported at once while the session kept negotiating
+// from the old value until it happened to restart: hold time is carried in the
+// OPEN and read only when the session establishes. It now rebuilds the
+// session, so the new value is negotiated immediately.
+func TestEffectHoldTimeChangeReachesTheSession(t *testing.T) {
+	a, _ := effectPeers(t, 10811, &api.PeerConf{})
+
+	negotiated := func(t *testing.T) uint64 {
+		t.Helper()
+		var p *api.Peer
+		require.NoError(t, a.ListPeer(context.Background(), &api.ListPeerRequest{},
+			func(x *api.Peer) { p = x }))
+		require.NotNil(t, p)
+		if p.State.SessionState != api.PeerState_SESSION_STATE_ESTABLISHED || p.Timers == nil || p.Timers.State == nil {
+			return 0
+		}
+		return p.Timers.State.NegotiatedHoldTime
+	}
+	require.EqualValues(t, 90, negotiated(t), "both sides start on the default")
+
+	_, err := a.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "127.0.0.1", PeerAsn: 65002},
+		Transport: &api.Transport{PassiveMode: true},
+		// Hold time alone: keepalive stays at its default of 30, so the
+		// change to hold time is the only thing that can rebuild the session.
+		Timers: &api.Timers{Config: &api.TimersConfig{HoldTime: 60, KeepaliveInterval: 30}},
+	}})
+	require.NoError(t, err)
+
+	// The lower of the two offers is negotiated, so 60 is only reachable by a
+	// new OPEN from this side.
+	require.Eventually(t, func() bool { return negotiated(t) == 60 }, 60*time.Second, 250*time.Millisecond,
+		"the running session must renegotiate with the new hold time")
+}

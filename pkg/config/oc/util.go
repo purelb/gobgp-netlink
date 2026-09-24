@@ -277,7 +277,16 @@ func (n *Neighbor) NeedsResendOpenMessage(new *Neighbor) bool {
 	//
 	// deleteNeighbor/addNeighbor already does both correctly; only the
 	// classification was missing.
+	//
+	// hold-time and keepalive-interval likewise. They are carried in and
+	// negotiated from the OPEN, and read only when the session establishes, so
+	// updateNeighbor's in-place copy of the timers block stored them, ListPeer
+	// reported them, and the running session went on using the old values
+	// until it happened to restart. connect-retry and idle-hold-time-after-reset
+	// are read live and stay in place.
 	return !lhs.Equal(&rhs) ||
+		n.Timers.Config.HoldTime != new.Timers.Config.HoldTime ||
+		n.Timers.Config.KeepaliveInterval != new.Timers.Config.KeepaliveInterval ||
 		!n.Transport.Config.Equal(&new.Transport.Config) ||
 		!n.AddPaths.Config.Equal(&new.AddPaths.Config) ||
 		!n.AsPathOptions.Config.Equal(&new.AsPathOptions.Config) ||

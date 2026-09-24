@@ -584,6 +584,10 @@ func TestNeedsResendOpenMessageCarveOuts(t *testing.T) {
 			// An egress AS_PATH rewrite, read per advertisement from
 			// State.RemovePrivateAs. Same shape as send-community.
 			"remove-private-as": func(n *Neighbor) { n.Config.RemovePrivateAs = REMOVE_PRIVATE_AS_OPTION_ALL },
+			// Local timers, read live: the connect loop reads connect-retry on
+			// each attempt, and an administrative reset reads the idle hold.
+			"connect-retry":              func(n *Neighbor) { n.Timers.Config.ConnectRetry = 7 },
+			"idle-hold-time-after-reset": func(n *Neighbor) { n.Timers.Config.IdleHoldTimeAfterReset = 7 },
 		} {
 			n := base()
 			mutate(n)
@@ -616,6 +620,11 @@ func TestNeedsResendOpenMessageCarveOuts(t *testing.T) {
 			// snapshot answering with the old value until the session flapped
 			// - silent iBGP routing loops.
 			"route-reflector-client": func(n *Neighbor) { n.RouteReflector.Config.RouteReflectorClient = true },
+			// Carried in the OPEN and negotiated from it, and read only when
+			// the session establishes: an in-place change was reported at
+			// once and ignored by the running session until it restarted.
+			"hold-time":          func(n *Neighbor) { n.Timers.Config.HoldTime = 180 },
+			"keepalive-interval": func(n *Neighbor) { n.Timers.Config.KeepaliveInterval = 60 },
 			"route-reflector-cluster-id": func(n *Neighbor) {
 				n.RouteReflector.Config.RouteReflectorClusterId = netip.MustParseAddr("10.9.9.9")
 			},
