@@ -7074,10 +7074,21 @@ func (s *BgpServer) ListNetlinkExport(ctx context.Context, req *api.ListNetlinkE
 		// here as well as unreclaimable.
 		for prefix, entries := range vrfRoutes {
 			for _, info := range entries {
+				// An ECMP route carries its nexthops in MultiPath and leaves Gw
+				// nil, so reading Gw alone listed every ECMP route as "<nil>".
+				var nexthop string
+				var nexthops []string
+				for _, nh := range routeNexthopList(info.Route) {
+					nexthops = append(nexthops, nh.Gw.String())
+				}
+				if len(nexthops) == 1 {
+					nexthop = nexthops[0]
+				}
 				fn(&api.ListNetlinkExportResponse{
 					Route: &api.ListNetlinkExportResponse_ExportedRoute{
 						Prefix:     prefix,
-						Nexthop:    info.Route.Gw.String(),
+						Nexthop:    nexthop,
+						Nexthops:   nexthops,
 						Vrf:        vrfName,
 						TableId:    int32(info.Route.Table),
 						Metric:     uint32(info.Route.Priority),

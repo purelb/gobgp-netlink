@@ -14917,14 +14917,19 @@ func (x *WatchEventResponse_TableEvent) GetPaths() []*Path {
 }
 
 type ListNetlinkExportResponse_ExportedRoute struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Prefix        string                 `protobuf:"bytes,1,opt,name=prefix,proto3" json:"prefix,omitempty"`
-	Nexthop       string                 `protobuf:"bytes,2,opt,name=nexthop,proto3" json:"nexthop,omitempty"`
-	Vrf           string                 `protobuf:"bytes,3,opt,name=vrf,proto3" json:"vrf,omitempty"`
-	TableId       int32                  `protobuf:"varint,4,opt,name=table_id,json=tableId,proto3" json:"table_id,omitempty"`
-	Metric        uint32                 `protobuf:"varint,5,opt,name=metric,proto3" json:"metric,omitempty"`
-	RuleName      string                 `protobuf:"bytes,6,opt,name=rule_name,json=ruleName,proto3" json:"rule_name,omitempty"`
-	ExportedAt    int64                  `protobuf:"varint,7,opt,name=exported_at,json=exportedAt,proto3" json:"exported_at,omitempty"` // Unix timestamp
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Prefix string                 `protobuf:"bytes,1,opt,name=prefix,proto3" json:"prefix,omitempty"`
+	// The route's gateway when it has exactly one. Empty for an ECMP route,
+	// which has no single gateway: nexthops lists them.
+	Nexthop    string `protobuf:"bytes,2,opt,name=nexthop,proto3" json:"nexthop,omitempty"`
+	Vrf        string `protobuf:"bytes,3,opt,name=vrf,proto3" json:"vrf,omitempty"`
+	TableId    int32  `protobuf:"varint,4,opt,name=table_id,json=tableId,proto3" json:"table_id,omitempty"`
+	Metric     uint32 `protobuf:"varint,5,opt,name=metric,proto3" json:"metric,omitempty"`
+	RuleName   string `protobuf:"bytes,6,opt,name=rule_name,json=ruleName,proto3" json:"rule_name,omitempty"`
+	ExportedAt int64  `protobuf:"varint,7,opt,name=exported_at,json=exportedAt,proto3" json:"exported_at,omitempty"` // Unix timestamp
+	// Every nexthop the kernel route forwards over, in route order: one for a
+	// single-gateway route, one per path for an ECMP route.
+	Nexthops      []string `protobuf:"bytes,8,rep,name=nexthops,proto3" json:"nexthops,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -15006,6 +15011,13 @@ func (x *ListNetlinkExportResponse_ExportedRoute) GetExportedAt() int64 {
 		return x.ExportedAt
 	}
 	return 0
+}
+
+func (x *ListNetlinkExportResponse_ExportedRoute) GetNexthops() []string {
+	if x != nil {
+		return x.Nexthops
+	}
+	return nil
 }
 
 type ListNetlinkExportRulesResponse_ExportRule struct {
@@ -15759,9 +15771,9 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"keepRoutes\"!\n" +
 	"\x1fDisableVrfNetlinkExportResponse\",\n" +
 	"\x18ListNetlinkExportRequest\x12\x10\n" +
-	"\x03vrf\x18\x01 \x01(\tR\x03vrf\"\xa6\x02\n" +
+	"\x03vrf\x18\x01 \x01(\tR\x03vrf\"\xc2\x02\n" +
 	"\x19ListNetlinkExportResponse\x12B\n" +
-	"\x05route\x18\x01 \x01(\v2,.api.ListNetlinkExportResponse.ExportedRouteR\x05route\x1a\xc4\x01\n" +
+	"\x05route\x18\x01 \x01(\v2,.api.ListNetlinkExportResponse.ExportedRouteR\x05route\x1a\xe0\x01\n" +
 	"\rExportedRoute\x12\x16\n" +
 	"\x06prefix\x18\x01 \x01(\tR\x06prefix\x12\x18\n" +
 	"\anexthop\x18\x02 \x01(\tR\anexthop\x12\x10\n" +
@@ -15770,7 +15782,8 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x06metric\x18\x05 \x01(\rR\x06metric\x12\x1b\n" +
 	"\trule_name\x18\x06 \x01(\tR\bruleName\x12\x1f\n" +
 	"\vexported_at\x18\a \x01(\x03R\n" +
-	"exportedAt\"\x1e\n" +
+	"exportedAt\x12\x1a\n" +
+	"\bnexthops\x18\b \x03(\tR\bnexthops\"\x1e\n" +
 	"\x1cGetNetlinkExportStatsRequest\"\xc2\x03\n" +
 	"\x1dGetNetlinkExportStatsResponse\x12\x1a\n" +
 	"\bexported\x18\x01 \x01(\x04R\bexported\x12\x1c\n" +

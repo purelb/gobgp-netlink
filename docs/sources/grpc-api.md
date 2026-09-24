@@ -132,5 +132,10 @@ behaviour, because the field never did anything.
 | `PeerState.auth_password`, `PeerGroupState.auth_password` | never written; `auth_password_set` is the flag |
 | `Path.uuid` | never set on a read; `AddPathResponse` carries the uuid |
 
-Added in 1.3.5: `Global.ebgp_maximum_paths` and `Global.ibgp_maximum_paths`,
-the multipath limits. See [Multipath](configuration.md#multipath).
+Added in 1.3.5:
+
+- `Global.ebgp_maximum_paths` and `Global.ibgp_maximum_paths`, the multipath
+  limits. See [Multipath](configuration.md#multipath).
+- `ListNetlinkExportResponse.ExportedRoute.nexthops`, every nexthop of an
+  exported route. An ECMP route has no single gateway, so its `nexthop` is
+  empty.

@@ -779,7 +779,12 @@ Prefix                                   Nexthop              VRF              T
 10.0.0.0/24                             192.168.1.1          customer-a       100      20     export-customer-a    2025-11-11 15:04:05
 10.0.1.0/24                             192.168.1.1          customer-a       100      20     export-customer-a    2025-11-11 15:04:12
 192.168.100.0/24                        10.0.0.1             customer-b       200      20     export-customer-b    2025-11-11 15:05:23
+10.0.2.0/24                             192.168.1.1,192.168.1.2 customer-a    100      20     export-customer-a    2025-11-11 15:06:01
 ```
+
+An ECMP route lists every nexthop, comma-separated. Over the API they are
+`ExportedRoute.nexthops`; `nexthop` holds the gateway only for a route that has
+exactly one.
 
 ### View Export Rules
 

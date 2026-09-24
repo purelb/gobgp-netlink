@@ -1227,6 +1227,38 @@ func TestExportSetHonoursEachRulesFilter(t *testing.T) {
 		"only the paths the rule's filter accepts are its nexthops")
 }
 
+// ListNetlinkExport reports every nexthop of an ECMP route.
+//
+// It read the route's single gateway, which an ECMP route does not have - its
+// nexthops are in MultiPath - so every ECMP route was listed as "<nil>".
+func TestListNetlinkExportReportsEveryNexthop(t *testing.T) {
+	f := newFakeNetlink()
+	e := newTestExportClient(t, f, &exportRule{Name: "global", TableId: 254, Metric: 20})
+	e.processUpdate(setUpdate(
+		testUnicastPath(t, "10.0.0.0/24", "192.168.1.1"),
+		testUnicastPath(t, "10.0.0.0/24", "192.168.1.2"),
+	))
+	e.processUpdate(setUpdate(testUnicastPath(t, "10.0.1.0/24", "192.168.1.3")))
+
+	s := NewBgpServer()
+	s.shared.mu.Lock()
+	s.netlinkExportClient = e
+	s.shared.mu.Unlock()
+
+	listed := map[string]*api.ListNetlinkExportResponse_ExportedRoute{}
+	require.NoError(t, s.ListNetlinkExport(context.Background(), &api.ListNetlinkExportRequest{},
+		func(r *api.ListNetlinkExportResponse) { listed[r.Route.Prefix] = r.Route }))
+	require.Len(t, listed, 2)
+
+	ecmp := listed["10.0.0.0/24"]
+	assert.Equal(t, []string{"192.168.1.1", "192.168.1.2"}, ecmp.Nexthops)
+	assert.Empty(t, ecmp.Nexthop, "an ECMP route has no single gateway")
+
+	single := listed["10.0.1.0/24"]
+	assert.Equal(t, []string{"192.168.1.3"}, single.Nexthops)
+	assert.Equal(t, "192.168.1.3", single.Nexthop)
+}
+
 // A rule gives up its route when none of the selected paths match it any more.
 //
 // Export only ever added or replaced. When the best path moved from one

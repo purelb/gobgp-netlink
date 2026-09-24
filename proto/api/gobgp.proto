@@ -745,12 +745,17 @@ message ListNetlinkExportRequest {
 message ListNetlinkExportResponse {
   message ExportedRoute {
     string prefix = 1;
+    // The route's gateway when it has exactly one. Empty for an ECMP route,
+    // which has no single gateway: nexthops lists them.
     string nexthop = 2;
     string vrf = 3;
     int32 table_id = 4;
     uint32 metric = 5;
     string rule_name = 6;
     int64 exported_at = 7; // Unix timestamp
+    // Every nexthop the kernel route forwards over, in route order: one for a
+    // single-gateway route, one per path for an ECMP route.
+    repeated string nexthops = 8;
   }
   ExportedRoute route = 1;
 }

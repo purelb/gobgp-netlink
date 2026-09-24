@@ -165,9 +165,16 @@ func showNetlinkExport(vrf string) error {
 
 		exportedAt := time.Unix(route.ExportedAt, 0).Format("2006-01-02 15:04:05")
 
+		// nexthops holds every nexthop of an ECMP route; a daemon older than
+		// the field sends only nexthop.
+		nexthops := strings.Join(route.Nexthops, ",")
+		if nexthops == "" {
+			nexthops = route.Nexthop
+		}
+
 		fmt.Printf(rowFormat,
 			route.Prefix,
-			route.Nexthop,
+			nexthops,
 			vrfDisplay,
 			route.TableId,
 			route.Metric,
