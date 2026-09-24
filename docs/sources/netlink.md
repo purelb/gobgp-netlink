@@ -292,18 +292,22 @@ Configure export within a VRF definition using `[vrfs.netlink-export]`:
 
 **Standard Communities (32-bit):**
 ```toml
-community-list = [
-  "65000:100",      # AS:VALUE format
-  "4259905636"      # Decimal format
-]
+[[netlink.export.rules]]
+  name = "standard"
+  community-list = [
+    "65000:100",      # AS:VALUE format
+    "4259905636"      # Decimal format
+  ]
 ```
 
 **Large Communities (96-bit):**
 ```toml
-large-community-list = [
-  "65000:1:100",    # ASN:LocalData1:LocalData2
-  "65000:2:200"
-]
+[[netlink.export.rules]]
+  name = "large"
+  large-community-list = [
+    "65000:1:100",    # ASN:LocalData1:LocalData2
+    "65000:2:200"
+  ]
 ```
 
 ### Community Matching Logic
@@ -656,7 +660,8 @@ Dampening prevents flapping routes from causing excessive kernel updates:
 
 **Configuration:**
 ```toml
-dampening-interval = 100  # milliseconds
+[netlink.export]
+  dampening-interval = 100  # milliseconds
 ```
 
 **Set to 0 to disable dampening** (immediate export on every update)
@@ -1560,7 +1565,7 @@ Export service mesh routes to Linux kernel:
 ```toml
 [[netlink.export.rules]]
   name = "service-mesh-routes"
-  large-community-list = ["65000:mesh:1"]
+  large-community-list = ["65000:1:1"]
   table-id = 500
 ```
 

@@ -291,6 +291,11 @@ field (in bits), the same `min..max` notation as `ip-prefix`.
     [[defined-sets.prefix-sets.prefix-list]]
       ip-prefix = "10.50.0.0/16"
       masklength-range = "21..24"
+  [[defined-sets.prefix-sets]]
+    prefix-set-name = "ps3"
+    [[defined-sets.prefix-sets.prefix-list]]
+      ip-prefix = "10.60.0.0/16"
+      masklength-range = "21..24"
   ```
 
 - example 4
@@ -511,8 +516,14 @@ subtype of extended community and subtypes that can be used are as follows:
 
   ```toml
   # example 3
-  [policy-definitions.statements.actions.bgp-actions.set-ext-community.set-ext-community-method]
-    communities-list = ["LB:65001:125000"]
+  [[policy-definitions]]
+    name = "policy-lb"
+    [[policy-definitions.statements]]
+      name = "statement1"
+      [policy-definitions.statements.actions.bgp-actions.set-ext-community]
+        options = "add"
+        [policy-definitions.statements.actions.bgp-actions.set-ext-community.set-ext-community-method]
+          communities-list = ["LB:65001:125000"]
   ```
 
 #### as-path-sets
@@ -592,7 +603,7 @@ evaluate routes from neighbors, if matched, action will be applied.
         community-set = "community1"
         match-set-options = "any"
       [policy-definitions.statements.conditions.bgp-conditions.match-ext-community-set]
-        community-set = "ecommunity1"
+        ext-community-set = "ecommunity1"
         match-set-options = "any"
       [policy-definitions.statements.conditions.bgp-conditions.match-as-path-set]
         as-path-set = "aspath1"
@@ -601,7 +612,7 @@ evaluate routes from neighbors, if matched, action will be applied.
         operator = "eq"
         value = 2
       [policy-definitions.statements.conditions.bgp-conditions]
-        afi-safi-in = ["l3vpn-ipv4-unicast", "ipv4-unicast"]
+        afi-safi-in-list = ["l3vpn-ipv4-unicast", "ipv4-unicast"]
       [policy-definitions.statements.actions]
         route-disposition = "accept-route"
       [policy-definitions.statements.actions.bgp-actions]
@@ -815,9 +826,9 @@ evaluate routes from neighbors, if matched, action will be applied.
       [policy-definitions.statements.conditions.bgp-conditions.match-community-set]
         community-set = "community1"
       [policy-definitions.statements.conditions.bgp-conditions.match-ext-community-set]
-        community-set = "ecommunity1"
+        ext-community-set = "ecommunity1"
       [policy-definitions.statements.conditions.bgp-conditions.match-as-path-set]
-        community-set = "aspath1"
+        as-path-set = "aspath1"
       [policy-definitions.statements.conditions.bgp-conditions.as-path-length]
         operator = "eq"
         value = 2
@@ -975,8 +986,7 @@ define an import policy for neighbor 10.0.255.2 that drops
 
 [[defined-sets.neighbor-sets]]
   neighbor-set-name = "ns1"
-  [[defined-sets.neighbor-sets.neighbor-info-list]]
-    address = "10.0.255.1"
+  neighbor-info-list = ["10.0.255.1"]
 
 [[policy-definitions]]
   name = "pd2"

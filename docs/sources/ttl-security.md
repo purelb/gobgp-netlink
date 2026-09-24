@@ -23,11 +23,13 @@ If specify `ttl-min = 255`, this allows only directly connected neighbor, and
 
 ```toml
 [global.config]
+as = 65000
 router-id = "10.0.0.1"
 
 [[neighbors]]
   [neighbors.config]
     neighbor-address = "10.0.0.2"
+    peer-as = 65001
   [neighbors.ttl-security.config]
     enabled = true
     ttl-min = 255

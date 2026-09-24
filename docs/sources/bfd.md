@@ -175,9 +175,13 @@ ability to override one field without restating the block.
 By default, BFD control packets are sent to UDP destination port `3784`.
 
 ```toml
-[neighbors.bfd.config]
-  enabled = true
-  port = 3784
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "192.0.2.2"
+    peer-as = 65002
+  [neighbors.bfd.config]
+    enabled = true
+    port = 3784
 ```
 
 Use the default unless the remote system explicitly requires another destination

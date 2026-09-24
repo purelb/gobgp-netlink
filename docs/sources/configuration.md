@@ -127,9 +127,12 @@
     [neighbors.ebgp-multihop.config]
         enabled = true #directly connection should be set false，if not ，peer will be deleted after hold-time
         multihop-ttl = 100
-    [neighbors.route-reflector.config]
-        route-reflector-client = true
-        route-reflector-cluster-id = "192.168.0.1"
+    # To make this neighbor a route-reflector client, uncomment the following.
+    # Please note that this is mutually exclusive with
+    # "neighbors.route-server.config" below.
+    #[neighbors.route-reflector.config]
+    #    route-reflector-client = true
+    #    route-reflector-cluster-id = "192.168.0.1"
     [neighbors.add-paths.config]
         send-max = 8
         receive = true
