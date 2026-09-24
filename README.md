@@ -13,8 +13,9 @@ The primary feature added is redistribution via Netlink to the Linux routing tab
 
 - Import: kernel connected routes → BGP RIB, per-interface, global or per-VRF, glob patterns (eth*), now event-driven on RTM_NEWADDR/RTM_DELADDR
 - Export: BGP best-path → kernel FIB, with community/large-community matching rules, per-rule table ID and metric, nexthop validation, dampening, and a startup sweep for stale routes
+- ECMP export: with multipath enabled, every path in a prefix's multipath set becomes a nexthop of one kernel route. Losing one path replaces the route in place rather than deleting it
 - 14 gRPC RPCs: GetNetlink, {Enable,Disable}Netlink{Import,Export}, the four …VrfNetlink… variants, GetNetlinkImportStats, ListNetlinkExport, GetNetlinkExportStats, FlushNetlinkExport, ListNetlinkExportRules
-- Config: [netlink.import], [netlink.export] with [[netlink.export.rules]], and [vrfs.netlink-import] / [vrfs.netlink-export] — 147 lines of YANG upstream doesn't have
+- Config: [netlink.import], [netlink.export] with [[netlink.export.rules]], and [vrfs.netlink-import] / [vrfs.netlink-export], none of which upstream's YANG model has
 - CLI: gobgp netlink
 
 Further information on this can be found in the [Linux Netlink Integration](docs/sources/netlink.md) section.
@@ -29,7 +30,11 @@ Addition features & fixes are:
 
 - Metrics.  Additional 27 metrics including netlink and bfd instrumentation.
 
-*We update docs where we have added or modified the functionality however the rest of the documentation comes from upstream.  In some cases we have found the upstream documentation to be out of date*
+- A robust API. **The gRPC API and config file diverge from upstream, we found settings that do not have any code associated with them and therefore did not do anything.  We fixed some of the omissions and removed the remainder.**  Every setting the gRPC API or a config file accepts is acted on by the daemon, or refused with an error that says why; none is stored and silently ignored. Settings that no code implemented have been removed, and the values the daemon knows about a session are reported back. Conformance tests in CI enforce this. The contract, and the list of what was removed, is in [The gRPC API Contract](docs/sources/grpc-api.md).
+
+- Multipath.  `maximum-paths` limits for eBGP and iBGP, and the multipath set is now exactly the paths that tie with the best path. Enabling multipath requires at least one limit.
+
+*Documentation marked \* has been added or updated by this fork. The rest comes from upstream, and in some cases we have found the upstream documentation to be out of date.*
 
 This fork is maintained by the PureLB Kubernetes Load Balancer team.
 
@@ -44,19 +49,20 @@ Try [a binary release](https://github.com/purelb/gobgp-netlink/releases/latest).
 ### Using GoBGP
 
 - [Getting Started](docs/sources/getting-started.md)
+- [Configuration](docs/sources/configuration.md) \*
 - CLI
   - [Typical operation examples](docs/sources/cli-operations.md)
-  - [Complete syntax](docs/sources/cli-command-syntax.md)
+  - [Complete syntax](docs/sources/cli-command-syntax.md) \*
 - [Route Server](docs/sources/route-server.md)
 - [Route Reflector](docs/sources/route-reflector.md)
-- [Policy](docs/sources/policy.md)
+- [Policy](docs/sources/policy.md) \*
 - Zebra Integration
   - [FIB manipulation](docs/sources/zebra.md)
-  - [Equal Cost Multipath Routing](docs/sources/zebra-multipath.md)
+  - [Equal Cost Multipath Routing](docs/sources/zebra-multipath.md) \*
 - **Linux Netlink Integration** ⚠️ Linux-only
-  - [Netlink Import/Export](docs/sources/netlink.md)
+  - [Netlink Import/Export](docs/sources/netlink.md) \*
   - Import connected routes from Linux interfaces
-  - Export BGP routes to Linux routing tables
+  - Export BGP routes to Linux routing tables, including ECMP
   - Full VRF (Virtual Routing and Forwarding) support
   - IPv4 and IPv6 address families
 - [MRT](docs/sources/mrt.md)
@@ -64,23 +70,29 @@ Try [a binary release](https://github.com/purelb/gobgp-netlink/releases/latest).
 - [EVPN](docs/sources/evpn.md)
 - [Flowspec](docs/sources/flowspec.md)
 - [RPKI](docs/sources/rpki.md)
-- [Metrics](docs/sources/metrics.md)
-- [Managing GoBGP with your favorite language with gRPC](docs/sources/grpc-client.md)
+- [Metrics](docs/sources/metrics.md) \*
+- gRPC API
+  - [The gRPC API Contract](docs/sources/grpc-api.md) \*
+  - [Managing GoBGP with your favorite language with gRPC](docs/sources/grpc-client.md)
 - Go Native BGP Library
   - [Basics](docs/sources/lib.md)
   - [BGP-LS](docs/sources/bgp-ls.md)
   - [SR Policy](docs/sources/lib-srpolicy.md)
-- [Graceful Restart](docs/sources/graceful-restart.md)
+- [Graceful Restart](docs/sources/graceful-restart.md) \*
 - [Additional Paths](docs/sources/add-paths.md)
-- [Peer Group](docs/sources/peer-group.md)
+- [Peer Group](docs/sources/peer-group.md) \*
 - [Dynamic Neighbor](docs/sources/dynamic-neighbor.md)
 - [eBGP Multihop](docs/sources/ebgp-multihop.md)
-- [TTL Security](docs/sources/ttl-security.md)
-- [BFD](docs/sources/bfd.md)
+- [TTL Security](docs/sources/ttl-security.md) \*
+- [BFD](docs/sources/bfd.md) \*
 - [Confederation](docs/sources/bgp-confederation.md)
 - Data Center Networking
   - [Unnumbered BGP](docs/sources/unnumbered-bgp.md)
 - [Sentry](docs/sources/sentry.md)
+
+### Maintaining GoBGP-Netlink
+
+- [Releasing](docs/sources/releasing.md) \*
 
 ### Externals
 
