@@ -401,6 +401,9 @@ For specific use cases where nexthop validation should be skipped:
     skip-nexthop-validation = true  # Skip nexthop validation
 ```
 
+Each nexthop is installed on-link on the device it is on; one whose device
+cannot be determined is left out. See [Nexthop Validation](#nexthop-validation).
+
 ### Example 6: Zebra/FRR Coexistence
 
 Configure a different route protocol to coexist with Zebra/FRR:
@@ -597,10 +600,30 @@ Nexthop validation ensures that routes are only exported if the nexthop is reach
 
 **When to disable:**
 - Nexthops are known to be reachable via other mechanisms
-- Performance is critical and validation overhead is too high
 - Using route servers where nexthops may not be directly reachable
 
 **Default behavior:** Enabled (recommended for most deployments)
+
+**What skipping does.** With `skip-nexthop-validation = true` the nexthop is
+installed *on-link* (`onlink`): the kernel is told the nexthop is directly
+reachable on a device, even where no connected prefix covers it. The kernel
+refuses an on-link nexthop without a device, so gobgpd has to choose one, and
+a wrong choice would send the prefix's traffic out of a link its nexthop is
+not on. It chooses:
+
+1. For a VRF rule, the VRF device.
+2. For a link-local nexthop, the interface of the session it was learned on.
+3. Otherwise, the device the kernel itself resolves the nexthop on, when it
+   resolves it without a gateway - the nexthop is on that device's link.
+4. Otherwise, for a path learned from a directly connected eBGP peer (not
+   multihop, not iBGP), the peer's link: a third-party nexthop from such a peer
+   is on the link it shares with that peer.
+
+A nexthop none of these places is left out, with the reason in the export
+error and the log - never installed on the device of a route through a
+gateway, where it is not. For a non-VRF rule this still does one route
+lookup per nexthop, to find its device, so skipping validation there saves
+no work.
 
 ### Multipath (ECMP) Export
 

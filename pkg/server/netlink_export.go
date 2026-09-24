@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/osrg/gobgp/v4/internal/pkg/table"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 
 	go_netlink "github.com/vishvananda/netlink"
@@ -1066,6 +1067,46 @@ func (e *netlinkExportClient) outgoingInterface(path *table.Path, rule *exportRu
 	return rule.VrfName
 }
 
+// onlinkDevice finds the device a nexthop can be installed ONLINK on, for a
+// non-VRF rule without validation. ONLINK tells the kernel to trust that the
+// nexthop is on that device's link, so the device has to be one it really is
+// on, or the route black-holes:
+//
+//  1. The kernel's own answer. A route lookup that resolves the nexthop
+//     without a gateway means the nexthop is on that device's link.
+//  2. For a single-hop eBGP session, the link the peer is on. A third-party
+//     nexthop from such a peer is on the shared link (RFC 4271 5.1.3), which
+//     is the case ONLINK exists for: on the link, but covered by no connected
+//     prefix. Not for multihop or iBGP, where the peer may be anywhere.
+//
+// Never the device of a route via a gateway: the nexthop is not on that link.
+func (e *netlinkExportClient) onlinkDevice(path *table.Path, nh net.IP) (int, error) {
+	onLink := func(dst net.IP) int {
+		routes, err := e.client.RouteGetWithOptions(dst, nil)
+		if err != nil {
+			return 0
+		}
+		for _, r := range routes {
+			if r.Type == unix.RTN_UNICAST && r.Gw == nil && r.LinkIndex > 0 {
+				return r.LinkIndex
+			}
+		}
+		return 0
+	}
+
+	if idx := onLink(nh); idx > 0 {
+		return idx, nil
+	}
+	if src := path.GetSource(); src != nil && src.PeerType == oc.PEER_TYPE_EXTERNAL &&
+		src.MultihopTtl == 0 && src.Address.IsValid() && !src.Address.IsLinkLocalUnicast() {
+		if idx := onLink(net.IP(src.Address.AsSlice())); idx > 0 {
+			return idx, nil
+		}
+	}
+	return 0, fmt.Errorf("skip-nexthop-validation installs nexthop %s on-link, which needs an output device: "+
+		"it is not on a connected link, and the path was not learned from a directly connected eBGP peer", nh)
+}
+
 // isNexthopReachable checks whether a nexthop is reachable in the table the rule
 // exports into.
 //
@@ -1193,6 +1234,24 @@ func (e *netlinkExportClient) routeNexthops(prefix string, paths []*table.Path, 
 				slog.String("Nexthop", nexthop.String()))
 			skipped = append(skipped, fmt.Errorf("link-local nexthop %s has no known output interface", nexthop.String()))
 			continue
+		} else if !rule.ValidateNexthop {
+			// A non-VRF rule without validation installs the nexthop ONLINK,
+			// and the kernel refuses ONLINK without a device - so until this
+			// found one, skip-nexthop-validation on a non-VRF rule could never
+			// install a route. VRF rules have the VRF device and link-local
+			// nexthops the session's interface, both above.
+			idx, err := e.onlinkDevice(path, nexthopIP)
+			if err != nil {
+				e.logger.Warn("Leaving out a nexthop with no device to install it on-link",
+					slog.String("Topic", "netlink"),
+					slog.String("Prefix", prefix),
+					slog.String("Nexthop", nexthop.String()),
+					slog.String("Rule", rule.Name),
+					slog.Any("Error", err))
+				skipped = append(skipped, err)
+				continue
+			}
+			linkIndex = idx
 		}
 
 		key := fmt.Sprintf("%s%%%d", nexthopIP, linkIndex)
