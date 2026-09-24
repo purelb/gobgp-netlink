@@ -83,6 +83,7 @@ Each of these is refused with an error rather than accepted and ignored.
 | request | why |
 |---|---|
 | `StartBgp` with `use_multiple_paths` and neither `ebgp_maximum_paths` nor `ibgp_maximum_paths` | multipath with no limit selects nothing beyond the best path |
+| `StartBgp` with `ebgp_maximum_paths` or `ibgp_maximum_paths` and not `use_multiple_paths` | a limit caps the multipath set, so without multipath it does nothing |
 | `StartBgp` with `graceful_restart.longlived_enabled` | long-lived graceful restart is never inherited from the global block; set it per peer |
 | `AddPeer` / `UpdatePeer` with `apply_policy` on a peer that is not a route-server client | per-peer policy is applied only to route-server clients; attach the policy to the global table instead |
 | `AddDynamicNeighbor` through a peer group whose `apply_policy` is set and that is not a route-server client | the same, for every peer the group would create |

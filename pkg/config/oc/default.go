@@ -676,6 +676,12 @@ func SetDefaultGlobalConfigValues(g *Global) error {
 		return fmt.Errorf("use-multiple-paths is enabled but neither ebgp nor ibgp maximum-paths is set; " +
 			"set at least one, or multipath selects only the single best path")
 	}
+	// And the inverse: a limit only caps the multipath set, so without
+	// multipath it was accepted, reported back, and did nothing.
+	if !mp.Config.Enabled && (mp.Ebgp.Config.MaximumPaths != 0 || mp.Ibgp.Config.MaximumPaths != 0) {
+		return fmt.Errorf("use-multiple-paths maximum-paths is set but use-multiple-paths is not enabled; " +
+			"enable it, or remove the limit")
+	}
 	return nil
 }
 

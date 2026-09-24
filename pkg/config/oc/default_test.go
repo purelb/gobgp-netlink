@@ -382,6 +382,10 @@ func TestUseMultiplePathsRequiresALimit(t *testing.T) {
 	assert.NoError(t, SetDefaultGlobalConfigValues(global(true, 0, 2)), "an iBGP limit alone is enough")
 	assert.NoError(t, SetDefaultGlobalConfigValues(global(true, 4, 2)), "both may be set")
 	assert.NoError(t, SetDefaultGlobalConfigValues(global(false, 0, 0)), "disabled needs no limit")
+	assert.Error(t, SetDefaultGlobalConfigValues(global(false, 4, 0)),
+		"an eBGP limit without multipath does nothing and must be refused")
+	assert.Error(t, SetDefaultGlobalConfigValues(global(false, 0, 2)),
+		"an iBGP limit without multipath does nothing and must be refused")
 
 	// And a config file saying so fails when it is read, not later.
 	_, err := ReadConfig(strings.NewReader(`
@@ -392,6 +396,15 @@ func TestUseMultiplePathsRequiresALimit(t *testing.T) {
   enabled = true
 `), "toml")
 	assert.Error(t, err, "a config file enabling multipath without a limit must fail to load")
+
+	_, err = ReadConfig(strings.NewReader(`
+[global.config]
+  as = 65001
+  router-id = "10.0.0.1"
+[global.use-multiple-paths.ebgp.config]
+  maximum-paths = 4
+`), "toml")
+	assert.Error(t, err, "a config file setting a limit without multipath must fail to load")
 }
 
 // A config file setting a removed leaf fails to load.

@@ -1238,6 +1238,14 @@ func TestListPathEnableMultipath(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Enabling multipath requires a limit, and a limit without
+			// multipath is refused. These tests are about which paths are
+			// flagged Best, not about the cap, so the limit is set above
+			// anything they add.
+			var maxPaths uint32
+			if tt.useMultiPath {
+				maxPaths = 64
+			}
 			server := NewBgpServer()
 			go server.Serve()
 			err = server.StartBgp(context.Background(), &api.StartBgpRequest{
@@ -1246,11 +1254,8 @@ func TestListPathEnableMultipath(t *testing.T) {
 					RouterId:         "1.1.1.1",
 					UseMultiplePaths: tt.useMultiPath,
 					ListenPort:       -1,
-					// Enabling multipath requires a limit. These tests are
-					// about which paths are flagged Best, not about the cap,
-					// so the limit is set above anything they add.
-					EbgpMaximumPaths: 64,
-					IbgpMaximumPaths: 64,
+					EbgpMaximumPaths: maxPaths,
+					IbgpMaximumPaths: maxPaths,
 				},
 			})
 			require.NoError(t, err)

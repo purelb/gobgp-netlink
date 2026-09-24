@@ -520,6 +520,9 @@ limit gets the single best path. Locally originated best paths are not capped.
 the daemon does not select already. A configuration that enabled multipath
 before 1.3.5 had no limit and must add one.
 
+A limit without `enabled = true` is refused too: it caps the multipath set, so
+on its own it would do nothing.
+
 The limits are read at startup; changing them, like any global setting, needs
 a restart - a reload logs an error naming the setting and applies the rest.
 
