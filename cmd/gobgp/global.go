@@ -3546,29 +3546,53 @@ func showGlobalConfig() error {
 		fmt.Printf("Listening Port: %d, Addresses: %s\n", g.ListenPort, strings.Join(g.ListenAddresses, ", "))
 	}
 	if g.UseMultiplePaths {
-		fmt.Printf("Multipath: enabled")
+		fmt.Println(multipathLine(g))
 	}
 	return nil
 }
 
-func modGlobalConfig(args []string) error {
-	m, err := extractReserved(args, map[string]int{
-		"as":               paramSingle,
-		"router-id":        paramSingle,
-		"listen-port":      paramSingle,
-		"listen-addresses": paramList,
-		"use-multipath":    paramFlag,
-	})
-	if err != nil || len(m["as"]) != 1 || len(m["router-id"]) != 1 {
-		return fmt.Errorf("usage: gobgp global as <VALUE> router-id <VALUE> [use-multipath] [listen-port <VALUE>] [listen-addresses <VALUE>...]")
+// multipathLine describes the global multipath setting with its limits, which
+// decide how many paths multipath selects.
+func multipathLine(g *api.Global) string {
+	limit := func(n uint32) string {
+		if n == 0 {
+			return "not set"
+		}
+		return strconv.FormatUint(uint64(n), 10)
 	}
-	asn, err := strconv.ParseUint(m["as"][0], 10, 32)
+	return fmt.Sprintf("Multipath: enabled, eBGP maximum-paths %s, iBGP maximum-paths %s",
+		limit(g.EbgpMaximumPaths), limit(g.IbgpMaximumPaths))
+}
+
+func modGlobalConfig(args []string) error {
+	req, err := globalStartRequest(args)
 	if err != nil {
 		return err
 	}
+	_, err = client.StartBgp(ctx, req)
+	return err
+}
+
+func globalStartRequest(args []string) (*api.StartBgpRequest, error) {
+	m, err := extractReserved(args, map[string]int{
+		"as":                 paramSingle,
+		"router-id":          paramSingle,
+		"listen-port":        paramSingle,
+		"listen-addresses":   paramList,
+		"use-multipath":      paramFlag,
+		"ebgp-maximum-paths": paramSingle,
+		"ibgp-maximum-paths": paramSingle,
+	})
+	if err != nil || len(m["as"]) != 1 || len(m["router-id"]) != 1 {
+		return nil, fmt.Errorf("usage: gobgp global as <VALUE> router-id <VALUE> [use-multipath [ebgp-maximum-paths <VALUE>] [ibgp-maximum-paths <VALUE>]] [listen-port <VALUE>] [listen-addresses <VALUE>...]")
+	}
+	asn, err := strconv.ParseUint(m["as"][0], 10, 32)
+	if err != nil {
+		return nil, err
+	}
 	id := net.ParseIP(m["router-id"][0])
 	if id.To4() == nil {
-		return fmt.Errorf("invalid router-id format")
+		return nil, fmt.Errorf("invalid router-id format")
 	}
 	var port uint64
 	if len(m["listen-port"]) > 0 {
@@ -3576,23 +3600,44 @@ func modGlobalConfig(args []string) error {
 		// 16-bit length.
 		port, err = strconv.ParseUint(m["listen-port"][0], 10, 16)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	useMultipath := false
 	if _, ok := m["use-multipath"]; ok {
 		useMultipath = true
 	}
-	_, err = client.StartBgp(ctx, &api.StartBgpRequest{
+	// Multipath is refused without a limit, and before these the CLI had no
+	// way to send one, so use-multipath always failed.
+	maxPaths := func(key string) (uint32, error) {
+		if len(m[key]) == 0 {
+			return 0, nil
+		}
+		n, err := strconv.ParseUint(m[key][0], 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("invalid %s: %w", key, err)
+		}
+		return uint32(n), nil
+	}
+	ebgpMax, err := maxPaths("ebgp-maximum-paths")
+	if err != nil {
+		return nil, err
+	}
+	ibgpMax, err := maxPaths("ibgp-maximum-paths")
+	if err != nil {
+		return nil, err
+	}
+	return &api.StartBgpRequest{
 		Global: &api.Global{
 			Asn:              uint32(asn),
 			RouterId:         id.String(),
 			ListenPort:       int32(port),
 			ListenAddresses:  m["listen-addresses"],
 			UseMultiplePaths: useMultipath,
+			EbgpMaximumPaths: ebgpMax,
+			IbgpMaximumPaths: ibgpMax,
 		},
-	})
-	return err
+	}, nil
 }
 
 func newGlobalCmd() *cobra.Command {

@@ -79,12 +79,16 @@ All global options can also be configured via environment variables with the `GO
 
 ```shell
 # configure global setting and start acting as bgp daemon
-% gobgp global as <VALUE> router-id <VALUE> [listen-port <VALUE>] [listen-addresses <VALUE>...] [mpls-label-min <VALUE>] [mpls-label-max <VALUE>]
+% gobgp global as <VALUE> router-id <VALUE> [use-multipath [ebgp-maximum-paths <VALUE>] [ibgp-maximum-paths <VALUE>]] [listen-port <VALUE>] [listen-addresses <VALUE>...]
 # delete global setting and stop acting as bgp daemon (all peer sessions will be closed)
 % gobgp global del all
 # show global setting
 % gobgp global
 ```
+
+`use-multipath` needs at least one of `ebgp-maximum-paths` and
+`ibgp-maximum-paths`, or gobgpd refuses to start. See
+[Multipath](configuration.md#multipath).
 
 ### 1.2. Operations for Global-Rib - add/del/show -
 
