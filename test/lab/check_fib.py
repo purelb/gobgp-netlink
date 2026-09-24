@@ -11,10 +11,14 @@ global RIB it requires:
     multipath set otherwise
 
 and that no route with gobgpd's protocol exists for a prefix the RIB does not
-hold. It reads the RIB with the gobgp CLI and the kernel with ip(8), so it
-needs both, and the global RIB only: VRF export is not checked.
+hold. With --onlink, for a rule with skip-nexthop-validation, it also requires
+every nexthop to be installed onlink on the device the kernel resolves that
+gateway on without a gateway of its own.
 
-    check_fib.py --gobgp ./gobgp --protocol 201
+It reads the RIB with the gobgp CLI and the kernel with ip(8), so it needs
+both, and the global RIB only: VRF export is not checked.
+
+    check_fib.py --gobgp ./gobgp --protocol 201 [--onlink]
 
 Exits 0 when every prefix matches, 1 otherwise.
 """
@@ -57,11 +61,28 @@ def gateways(route):
     return [route.get("gateway")]
 
 
+def onlink_problem(route, version):
+    """Why a route's nexthops are not each onlink on their gateway's own link."""
+    hops = route["nexthops"] if "nexthops" in route else [route]
+    for nh in hops:
+        gw = nh.get("gateway")
+        if "onlink" not in nh.get("flags", []):
+            return f"{gw} is not onlink"
+        resolved = run("ip", "-N", version, "-j", "route", "get", gw)[0]
+        if "gateway" in resolved:
+            return f"{gw} is onlink but the kernel reaches it through {resolved['gateway']}"
+        if nh.get("dev") != resolved.get("dev"):
+            return f"{gw} is onlink on {nh.get('dev')}, but it is on {resolved.get('dev')}"
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--gobgp", default="gobgp", help="gobgp CLI to read the RIB with (default: gobgp)")
     parser.add_argument("--protocol", default="186",
                         help="route protocol gobgpd exports with, netlink.export route-protocol (default: 186)")
+    parser.add_argument("--onlink", action="store_true",
+                        help="also require each nexthop onlink on its own link (skip-nexthop-validation)")
     args = parser.parse_args()
 
     failures = 0
@@ -84,6 +105,8 @@ def main():
                     problem = f"duplicate gateway {gws}"
                 elif set(gws) != set(best):
                     problem = f"kernel {sorted(gws)} != best {sorted(best)}"
+                elif args.onlink:
+                    problem = onlink_problem(r, version)
             if problem:
                 failures += 1
                 print(f"FAIL {family} {prefix}: {problem} (received {received} paths)")
