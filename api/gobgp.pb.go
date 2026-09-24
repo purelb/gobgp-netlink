@@ -10524,7 +10524,6 @@ type Transport struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	LocalAddress  string                 `protobuf:"bytes,1,opt,name=local_address,json=localAddress,proto3" json:"local_address,omitempty"`
 	LocalPort     uint32                 `protobuf:"varint,2,opt,name=local_port,json=localPort,proto3" json:"local_port,omitempty"`
-	MtuDiscovery  bool                   `protobuf:"varint,3,opt,name=mtu_discovery,json=mtuDiscovery,proto3" json:"mtu_discovery,omitempty"`
 	PassiveMode   bool                   `protobuf:"varint,4,opt,name=passive_mode,json=passiveMode,proto3" json:"passive_mode,omitempty"`
 	RemoteAddress string                 `protobuf:"bytes,5,opt,name=remote_address,json=remoteAddress,proto3" json:"remote_address,omitempty"`
 	RemotePort    uint32                 `protobuf:"varint,6,opt,name=remote_port,json=remotePort,proto3" json:"remote_port,omitempty"`
@@ -10577,13 +10576,6 @@ func (x *Transport) GetLocalPort() uint32 {
 		return x.LocalPort
 	}
 	return 0
-}
-
-func (x *Transport) GetMtuDiscovery() bool {
-	if x != nil {
-		return x.MtuDiscovery
-	}
-	return false
 }
 
 func (x *Transport) GetPassiveMode() bool {
@@ -10985,9 +10977,14 @@ func (x *MpGracefulRestart) GetState() *MpGracefulRestartState {
 }
 
 type AfiSafiConfig struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Family        *Family                `protobuf:"bytes,1,opt,name=family,proto3" json:"family,omitempty"`
-	Enabled       bool                   `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Family *Family                `protobuf:"bytes,1,opt,name=family,proto3" json:"family,omitempty"`
+	// Ignored: every family listed in afi_safis is negotiated. Absent and false
+	// are the same thing in proto3, and absent is what clients send - gobgp's own
+	// CLI included - so false cannot be refused without refusing them, and is
+	// treated as enabled. To disable a family, leave it out of the list. (A
+	// config file can tell the two apart, and refuses enabled = false.)
+	Enabled       bool `protobuf:"varint,2,opt,name=enabled,proto3" json:"enabled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -16123,19 +16120,18 @@ const file_api_gobgp_proto_rawDesc = "" +
 	"\x12keepalive_interval\x18\x03 \x01(\x04R\x11keepaliveInterval\x120\n" +
 	"\x14negotiated_hold_time\x18\x05 \x01(\x04R\x12negotiatedHoldTime\x122\n" +
 	"\x06uptime\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\x06uptime\x126\n" +
-	"\bdowntime\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\bdowntimeJ\x04\b\x04\x10\x05R\x1eminimum_advertisement_interval\"\xb6\x02\n" +
+	"\bdowntime\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\bdowntimeJ\x04\b\x04\x10\x05R\x1eminimum_advertisement_interval\"\xa6\x02\n" +
 	"\tTransport\x12#\n" +
 	"\rlocal_address\x18\x01 \x01(\tR\flocalAddress\x12\x1d\n" +
 	"\n" +
-	"local_port\x18\x02 \x01(\rR\tlocalPort\x12#\n" +
-	"\rmtu_discovery\x18\x03 \x01(\bR\fmtuDiscovery\x12!\n" +
+	"local_port\x18\x02 \x01(\rR\tlocalPort\x12!\n" +
 	"\fpassive_mode\x18\x04 \x01(\bR\vpassiveMode\x12%\n" +
 	"\x0eremote_address\x18\x05 \x01(\tR\rremoteAddress\x12\x1f\n" +
 	"\vremote_port\x18\x06 \x01(\rR\n" +
 	"remotePort\x12\x17\n" +
 	"\atcp_mss\x18\a \x01(\rR\x06tcpMss\x12%\n" +
 	"\x0ebind_interface\x18\b \x01(\tR\rbindInterface\x12\x15\n" +
-	"\x06ip_tos\x18\t \x01(\rR\x05ipTos\"f\n" +
+	"\x06ip_tos\x18\t \x01(\rR\x05ipTosJ\x04\b\x03\x10\x04R\rmtu_discovery\"f\n" +
 	"\vRouteServer\x12.\n" +
 	"\x13route_server_client\x18\x01 \x01(\bR\x11routeServerClient\x12'\n" +
 	"\x0fsecondary_route\x18\x02 \x01(\bR\x0esecondaryRoute\"\xb4\x03\n" +

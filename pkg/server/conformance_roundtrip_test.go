@@ -72,10 +72,6 @@ var knownAsymmetries = map[string]string{
 	// it pointed the next reader at the working level as the broken one. It is
 	// implemented per peer and per peer group, and acted on; the global block
 	// reaches peers only when graceful-restart-inherit-to-neighbors is set.
-	//
-	// mtu_discovery exists in api.Transport and in the generated config struct
-	// and is referenced nowhere else in the tree: no converter stores it, and no
-	// socket option is set from it.
 }
 
 // fieldValues overrides the generic filler for fields whose valid domain is
@@ -274,6 +270,10 @@ func TestConformanceGlobalRoundTrip(t *testing.T) {
 		"Global.asn":            true,
 		"Global.listen_port":    true, // 7 would try to bind a privileged port
 		"Global.bind_to_device": true, // must name a real interface
+		// Refused by design: long-lived graceful restart is never inherited
+		// from the global block, so StartBgp rejects it rather than accept a
+		// setting that does nothing. TestGlobalLongLivedGracefulRestartIsRefused.
+		"Global.graceful_restart.longlived_enabled": true,
 	})
 
 	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{

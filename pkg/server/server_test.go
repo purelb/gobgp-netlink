@@ -16,7 +16,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -5500,7 +5499,6 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 			RestartTime:         120,
 			DeferralTime:        360,
 			NotificationEnabled: true,
-			LonglivedEnabled:    true,
 		},
 	}
 	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{Global: sent}))
@@ -5532,8 +5530,33 @@ func TestGetBgpEchoesEverythingStartBgpAccepts(t *testing.T) {
 		assert.Equal(uint32(120), got.GracefulRestart.RestartTime)
 		assert.Equal(uint32(360), got.GracefulRestart.DeferralTime)
 		assert.True(got.GracefulRestart.NotificationEnabled)
-		assert.True(got.GracefulRestart.LonglivedEnabled)
 	}
+}
+
+// Long-lived graceful restart on the global block is refused over the API too.
+//
+// Inheritance copies the rest of the global graceful-restart block to peers and
+// forces this one off - long-lived retention is hours, and one global line
+// should not commit a fleet to it - so it was accepted, echoed by GetBgp, and
+// did nothing. The field is shared with the per-peer block, where it works, so
+// it cannot be removed from the proto; StartBgp refuses it instead.
+func TestGlobalLongLivedGracefulRestartIsRefused(t *testing.T) {
+	s := NewBgpServer()
+	go s.Serve()
+	defer s.Stop()
+
+	err := s.StartBgp(context.Background(), &api.StartBgpRequest{Global: &api.Global{
+		Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1,
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120, LonglivedEnabled: true},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "long-lived")
+
+	// The rest of the global block is still accepted.
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{Global: &api.Global{
+		Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1,
+		GracefulRestart: &api.GracefulRestart{Enabled: true, RestartTime: 120},
+	}}))
 }
 
 // GetRunningConfig composes the running configuration. The trap it exists to
@@ -5807,40 +5830,6 @@ func TestStaleRoutesTimeLeavesCompletedFamiliesAlone(t *testing.T) {
 
 	assert.Equal(before, adjInCount(),
 		"End-of-RIB was received, so these are live routes and must not be purged")
-}
-
-// mtu-discovery is declared in api.Transport and in the generated config model
-// and referenced nowhere else: no converter stores it and no socket option is
-// set from it. Accepting it silently leaves an operator believing path MTU
-// discovery is enabled.
-//
-// Warned rather than rejected: configs that already set it have been getting
-// nothing all along, so an error now would be a new failure for no new benefit.
-func TestMtuDiscoveryIsWarnedAsUnimplemented(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-
-	s := NewBgpServer(LoggerOption(logger, new(slog.LevelVar)))
-	go s.Serve()
-	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
-		Global: &api.Global{Asn: 65000, RouterId: "1.1.1.1", ListenPort: -1},
-	}))
-	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
-
-	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
-		Conf:      &api.PeerConf{NeighborAddress: "10.96.0.1", PeerAsn: 65001},
-		Transport: &api.Transport{PassiveMode: true, MtuDiscovery: true},
-	}}))
-	assert.Contains(t, buf.String(), "mtu-discovery is accepted but not implemented",
-		"setting it must say so rather than being silently ignored")
-
-	// And a peer that does not set it gets no warning.
-	buf.Reset()
-	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
-		Conf:      &api.PeerConf{NeighborAddress: "10.96.0.2", PeerAsn: 65001},
-		Transport: &api.Transport{PassiveMode: true},
-	}}))
-	assert.NotContains(t, buf.String(), "mtu-discovery")
 }
 
 // setNetlinkNexthops fills in the three next hops a netlink-imported route is

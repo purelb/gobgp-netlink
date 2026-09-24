@@ -1291,7 +1291,10 @@ message TimersState {
 message Transport {
   string local_address = 1;
   uint32 local_port = 2;
-  bool mtu_discovery = 3;
+  // Removed in 1.3.5: no socket option was ever set from it, so path MTU
+  // discovery was accepted and never enabled.
+  reserved 3;
+  reserved "mtu_discovery";
   bool passive_mode = 4;
   string remote_address = 5;
   uint32 remote_port = 6;
@@ -1338,6 +1341,11 @@ message MpGracefulRestart {
 
 message AfiSafiConfig {
   Family family = 1;
+  // Ignored: every family listed in afi_safis is negotiated. Absent and false
+  // are the same thing in proto3, and absent is what clients send - gobgp's own
+  // CLI included - so false cannot be refused without refusing them, and is
+  // treated as enabled. To disable a family, leave it out of the list. (A
+  // config file can tell the two apart, and refuses enabled = false.)
   bool enabled = 2;
 }
 

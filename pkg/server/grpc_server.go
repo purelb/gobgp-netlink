@@ -1529,7 +1529,6 @@ func newNeighborFromAPIStruct(a *api.Peer) (*oc.Neighbor, error) {
 		// is visible in ListPeer and "gobgp config running" and addNeighbor can
 		// warn that it does nothing. Dropping it silently was the worse option:
 		// the operator could not tell it had been ignored.
-		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
 		if pconf.Transport.Config.RemotePort, err = narrowUint16("transport.remote_port", a.Transport.RemotePort); err != nil {
 			return nil, err
 		}
@@ -1719,7 +1718,6 @@ func newPeerGroupFromAPIStruct(a *api.PeerGroup) (*oc.PeerGroup, error) {
 		// is visible in ListPeer and "gobgp config running" and addNeighbor can
 		// warn that it does nothing. Dropping it silently was the worse option:
 		// the operator could not tell it had been ignored.
-		pconf.Transport.Config.MtuDiscovery = a.Transport.MtuDiscovery
 		if pconf.Transport.Config.RemotePort, err = narrowUint16("transport.remote_port", a.Transport.RemotePort); err != nil {
 			return nil, err
 		}

@@ -293,7 +293,7 @@ var peerBlockEffects = map[string]string{
 	"conf":             "classified field by field above",
 	"state":            "read-only operational state",
 	"timers":           "hold time and keepalive reach the OPEN; covered by the scenario tests",
-	"transport":        "local address, passive mode and TCP options reach the socket; mtu_discovery is recorded as inert in knownAsymmetries",
+	"transport":        "local address, passive mode and TCP options reach the socket",
 	"route_reflector":  "cluster id and client status change reflection; covered by the rr scenario test",
 	"route_server":     "decides which RIB the peer's routes enter, and whether they reach the kernel FIB",
 	"graceful_restart": "reaches the GR capability in the OPEN, per family; TestGracefulRestartSurvivesPeerGroupMembership and the oc inheritance matrix",

@@ -548,6 +548,45 @@ func getConfigClusterId(g *Global, configClusterId netip.Addr) (netip.Addr, erro
 	return configClusterId, nil
 }
 
+// validateAfiSafisEnabled refuses enabled = false on a neighbor's or peer
+// group's afi-safi.
+//
+// Every listed family is negotiated: capabilitiesFromConfig advertises
+// multiprotocol capability for each afi-safi in the list whatever this flag
+// says, and defaulting sets it true when absent. So false was ignored - the
+// family came up anyway, and ListPeer then stopped reporting its counts.
+//
+// Config files only. Over the API proto3 cannot tell false from absent, and
+// absent is what clients send, gobgp's own CLI included; refusing false there
+// would refuse them. A file states it explicitly, so it can be refused.
+func validateAfiSafisEnabled(v *viper.Viper) error {
+	for _, owner := range []string{"neighbors", "peer-groups"} {
+		owners, err := extractArray(v.Get(owner))
+		if err != nil {
+			return err
+		}
+		for i, o := range owners {
+			entry, ok := o.(map[string]any)
+			if !ok {
+				continue
+			}
+			afs, err := extractArray(entry["afi-safis"])
+			if err != nil {
+				return err
+			}
+			for j, af := range afs {
+				afm, _ := af.(map[string]any)
+				cfg, _ := afm["config"].(map[string]any)
+				if on, set := cfg["enabled"].(bool); set && !on {
+					return fmt.Errorf("%s[%d].afi-safis[%d].config.enabled = false is not supported: every listed "+
+						"family is negotiated; remove the family from the list instead", owner, i, j)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // validateGlobalAfiSafis refuses the parts of [[global.afi-safis]] that never
 // reach the daemon.
 //
@@ -620,6 +659,18 @@ func SetDefaultGlobalConfigValues(g *Global) error {
 	// Accepting it would be a switch that reads as on and does nothing, so it
 	// is refused. Called from both the config-file loader and StartBgp, so a
 	// file fails when it is read and an API request fails when it is sent.
+	// Long-lived graceful restart is never propagated from the global block:
+	// inheritance copies the rest of it and forces this off, because long-lived
+	// retention is measured in hours and one global line should not commit an
+	// entire fleet to it. So setting it here was accepted and did nothing. The
+	// field cannot be removed - the graceful-restart block is one type shared
+	// with the neighbor and peer-group blocks, where it works - so it is
+	// refused. Both the config loader and StartBgp come through here.
+	if g.GracefulRestart.Config.LongLivedEnabled {
+		return fmt.Errorf("global graceful-restart long-lived-enabled is not supported: long-lived graceful " +
+			"restart is never inherited from the global block; set it per neighbor or peer group")
+	}
+
 	mp := &g.UseMultiplePaths
 	if mp.Config.Enabled && mp.Ebgp.Config.MaximumPaths == 0 && mp.Ibgp.Config.MaximumPaths == 0 {
 		return fmt.Errorf("use-multiple-paths is enabled but neither ebgp nor ibgp maximum-paths is set; " +
@@ -692,6 +743,9 @@ func setDefaultConfigValuesWithViper(v *viper.Viper, b *BgpConfigSet) error {
 	}
 
 	if err := validateGlobalAfiSafis(v); err != nil {
+		return err
+	}
+	if err := validateAfiSafisEnabled(v); err != nil {
 		return err
 	}
 

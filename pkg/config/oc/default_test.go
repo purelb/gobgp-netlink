@@ -567,6 +567,31 @@ func TestRemovedLeavesAreRejected(t *testing.T) {
     afi-safi-name = "ipv4-unicast"
     enabled = false
 `,
+		"neighbor mtu-discovery": global + neighbor + `
+  [neighbors.transport.config]
+    mtu-discovery = true
+`,
+		"peer-group mtu-discovery": global + peerGroup + `
+  [peer-groups.transport.config]
+    mtu-discovery = true
+`,
+		"global long-lived graceful restart": global + `
+[global.graceful-restart.config]
+  enabled = true
+  long-lived-enabled = true
+`,
+		"neighbor afi-safi enabled = false": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+      enabled = false
+`,
+		"peer-group afi-safi enabled = false": global + peerGroup + `
+  [[peer-groups.afi-safis]]
+    [peer-groups.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+      enabled = false
+`,
 		"rpki refresh-time": global + `
 [[rpki-servers]]
   [rpki-servers.config]
@@ -633,6 +658,21 @@ func TestRemovedLeavesAreRejected(t *testing.T) {
   [global.afi-safis.config]
     afi-safi-name = "ipv4-unicast"
     enabled = true
+`,
+		"neighbor afi-safi enabled = true": global + neighbor + `
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
+      enabled = true
+`,
+		"global graceful restart without long-lived": global + `
+[global.graceful-restart.config]
+  enabled = true
+  restart-time = 120
+`,
+		"neighbor transport without mtu-discovery": global + neighbor + `
+  [neighbors.transport.config]
+    passive-mode = true
 `,
 		"rpki server with record-lifetime": global + `
 [[rpki-servers]]

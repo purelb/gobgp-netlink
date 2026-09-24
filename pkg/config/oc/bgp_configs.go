@@ -3059,11 +3059,6 @@ type TransportState struct {
 	// original -> bgp:tcp-mss
 	// Sets the max segment size for BGP TCP sessions.
 	TcpMss uint16 `mapstructure:"tcp-mss" json:"tcp-mss,omitempty"`
-	// original -> bgp:mtu-discovery
-	// bgp:mtu-discovery's original type is boolean.
-	// Turns path mtu discovery for BGP TCP sessions on (true)
-	// or off (false).
-	MtuDiscovery bool `mapstructure:"mtu-discovery" json:"mtu-discovery,omitempty"`
 	// original -> bgp:passive-mode
 	// bgp:passive-mode's original type is boolean.
 	// Wait for peers to issue requests to open a BGP session,
@@ -3100,11 +3095,6 @@ type TransportConfig struct {
 	// original -> bgp:tcp-mss
 	// Sets the max segment size for BGP TCP sessions.
 	TcpMss uint16 `mapstructure:"tcp-mss" json:"tcp-mss,omitempty"`
-	// original -> bgp:mtu-discovery
-	// bgp:mtu-discovery's original type is boolean.
-	// Turns path mtu discovery for BGP TCP sessions on (true)
-	// or off (false).
-	MtuDiscovery bool `mapstructure:"mtu-discovery" json:"mtu-discovery,omitempty"`
 	// original -> bgp:passive-mode
 	// bgp:passive-mode's original type is boolean.
 	// Wait for peers to issue requests to open a BGP session,
@@ -3137,9 +3127,6 @@ func (lhs *TransportConfig) Equal(rhs *TransportConfig) bool {
 		return false
 	}
 	if lhs.TcpMss != rhs.TcpMss {
-		return false
-	}
-	if lhs.MtuDiscovery != rhs.MtuDiscovery {
 		return false
 	}
 	if lhs.PassiveMode != rhs.PassiveMode {

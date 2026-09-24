@@ -1200,6 +1200,24 @@ module gobgp {
     deviate not-supported;
   }
 
+  // mtu-discovery: no socket option is set from it.
+  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:transport/bgp:config" +
+    "/bgp:mtu-discovery" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:transport/bgp:state" +
+    "/bgp:mtu-discovery" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:transport/bgp:config" +
+    "/bgp:mtu-discovery" {
+    deviate not-supported;
+  }
+  deviation "/bgp:bgp/bgp:peer-groups/bgp:peer-group/bgp:transport/bgp:state" +
+    "/bgp:mtu-discovery" {
+    deviate not-supported;
+  }
+
   // route-flap-damping: no route flap damping is implemented.
   deviation "/bgp:bgp/bgp:neighbors/bgp:neighbor/bgp:config/bgp:route-flap-damping" {
     deviate not-supported;
