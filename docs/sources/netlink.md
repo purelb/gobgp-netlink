@@ -730,6 +730,10 @@ A route with community `65000:999` will be exported to **both** table 100 and ta
 
 ## CLI Commands
 
+Every command below that shows state takes `-j` to print the API response as
+JSON instead, for scripts: `gobgp -j netlink export` prints an array of the
+exported routes, `[]` when there are none.
+
 ## Netlink Status
 
 ### View Overall Status

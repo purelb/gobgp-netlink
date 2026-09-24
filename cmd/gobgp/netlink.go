@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -32,6 +33,11 @@ func showNetlink() error {
 	res, err := client.GetNetlink(context.Background(), &api.GetNetlinkRequest{})
 	if err != nil {
 		return err
+	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
 	}
 
 	fmt.Println("Netlink Status:")
@@ -71,6 +77,11 @@ func showNetlinkImport() error {
 	res, err := client.GetNetlink(context.Background(), &api.GetNetlinkRequest{})
 	if err != nil {
 		return err
+	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
 	}
 
 	hasImport := res.ImportEnabled || len(res.VrfImports) > 0
@@ -114,6 +125,11 @@ func showNetlinkImportStats() error {
 	if err != nil {
 		return err
 	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
+	}
 
 	fmt.Printf("Import Statistics:\n")
 	fmt.Printf("  Total Imported:  %d\n", res.Imported)
@@ -140,6 +156,24 @@ func showNetlinkExport(vrf string) error {
 	})
 	if err != nil {
 		return err
+	}
+
+	if globalOpts.Json {
+		// One array of every route, [] rather than null when there are none.
+		routes := make([]*api.ListNetlinkExportResponse_ExportedRoute, 0)
+		for {
+			r, err := stream.Recv()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			routes = append(routes, r.Route)
+		}
+		j, _ := json.Marshal(routes)
+		fmt.Println(string(j))
+		return nil
 	}
 
 	headerFormat := "%-40s %-20s %-15s %-8s %-6s %-20s %s\n"
@@ -189,6 +223,11 @@ func showNetlinkExportRules() error {
 	res, err := client.ListNetlinkExportRules(context.Background(), &api.ListNetlinkExportRulesRequest{})
 	if err != nil {
 		return err
+	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
 	}
 
 	if len(res.Rules) == 0 {
@@ -269,6 +308,11 @@ func showNetlinkExportStats() error {
 	res, err := client.GetNetlinkExportStats(context.Background(), &api.GetNetlinkExportStatsRequest{})
 	if err != nil {
 		return err
+	}
+	if globalOpts.Json {
+		j, _ := json.Marshal(res)
+		fmt.Println(string(j))
+		return nil
 	}
 
 	fmt.Printf("Export Statistics:\n")
