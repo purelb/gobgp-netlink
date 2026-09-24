@@ -216,6 +216,7 @@ The netlink export feature allows GoBGP to export BGP routes from the RIB to the
 - **Statistics and monitoring**: Track export operations, errors, and nexthop validation
 - **Multi-table support**: Single route can export to multiple tables if matching multiple rules
 - **ECMP**: With `use-multiple-paths`, every path in a prefix's multipath set becomes a nexthop of one kernel route (see [Multipath (ECMP) Export](#multipath-ecmp-export))
+- **Address families**: IPv4 and IPv6 unicast export through the global rules, IPv4 and IPv6 VPN through their VRF's. No other family is exported: RTC, EVPN and FlowSpec carry nothing the kernel can forward as a route, and labelled unicast would lose its label
 
 ## Configuration
 

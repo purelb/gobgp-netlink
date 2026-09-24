@@ -751,6 +751,106 @@ func TestOnlinkIsIndependentOfValidation(t *testing.T) {
 	}
 }
 
+// --- families that are not kernel routes ---
+//
+// Every family used to be offered to the global rules, and a rule without a
+// community filter matches every path.
+
+// mpPath builds a path of any family, announced with MP_REACH_NLRI.
+func mpPath(t *testing.T, family bgp.Family, nlri bgp.NLRI, nexthop string) *table.Path {
+	t.Helper()
+	mpreach, err := bgp.NewPathAttributeMpReachNLRI(family, []bgp.PathNLRI{{NLRI: nlri}}, netip.MustParseAddr(nexthop))
+	require.NoError(t, err)
+	return table.NewPath(family, nil, bgp.PathNLRI{NLRI: nlri}, false,
+		[]bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), mpreach},
+		time.Now(), false)
+}
+
+// rtcPath is a route-target subscription: nothing in it is forwardable.
+func rtcPath(t *testing.T) *table.Path {
+	t.Helper()
+	rt, err := bgp.ParseRouteTarget("64512:100")
+	require.NoError(t, err)
+	return mpPath(t, bgp.RF_RTC_UC, bgp.NewRouteTargetMembershipNLRI(64512, rt), "192.168.1.1")
+}
+
+// labelledPath is labelled unicast, whose prefix reads as a plain one.
+func labelledPath(t *testing.T, cidr, nexthop string) *table.Path {
+	t.Helper()
+	nlri, err := bgp.NewLabeledIPAddrPrefix(netip.MustParsePrefix(cidr), *bgp.NewMPLSLabelStack(100))
+	require.NoError(t, err)
+	return mpPath(t, bgp.RF_IPv4_MPLS, nlri, nexthop)
+}
+
+// Only IPv4 and IPv6 unicast reach the global rules: an RTC update failed and
+// counted an export error every time, and labelled unicast went into the
+// kernel without its label.
+func TestOnlyIpUnicastReachesTheGlobalRules(t *testing.T) {
+	f := newOnLinkFake()
+	rule := &exportRule{Name: "global", TableId: 254, Metric: 20}
+	e := newTestExportClient(t, f, rule)
+	// Undampened, so nothing reaching the kernel means nothing was sent, not
+	// that it is still waiting on a timer.
+	e.dampeningInterval = 0
+
+	e.scheduleUpdate(setUpdate(rtcPath(t)))
+	e.scheduleUpdate(setUpdate(labelledPath(t, "10.1.0.0/24", "192.168.1.1")))
+	replace, _, _ := f.counts()
+	assert.Equal(t, 0, replace, "neither family may reach the kernel")
+	assert.Zero(t, e.getStats().Errors, "nor count an export error")
+
+	e.scheduleUpdate(setUpdate(testUnicastPath(t, "10.2.0.0/24", "192.168.1.1")))
+	assert.True(t, f.hasRoute(254, "10.2.0.0/24"), "unicast still exports")
+}
+
+// Labelled unicast shares its prefix with a unicast route for the same
+// destination; its updates and withdrawals must not touch that route - applied
+// at once, or dampened, where pending updates are keyed by prefix and a later
+// one replaces an earlier.
+func TestLabelledUnicastLeavesTheUnicastRouteAlone(t *testing.T) {
+	for _, dampened := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dampened=%t", dampened), func(t *testing.T) {
+			f := newOnLinkFake()
+			rule := &exportRule{Name: "global", TableId: 254, Metric: 20}
+			e := newTestExportClient(t, f, rule)
+			settle := func() {}
+			if dampened {
+				e.dampeningInterval = 20 * time.Millisecond
+				settle = func() { time.Sleep(10 * e.dampeningInterval) }
+			} else {
+				e.dampeningInterval = 0
+			}
+
+			e.scheduleUpdate(setUpdate(testUnicastPath(t, "10.1.0.0/24", "192.168.1.1")))
+			e.scheduleUpdate(setUpdate(labelledPath(t, "10.1.0.0/24", "192.168.1.9")))
+			settle()
+			require.NotNil(t, f.routeFor(254, "10.1.0.0/24"))
+			assert.Equal(t, []string{"192.168.1.1"}, gateways(f.routeFor(254, "10.1.0.0/24")),
+				"a labelled update must not replace the unicast route's gateway")
+
+			e.scheduleUpdate(exportUpdate{ref: labelledPath(t, "10.1.0.0/24", "192.168.1.9").Clone(true)})
+			settle()
+			assert.True(t, f.hasRoute(254, "10.1.0.0/24"), "a labelled withdrawal must not delete it")
+		})
+	}
+}
+
+// Re-evaluation after a rule change takes the same families and no others.
+func TestReEvaluationOnlyExportsIpFamilies(t *testing.T) {
+	f := newOnLinkFake()
+	e := newTestExportClient(t, f, &exportRule{Name: "global", TableId: 254, Metric: 20})
+
+	e.reEvaluateAllRoutes([][]*table.Path{
+		{rtcPath(t)},
+		{labelledPath(t, "10.1.0.0/24", "192.168.1.1")},
+		{testUnicastPath(t, "10.2.0.0/24", "192.168.1.1")},
+	})
+
+	assert.Equal(t, 1, f.routeCount(), "only the unicast route")
+	assert.True(t, f.hasRoute(254, "10.2.0.0/24"))
+	assert.Zero(t, e.getStats().Errors)
+}
+
 // --- skip-nexthop-validation on a non-VRF rule ---
 //
 // Without validation a nexthop is installed ONLINK, and the kernel refuses

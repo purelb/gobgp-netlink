@@ -165,6 +165,25 @@ func exportPrefixKey(path *table.Path) (string, error) {
 	}
 }
 
+// exportsFamily reports whether paths of a family can become kernel routes:
+// IPv4 and IPv6 unicast through the global rules, IPv4 and IPv6 VPN through
+// their VRF's.
+//
+// Every family used to be offered to the global rules, and a rule with no
+// community filter matches every path. RTC, EVPN, FlowSpec and the rest carry
+// nothing forwardable - an RTC route is a route-target subscription - so each
+// update failed, logged a warning and counted an export error. Labelled
+// unicast was worse: its prefix parses as a plain one, so it went into the
+// kernel without its label, keyed and dampened by the same prefix as the
+// unicast route it can coexist with.
+func exportsFamily(f bgp.Family) bool {
+	switch f {
+	case bgp.RF_IPv4_UC, bgp.RF_IPv6_UC, bgp.RF_IPv4_VPN, bgp.RF_IPv6_VPN:
+		return true
+	}
+	return false
+}
+
 // exportUpdate is the state one prefix should be programmed to.
 //
 // The export pipeline used to carry a single path from the RIB to the kernel,
@@ -735,7 +754,7 @@ func (e *netlinkExportClient) reEvaluateAllRoutes(sets [][]*table.Path) {
 	shouldExport := make(map[exportKey]bool)
 
 	for _, set := range sets {
-		if len(set) == 0 || set[0].IsWithdraw {
+		if len(set) == 0 || set[0].IsWithdraw || !exportsFamily(set[0].GetFamily()) {
 			continue
 		}
 
@@ -1612,6 +1631,11 @@ func (e *netlinkExportClient) armFlushAtLocked(at time.Time) {
 // therefore never programmed at all - dampening turned into permanent
 // suppression, which is the opposite of what it is for.
 func (e *netlinkExportClient) scheduleUpdate(u exportUpdate) {
+	// Before dampening, which is keyed by prefix: another family's update for
+	// the same prefix would replace a pending unicast one.
+	if !exportsFamily(u.ref.GetFamily()) {
+		return
+	}
 	if e.dampeningInterval == 0 {
 		// No dampening, process immediately
 		e.processUpdate(u)
