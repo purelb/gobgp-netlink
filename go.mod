@@ -8,7 +8,7 @@ require (
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da
 	github.com/eapache/channels v1.1.0
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/gaissmai/bart v0.26.1
+	github.com/gaissmai/bart v0.30.0
 	github.com/getsentry/sentry-go v0.49.0
 	github.com/go-test/deep v1.1.1
 	github.com/go-viper/mapstructure/v2 v2.5.0
