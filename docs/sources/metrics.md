@@ -131,6 +131,12 @@ the loop.
 
 These are specific to `purelb/gobgp-netlink` and are not present upstream.
 
+Global RIB:
+
+| **Metric** | **Description** | **Labels** |
+| --- | --- | --- |
+| bgp_rib_paths | Paths in the global RIB, one series per globally configured family. The only route count that includes locally originated paths (`AddPath`, netlink import), which reach `bgp_routes_advertised` only while a session is established and export policy allows them. With no global families configured every family is enabled, so every family is reported, mostly as 0. A family enabled only on a neighbor has no global RIB and no series. Each family costs one `GetTable` per collection, which walks that family's table under the BGP lock, bounded by `--metrics-min-interval` | `route_family` |
+
 BFD liveness, per peer:
 
 | **Metric** | **Description** | **Labels** |
@@ -282,7 +288,10 @@ Some labels can have specific values depending on the state of GoBGP or of the p
 - `admin_state`: administrative state of the peer, likewise prefixed:
   `ADMIN_STATE_UNSPECIFIED`, `ADMIN_STATE_UP`, `ADMIN_STATE_DOWN` or
   `ADMIN_STATE_PFX_CT` (prefix count over limit)
-- `route_family`: any address family supported by GoBGP (e.g `ipv4`, `ipv6`, `evpn`)
+- `route_family`: the address family name, as in the `afi-safi-name` of the
+  configuration: `ipv4-unicast`, `ipv6-unicast`, `l3vpn-ipv4-unicast`,
+  `l2vpn-evpn` and so on. Hyphenated and in full - `ipv4` or `evpn` matches
+  nothing
 - `session_state` on `bgp_peer_bfd_state`: the BFD session state, one of
   `BFD_SESSION_STATE_UNSPECIFIED`, `BFD_SESSION_STATE_UP`,
   `BFD_SESSION_STATE_DOWN`, `BFD_SESSION_STATE_ADMIN_DOWN` or

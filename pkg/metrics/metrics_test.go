@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/osrg/gobgp/v4/api"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"github.com/osrg/gobgp/v4/pkg/server"
 )
@@ -710,4 +712,113 @@ func TestSendCommunityAbsentUntilConfigured(t *testing.T) {
 	}
 	assert.Equal(map[string]float64{"127.0.0.2": 0}, got,
 		"only the configured peer gets a series, and its value is 0 for standard")
+}
+
+// ribPaths gathers bgp_rib_paths by route_family. Gather fails on an invalid
+// metric, so an undecodable family or a failed GetTable fails the caller.
+func ribPaths(t *testing.T, s *server.BgpServer) map[string]float64 {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(NewBgpCollector(s))
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	got := map[string]float64{}
+	for _, f := range families {
+		if f.GetName() != "bgp_rib_paths" {
+			continue
+		}
+		assert.Equal(t, dto.MetricType_GAUGE, f.GetType())
+		for _, m := range f.GetMetric() {
+			require.Len(t, m.GetLabel(), 1)
+			got[m.GetLabel()[0].GetValue()] = m.GetGauge().GetValue()
+		}
+	}
+	return got
+}
+
+// Global.Families are indexes into oc.IntToAfiSafiTypeMap: 0 and 1 here.
+// Decoded as afi<<16|safi they name no family at all, which is how
+// k8gobgp's own RIB collector lost its metric. Locally originated paths are
+// counted with no peer configured, which no bgp_routes_* series can do.
+func TestRibPathsCountsLocalPathsPerFamily(t *testing.T) {
+	s := server.NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1, Families: []uint32{0, 1}},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	assert.Equal(t, map[string]float64{"ipv4-unicast": 0, "ipv6-unicast": 0}, ribPaths(t, s),
+		"configured and empty reads 0, not absent")
+
+	v4, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("192.0.2.1/32"))
+	require.NoError(t, err)
+	nh4, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr("10.0.0.1"))
+	require.NoError(t, err)
+	v6, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("2001:db8::1/128"))
+	require.NoError(t, err)
+	mp6, err := bgp.NewPathAttributeMpReachNLRI(bgp.RF_IPv6_UC, []bgp.PathNLRI{{NLRI: v6}}, netip.MustParseAddr("2001:db8::ff"))
+	require.NoError(t, err)
+	nh4b, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr("10.0.0.2"))
+	require.NoError(t, err)
+	origin := bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP)
+	// Two IPv4 paths to one prefix, kept apart by path ID, so the metric is
+	// seen to count paths and not destinations.
+	_, err = s.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{
+		{Family: bgp.RF_IPv4_UC, Nlri: v4, RemoteID: 1, Attrs: []bgp.PathAttributeInterface{origin, nh4}},
+		{Family: bgp.RF_IPv4_UC, Nlri: v4, RemoteID: 2, Attrs: []bgp.PathAttributeInterface{origin, nh4b}},
+		{Family: bgp.RF_IPv6_UC, Nlri: v6, Attrs: []bgp.PathAttributeInterface{origin, mp6}},
+	}})
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]float64{"ipv4-unicast": 2, "ipv6-unicast": 1}, ribPaths(t, s))
+}
+
+// With no families configured every family is enabled globally, so every one
+// is reported - not just the two unicast families.
+func TestRibPathsDefaultFamilies(t *testing.T) {
+	s := server.NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	g, err := s.GetBgp(context.Background(), &api.GetBgpRequest{})
+	require.NoError(t, err)
+	require.Len(t, g.GetGlobal().GetFamilies(), len(oc.IntToAfiSafiTypeMap), "the default enables every family")
+
+	got := ribPaths(t, s)
+	assert.Len(t, got, len(g.GetGlobal().GetFamilies()))
+	assert.Contains(t, got, "ipv4-unicast")
+	assert.Contains(t, got, "ipv6-unicast")
+}
+
+// A family that cannot be counted is an error the scrape reports, not a series
+// that quietly goes missing: an ordinal outside the table, and a family with no
+// global RIB (rtc, index 12, when only 0 and 1 are configured). The family that
+// can be counted is still emitted.
+func TestRibPathsReportsFailuresAsInvalidMetrics(t *testing.T) {
+	s := server.NewBgpServer()
+	go s.Serve()
+	require.NoError(t, s.StartBgp(context.Background(), &api.StartBgpRequest{
+		Global: &api.Global{Asn: 1, RouterId: "1.1.1.1", ListenPort: -1, Families: []uint32{0, 1}},
+	}))
+	defer s.StopBgp(context.Background(), &api.StopBgpRequest{}) //nolint:errcheck
+
+	c := NewBgpCollector(s).(*bgpCollector)
+	ch := make(chan prometheus.Metric, 3)
+	c.collectRibPaths(ch, []uint32{999, 12, 0})
+	close(ch)
+
+	var failed, emitted int
+	for m := range ch {
+		if err := m.Write(&dto.Metric{}); err != nil {
+			failed++
+		} else {
+			emitted++
+		}
+	}
+	assert.Equal(t, 2, failed, "unknown ordinal and missing table")
+	assert.Equal(t, 1, emitted, "ipv4-unicast is still counted")
 }
