@@ -78,6 +78,14 @@ An `h1:` line means the number is taken. Note the `/v4` suffix - it is part of
 the module path, and querying without it returns a confident 404 for a module
 that has never existed.
 
+This check has a cost. Asking for a version before its tag exists caches the
+"not found": proxy.golang.org says that in that case "it may take up to 30
+minutes for the mirror's cache to expire". Expect the module check at the end
+of the steps to 404 for up to 30 minutes after the tags are pushed - v4.900.6
+took 30. Check once after that rather than polling, and never set
+`GONOSUMDB`, `GOPRIVATE` or `GOFLAGS` to get past it: that turns the check off
+instead of passing it.
+
 ## Which tag builds binaries
 
 Only the `v1.x.y` tag. The `release` workflow excludes `v4.*` deliberately, so
@@ -103,6 +111,11 @@ existed, and the `v1.3.2` release shipped with no binaries at all.
 
 ## Steps
 
+Before tagging, merge a commit to `main` that sets `FORK_MAJOR`, `FORK_MINOR`
+and `FORK_PATCH` in `internal/pkg/version/version.go` to the release, and adds
+the release to the table above. GoReleaser injects only the commit hash, so
+without the bump the release binaries print the previous version.
+
 With the release commit on `main`:
 
 ```sh
@@ -113,11 +126,14 @@ git tag -a v1.3.2 -F <notes-file> <commit>
 git tag -a v4.900.2 -F <explanation> <commit>
 
 # 3. push the release tag first, on its own, and let the build finish.
-#    This is the only tag that triggers GoReleaser.
+#    This is the only tag that triggers GoReleaser. The run takes a few
+#    seconds to appear; until it does, this fails with a 404 - --branch keeps
+#    it from watching the previous release's run instead. The push also
+#    starts a ci run; check that one too.
 git push origin v1.3.2
-gh run watch "$(gh run list --workflow=release --limit 1 --json databaseId --jq '.[0].databaseId')"
+gh run watch "$(gh run list --workflow=release --branch v1.3.2 --limit 1 --json databaseId --jq '.[0].databaseId')"
 
-# 4. then the module tag, which triggers nothing
+# 4. then the module tag. It starts no release, only a ci run.
 git push origin v4.900.2
 
 # 5. GoReleaser has already created the GitHub release from the v1.x.y tag,
@@ -144,10 +160,16 @@ Verify the Go tag resolves before telling anyone to use it:
 
 ```sh
 cd "$(mktemp -d)"
-printf 'module t\ngo 1.25.13\nrequire github.com/osrg/gobgp/v4 v4.0.0\n' > go.mod
+printf 'module t\ngo 1.26.0\nrequire github.com/osrg/gobgp/v4 v4.0.0\n' > go.mod
 echo 'replace github.com/osrg/gobgp/v4 => github.com/purelb/gobgp-netlink/v4 v4.900.2' >> go.mod
+printf 'package main\n\nimport _ "github.com/osrg/gobgp/v4/pkg/packet/bgp"\n\nfunc main() {}\n' > main.go
 go mod tidy   # must not rewrite the replace into a pseudo-version
+go build .
 ```
+
+`main.go` must import the module: with nothing importing it, `go mod tidy` has
+nothing to resolve and passes without fetching it, even for a version that does
+not exist.
 
 ## What consumers write
 
