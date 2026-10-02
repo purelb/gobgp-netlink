@@ -7,6 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/pkg/config/oc"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"github.com/osrg/gobgp/v4/pkg/server"
 )
@@ -314,6 +315,12 @@ var (
 		"Number of routes advertised to peer",
 		rfLabels, nil,
 	)
+
+	bgpRibPathsDesc = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "rib", "paths"),
+		"Number of paths in the global RIB, per globally configured family",
+		[]string{"route_family"}, nil,
+	)
 )
 
 // BgpCollectorOption configures the collector. Options rather than parameters
@@ -372,6 +379,8 @@ func (c *bgpCollector) Describe(out chan<- *prometheus.Desc) {
 	out <- bgpRoutesReceivedDesc
 	out <- bgpRoutesAcceptedDesc
 	out <- bgpRoutesAdvertisedDesc
+
+	out <- bgpRibPathsDesc
 }
 
 func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
@@ -380,6 +389,8 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 		out <- prometheus.NewInvalidMetric(prometheus.NewDesc("error", "error during metric collection", nil, nil), err)
 		return
 	}
+
+	c.collectRibPaths(out, bgpServer.GetGlobal().GetFamilies())
 
 	req := &api.ListPeerRequest{EnableAdvertised: c.advertisedRoutes}
 	err = c.server.ListPeer(context.Background(), req, func(p *api.Peer) {
@@ -535,5 +546,46 @@ func (c *bgpCollector) Collect(out chan<- prometheus.Metric) {
 	})
 	if err != nil {
 		out <- prometheus.NewInvalidMetric(prometheus.NewDesc("error", "error during metric collection", nil, nil), err)
+	}
+}
+
+// collectRibPaths emits bgp_rib_paths for each family in the global
+// configuration. That is the only count that includes locally originated
+// paths: bgp_routes_* are per peer, so a path added with AddPath shows up there
+// only while some session is established and export policy lets it out.
+//
+// The families are indexes into oc.IntToAfiSafiTypeMap, not afi<<16|safi, and
+// are decoded the way newGlobalFromAPIStruct decodes them when StartBgp accepts
+// them. A consumer that decoded them as afi<<16|safi asked for families that do
+// not exist and, discarding the errors, lost the metric without a trace - which
+// is why the decoding lives next to the encoding. An unknown ordinal or a failed
+// GetTable is reported as an invalid metric rather than skipped, so it reaches
+// promhttp_metric_handler_errors_total; the other families are still emitted.
+//
+// With no families configured, every family is enabled globally (see
+// oc.SetDefaultGlobalConfigValues), so a default daemon reports all of them,
+// mostly as 0. Each is one GetTable, which walks that family's table under the
+// BGP lock.
+func (c *bgpCollector) collectRibPaths(out chan<- prometheus.Metric, families []uint32) {
+	for _, f := range families {
+		name, ok := oc.IntToAfiSafiTypeMap[int(f)]
+		if !ok {
+			out <- prometheus.NewInvalidMetric(bgpRibPathsDesc, fmt.Errorf("unknown global address family index %d", f))
+			continue
+		}
+		family, err := bgp.GetFamily(string(name))
+		if err != nil {
+			out <- prometheus.NewInvalidMetric(bgpRibPathsDesc, fmt.Errorf("global address family %q (index %d): %w", name, f, err))
+			continue
+		}
+		rsp, err := c.server.GetTable(context.Background(), &api.GetTableRequest{
+			TableType: api.TableType_TABLE_TYPE_GLOBAL,
+			Family:    &api.Family{Afi: api.Family_Afi(family.Afi()), Safi: api.Family_Safi(family.Safi())},
+		})
+		if err != nil {
+			out <- prometheus.NewInvalidMetric(bgpRibPathsDesc, fmt.Errorf("global RIB %s: %w", family, err))
+			continue
+		}
+		out <- prometheus.MustNewConstMetric(bgpRibPathsDesc, prometheus.GaugeValue, float64(rsp.GetNumPath()), family.String())
 	}
 }
