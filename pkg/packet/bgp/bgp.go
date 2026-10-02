@@ -12417,6 +12417,9 @@ func NewPathAttributeNextHop(addr netip.Addr) (*PathAttributeNextHop, error) {
 	if !addr.IsValid() {
 		return nil, errors.New("invalid address")
 	}
+	// An IPv4-mapped address would otherwise be encoded as 16 bytes, which
+	// RFC 4271 receivers reject as an attribute length error.
+	addr = addr.Unmap()
 	t := BGP_ATTR_TYPE_NEXT_HOP
 	l := net.IPv4len
 	if addr.Is6() {

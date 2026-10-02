@@ -157,3 +157,74 @@ func TestUpdatePathAttrsNetlinkIPv6GlobalOnly(t *testing.T) {
 		assert.True(t, nh[0].Equal(net.ParseIP("2001:db8::1")))
 	}
 }
+
+// TestUpdatePathAttrsNetlinkIPv4OverIPv6Session is the regression gate for an
+// IPv4 route advertised over an IPv6 session. The IPv4 next hop then comes from
+// the interface, and Addrs returns it in 16-byte form, as net.ParseIP does
+// here. That form became ::ffff:a.b.c.d and was sent as a 16-byte NEXT_HOP,
+// which FRR rejects ("Nexthop attribute length isn't four") and treats as a
+// withdrawal; for VPNv4 it became an IPv6 next hop in MP_REACH_NLRI.
+func TestUpdatePathAttrsNetlinkIPv4OverIPv6Session(t *testing.T) {
+	logger := slog.Default()
+	global := &oc.Global{Config: oc.GlobalConfig{As: 65001, RouterId: netip.MustParseAddr("1.1.1.1")}}
+	info := &PeerInfo{
+		PeerType:     oc.PEER_TYPE_EXTERNAL,
+		AS:           65002,
+		LocalAS:      65001,
+		Address:      netip.MustParseAddr("2001:db8::2"),
+		LocalAddress: netip.MustParseAddr("2001:db8::1"),
+		IPv4Nexthop:  net.ParseIP("172.30.250.104"),
+		IPv6Nexthop:  net.ParseIP("2001:db8::1"),
+	}
+	want := netip.MustParseAddr("172.30.250.104")
+
+	t.Run("unicast carries a 4-byte NEXT_HOP", func(t *testing.T) {
+		prefix, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("192.0.2.10/32"))
+		assert.NoError(t, err)
+		nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr("0.0.0.0"))
+		assert.NoError(t, err)
+		attrs := []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), nh}
+		p := NewPath(bgp.RF_IPv4_UC, NewNetlinkPeerInfo("eth0"), bgp.PathNLRI{NLRI: prefix},
+			false, attrs, time.Now(), false)
+		p.SetIsFromExternal(true)
+
+		out := UpdatePathAttrs(logger, global, info, p)
+		assert.NotNil(t, out)
+		assert.Nil(t, out.getPathAttr(bgp.BGP_ATTR_TYPE_MP_REACH_NLRI), "an IPv4 next hop belongs in NEXT_HOP")
+
+		attr := out.getPathAttr(bgp.BGP_ATTR_TYPE_NEXT_HOP)
+		if assert.NotNil(t, attr) {
+			got := attr.(*bgp.PathAttributeNextHop)
+			assert.Equal(t, want, got.Value)
+			assert.Equal(t, uint16(net.IPv4len), got.Length)
+			b, err := got.Serialize()
+			assert.NoError(t, err)
+			// Flags, type, length, then the address.
+			assert.Equal(t, []byte{3, net.IPv4len, 172, 30, 250, 104}, b[1:])
+		}
+	})
+
+	t.Run("VPNv4 carries an IPv4 next hop in MP_REACH_NLRI", func(t *testing.T) {
+		nlri := makeVPNNLRI(t, "192.0.2.10/32", 65001, 100)
+		mpreach, err := bgp.NewPathAttributeMpReachNLRI(bgp.RF_IPv4_VPN,
+			[]bgp.PathNLRI{nlri}, netip.MustParseAddr("0.0.0.0"))
+		assert.NoError(t, err)
+		attrs := []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), mpreach}
+		p := NewPath(bgp.RF_IPv4_VPN, NewNetlinkPeerInfo("eth0"), nlri, false, attrs, time.Now(), false)
+		p.SetIsFromExternal(true)
+
+		out := UpdatePathAttrs(logger, global, info, p)
+		assert.NotNil(t, out)
+
+		attr := out.getPathAttr(bgp.BGP_ATTR_TYPE_MP_REACH_NLRI)
+		if assert.NotNil(t, attr) {
+			mp := attr.(*bgp.PathAttributeMpReachNLRI)
+			assert.Equal(t, want, mp.Nexthop)
+			b, err := mp.Serialize()
+			assert.NoError(t, err)
+			// Flags, type, length, AFI(2), SAFI, then the next-hop length:
+			// an 8-byte RD plus a 4-byte IPv4 address, not 8 + 16.
+			assert.Equal(t, byte(12), b[6])
+		}
+	})
+}

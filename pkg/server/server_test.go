@@ -5934,6 +5934,10 @@ func TestSetNetlinkNexthops(t *testing.T) {
 
 		require.NotNil(t, info.IPv4Nexthop, "a session with no local address takes the interface address")
 		assert.True(t, info.IPv4Nexthop.Equal(want), "got %s want %s", info.IPv4Nexthop, want)
+		// Equal ignores the form, so check it: Addrs returns 16-byte IPv4,
+		// and in that form an IPv4 route over an IPv6 session was sent with a
+		// 16-byte NEXT_HOP that FRR discards.
+		assert.Len(t, info.IPv4Nexthop, net.IPv4len, "the IPv4 next hop must be in 4-byte form")
 	})
 }
 

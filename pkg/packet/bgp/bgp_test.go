@@ -2534,6 +2534,15 @@ func Test_PathAttributeNextHop(t *testing.T) {
 	}
 	f("192.0.2.1")
 	f("2001:db8::68")
+
+	// An IPv4-mapped address is encoded as the 4-byte IPv4 address; a 16-byte
+	// NEXT_HOP is rejected by RFC 4271 receivers.
+	attr, err := NewPathAttributeNextHop(netip.MustParseAddr("::ffff:192.0.2.1"))
+	assert.NoError(t, err)
+	assert.Equal(t, uint16(net.IPv4len), attr.Length)
+	b, err := attr.Serialize()
+	assert.NoError(t, err)
+	assert.Equal(t, []byte{3, net.IPv4len, 192, 0, 2, 1}, b[1:])
 }
 
 func Test_PathAttributeNextHop_InvalidLength(t *testing.T) {
