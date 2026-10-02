@@ -120,8 +120,9 @@ gh run watch "$(gh run list --workflow=release --limit 1 --json databaseId --jq 
 # 4. then the module tag, which triggers nothing
 git push origin v4.900.2
 
-# 5. the GitHub release is cut from the v1.x.y tag
-gh release create v1.3.2 --notes-file <notes-file> --verify-tag
+# 5. GoReleaser has already created the GitHub release from the v1.x.y tag,
+#    with generated notes; replace them with the release notes
+gh release edit v1.3.2 --notes-file <notes-file>
 ```
 
 If a release needs rebuilding - a failed run, or artifacts attached to the wrong
