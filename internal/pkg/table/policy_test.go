@@ -18,6 +18,7 @@ package table
 import (
 	"fmt"
 	"math"
+	"net"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -1179,6 +1180,29 @@ func TestSetNextHop(t *testing.T) {
 		path.SetNexthop(netip.MustParseAddr("10.0.0.2"))
 		if diff := cmp.Diff(newPath, path); diff != "" {
 			t.Errorf("(-want, +got):\n%s", diff)
+		}
+	})
+
+	// An IPv4-mapped value is an IPv4 next hop. Left mapped it Is6, so the
+	// IPv4 route was moved to MP_REACH_NLRI with a ::ffff: next hop.
+	t.Run("IPv4-mapped", func(t *testing.T) {
+		s1 := createStatement("statement1", "ps", "ns", true)
+		s1.Actions.BgpActions.SetNextHop = oc.BgpNextHopType("::ffff:10.2.2.2")
+		s1.Actions.RouteDisposition = oc.ROUTE_DISPOSITION_ACCEPT_ROUTE
+		pd := createPolicyDefinition("pd1", s1)
+		pl := createRoutingPolicy(ds, pd)
+
+		r := NewRoutingPolicy(logger)
+		err := r.reload(pl)
+		assert.NoError(t, err)
+		pType, newPath := r.policyMap["pd1"].Apply(logger, path, &PolicyOptions{Info: peer})
+		assert.Equal(t, ROUTE_TYPE_ACCEPT, pType)
+		assert.Nil(t, newPath.getPathAttr(bgp.BGP_ATTR_TYPE_MP_REACH_NLRI))
+		attr := newPath.getPathAttr(bgp.BGP_ATTR_TYPE_NEXT_HOP)
+		if assert.NotNil(t, attr) {
+			nh := attr.(*bgp.PathAttributeNextHop)
+			assert.Equal(t, netip.MustParseAddr("10.2.2.2"), nh.Value)
+			assert.Equal(t, uint16(net.IPv4len), nh.Length)
 		}
 	})
 }

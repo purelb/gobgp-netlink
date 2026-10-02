@@ -240,8 +240,10 @@ func (path *Path) SetNexthops(nexthops []net.IP) {
 	// Convert net.IP to netip.Addr for new upstream API
 	nextHopAddrs := make([]netip.Addr, 0, len(nexthops))
 	for _, nh := range nexthops {
+		// Unmap: a 16-byte IPv4 net.IP becomes ::ffff:a.b.c.d, which Is6 and
+		// would be encoded as an IPv6 next hop.
 		if addr, ok := netip.AddrFromSlice(nh); ok {
-			nextHopAddrs = append(nextHopAddrs, addr)
+			nextHopAddrs = append(nextHopAddrs, addr.Unmap())
 		}
 	}
 
@@ -250,7 +252,7 @@ func (path *Path) SetNexthops(nexthops []net.IP) {
 	}
 
 	// Handle IPv4 routes with IPv6 nexthops (RFC 5549 - Extended Next Hop)
-	if path.GetFamily() == bgp.RF_IPv4_UC && nexthops[0].To4() == nil {
+	if path.GetFamily() == bgp.RF_IPv4_UC && nextHopAddrs[0].Is6() {
 		path.delPathAttr(bgp.BGP_ATTR_TYPE_NEXT_HOP)
 		mpreach, _ := bgp.NewPathAttributeMpReachNLRI(path.GetFamily(),
 			[]bgp.PathNLRI{{NLRI: path.GetNlri(), ID: path.localID}},
@@ -579,6 +581,9 @@ func (path *Path) mpReachNexthops() (netip.Addr, netip.Addr) {
 }
 
 func (path *Path) SetNexthop(nexthop netip.Addr) {
+	// An IPv4-mapped address is IPv4; left mapped, Is6 sends an IPv4 route
+	// to MP_REACH_NLRI with a ::ffff: next hop.
+	nexthop = nexthop.Unmap()
 	if path.GetFamily() == bgp.RF_IPv4_UC && nexthop.Is6() {
 		path.delPathAttr(bgp.BGP_ATTR_TYPE_NEXT_HOP)
 		mpreach, _ := bgp.NewPathAttributeMpReachNLRI(path.GetFamily(), []bgp.PathNLRI{{NLRI: path.GetNlri(), ID: path.localID}}, nexthop)

@@ -207,7 +207,9 @@ func GetIPv4Nexthop(interfaceName string, logger *slog.Logger) (net.IP, error) {
 						slog.String("Topic", "net"),
 						slog.String("Interface", interfaceName),
 						slog.String("Address", ip.String()))
-					return ip, nil
+					// To4: Addrs returns IPv4 in 16-byte form, which a netip.Addr
+					// keeps as IPv4-mapped IPv6 and encodes as 16 bytes.
+					return ip.To4(), nil
 				}
 			}
 		}
