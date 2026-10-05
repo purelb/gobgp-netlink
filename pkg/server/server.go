@@ -980,7 +980,8 @@ func (s *BgpServer) notifyBestWatcher(best []*table.Path, multipath [][]*table.P
 }
 
 // setNetlinkNexthops fills in the three nexthop addresses used to advertise a
-// route this daemon imported from the kernel.
+// route this daemon imported from the kernel, and records the session's
+// interface for exporting the routes this peer sends.
 //
 // NewNetlinkPeerInfo says of these fields that they are "populated separately
 // when the session comes up". They were not - nothing assigned them anywhere,
@@ -1037,6 +1038,11 @@ func setNetlinkNexthops(logger *slog.Logger, info *table.PeerInfo, conf *oc.Neig
 		}
 		iface = name
 	}
+	// Paths learned from this peer carry this PeerInfo as their source, and
+	// netlink export reads the interface from it: the kernel rejects a
+	// link-local gateway with no output device. The v4.9.0 merge dropped the
+	// assignment, and every such route was then left out of the FIB.
+	info.NetlinkIfName = iface
 
 	if info.IPv4Nexthop == nil {
 		if v4, err := netutils.GetIPv4Nexthop(iface, logger); err == nil {
@@ -5093,8 +5099,8 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 				updated.State.PeerAs, updated.Config.LocalAs,
 				updated.State.RemoteRouterId, peer.fsm.gConf.Config.RouterId,
 				updated.Transport.State.RemoteAddress, updated.Transport.State.LocalAddress)
-			// NewPeerInfo does not carry the netlink next hops, so replacing
-			// the snapshot wholesale would blank them until the next flap -
+			// NewPeerInfo does not carry the netlink next hops or interface, so
+			// replacing the snapshot wholesale would blank them until the next flap -
 			// silently reverting netlink-imported routes to the fallback next
 			// hop and emptying PeerState's three fields. The session is the
 			// same one, so the values resolved when it came up still hold and
@@ -5104,6 +5110,7 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 				info.IPv4Nexthop = prev.IPv4Nexthop
 				info.IPv6Nexthop = prev.IPv6Nexthop
 				info.IPv6LinkLocalNexthop = prev.IPv6LinkLocalNexthop
+				info.NetlinkIfName = prev.NetlinkIfName
 			}
 			peer.peerInfo.Store(info)
 		}

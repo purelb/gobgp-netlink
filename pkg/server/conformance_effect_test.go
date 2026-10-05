@@ -46,6 +46,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/osrg/gobgp/v4/api"
+	"github.com/osrg/gobgp/v4/internal/pkg/table"
 	"github.com/osrg/gobgp/v4/pkg/apiutil"
 	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
 	"google.golang.org/protobuf/proto"
@@ -528,6 +529,7 @@ func TestEffectNetlinkNexthopsSurviveAConfigChange(t *testing.T) {
 
 	before := nexthop(t)
 	require.Equal(t, "127.0.0.1", before, "the next hop must be set before the change, or this proves nothing")
+	require.Equal(t, "lo", peerInterface(t, a), "the interface must be set before the change, or this proves nothing")
 
 	// remove-private-as is the one in-place change that rebuilds PeerInfo.
 	_, err := a.UpdatePeer(context.Background(), &api.UpdatePeerRequest{Peer: &api.Peer{
@@ -542,6 +544,70 @@ func TestEffectNetlinkNexthopsSurviveAConfigChange(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	assert.Equal(t, before, nexthop(t), "the next hop must survive an in-place configuration change")
+	assert.Equal(t, "lo", peerInterface(t, a), "the interface must survive an in-place configuration change")
+}
+
+// peerInterface reads the interface recorded on a's PeerInfo for its peer at
+// 127.0.0.1, which is the source of every path that peer sends.
+func peerInterface(t *testing.T, a *BgpServer) string {
+	t.Helper()
+	var name string
+	require.NoError(t, a.mgmtOperation(func() error {
+		p, ok := a.neighborMap[netip.MustParseAddr("127.0.0.1")]
+		if !ok {
+			return fmt.Errorf("no peer at 127.0.0.1")
+		}
+		if info := p.peerInfo.Load(); info != nil {
+			name = info.NetlinkIfName
+		}
+		return nil
+	}, false))
+	return name
+}
+
+// A route learned from a peer whose next hop is IPv6 link-local is exported on
+// the session's interface.
+//
+// The kernel rejects a link-local gateway with no output device, and export
+// takes the device from the path source's NetlinkIfName. The v4.9.0 merge
+// dropped the line that recorded it when the session came up, so for every BGP
+// peer it was empty and export left these routes out. The export test for this
+// case built its path with a netlink source, which carries the interface by
+// construction, so it never saw a BGP peer's empty one. This takes the source
+// from a real session instead.
+func TestEffectPeerInterfaceReachesNetlinkExport(t *testing.T) {
+	a, _ := effectPeers(t, 10721, &api.PeerConf{})
+
+	// The session is over loopback, so the interface is lo.
+	require.Equal(t, "lo", peerInterface(t, a))
+
+	var source *table.PeerInfo
+	require.NoError(t, a.mgmtOperation(func() error {
+		source = a.neighborMap[netip.MustParseAddr("127.0.0.1")].peerInfo.Load()
+		return nil
+	}, false))
+	require.NotNil(t, source)
+
+	// As peer.go builds a received path: the peer's PeerInfo is its source.
+	nlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("2001:db8:7::/64"))
+	require.NoError(t, err)
+	mpreach, err := bgp.NewPathAttributeMpReachNLRI(bgp.RF_IPv6_UC,
+		[]bgp.PathNLRI{{NLRI: nlri}}, netip.MustParseAddr("fe80::2"))
+	require.NoError(t, err)
+	path := table.NewPath(bgp.RF_IPv6_UC, source, bgp.PathNLRI{NLRI: nlri}, false,
+		[]bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), mpreach},
+		time.Now(), false)
+	require.NotNil(t, path)
+
+	f := newFakeNetlink()
+	f.addLink("lo", 1)
+	e := newTestExportClient(t, f,
+		&exportRule{Name: "global", TableId: 0, Metric: 20, ValidateNexthop: true})
+	e.processUpdate(pathUpdate(path))
+
+	route := f.routeFor(0, "2001:db8:7::/64")
+	require.NotNil(t, route, "a link-local nexthop learned from a peer must be exported")
+	assert.Equal(t, 1, route.LinkIndex, "on the session's interface")
 }
 
 // disconnect_reason and disconnect_message are reported by ListPeer.

@@ -128,6 +128,9 @@ type PeerInfo struct {
 	// peer's own PeerInfo when a session comes up and are read by
 	// UpdatePathAttrs to originate an RFC 2545 dual nexthop. They are
 	// deliberately not populated on a path's source - see NewNetlinkPeerInfo.
+	// NetlinkIfName is the interface: the session's on a BGP peer, which netlink
+	// export needs for a link-local nexthop, and the scan interface on a
+	// netlink-imported path's source.
 	IPv4Nexthop          net.IP
 	IPv6Nexthop          net.IP
 	IPv6LinkLocalNexthop net.IP
