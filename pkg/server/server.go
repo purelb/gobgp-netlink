@@ -4733,35 +4733,43 @@ func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNoti
 		}
 	}
 
-	// Resolve the interface first. This used to run after
-	// ExtractNeighborAddress, which returns "NeighborAddress is not configured"
-	// when a peer was identified only by interface - so the branch below was
-	// unreachable and deleting an interface peer could never work. addNeighbor
-	// does not have the problem because SetDefaultNeighborConfigValues resolves
-	// the interface into State.NeighborAddress before it looks.
-	var addr string
-	if intf := c.Config.NeighborInterface; intf != "" {
-		var err error
-		addr, err = oc.GetIPv6LinkLocalNeighborAddress(intf)
-		if err != nil {
-			return err
+	addr, err := c.ExtractNeighborAddress()
+	if intf := c.Config.NeighborInterface; err != nil && intf != "" {
+		// Identified by interface alone. The peer was configured on it, so
+		// neighborMap answers without asking the kernel, which also works with
+		// the link down, the interface gone or the neighbour entry aged out.
+		// The v4.9.0 merge replaced this lookup with upstream's kernel query,
+		// which fails in exactly those cases and left the peer configured.
+		addr, err = "", nil
+		for k, p := range s.neighborMap {
+			if p.fsm.pConf.ReadOnly().Config.NeighborInterface != intf {
+				continue
+			}
+			if addr != "" {
+				return fmt.Errorf("more than one peer is configured on interface %s", intf)
+			}
+			addr = k.String()
 		}
-		// An interface that exists but carries no IPv6 link-local address
-		// returns ("", nil), not an error. Reporting that as "invalid neighbor
-		// address" blames the wrong thing - the caller gave an interface, not
-		// an address - and it is the difference between a host where the
-		// interface is absent and one where it is present but has no
-		// link-local, which is what made the first version of this pass
-		// locally and fail on CI.
+		// A peer added by its link-local address rather than its interface.
 		if addr == "" {
-			return fmt.Errorf("interface %s has no IPv6 link-local address, so no peer can be identified by it", intf)
+			addr, err = oc.GetIPv6LinkLocalNeighborAddress(intf)
+			if err != nil {
+				return err
+			}
+			// An interface that exists but carries no IPv6 link-local address
+			// returns ("", nil), not an error. Reporting that as "invalid neighbor
+			// address" blames the wrong thing - the caller gave an interface, not
+			// an address - and it is the difference between a host where the
+			// interface is absent and one where it is present but has no
+			// link-local, which is what made the first version of this pass
+			// locally and fail on CI.
+			if addr == "" {
+				return fmt.Errorf("interface %s has no IPv6 link-local address, so no peer can be identified by it", intf)
+			}
 		}
-	} else {
-		var err error
-		addr, err = c.ExtractNeighborAddress()
-		if err != nil {
-			return err
-		}
+	}
+	if err != nil {
+		return err
 	}
 	// MustParseAddr here turned a bad or empty address into a process exit.
 	parsed, err := netip.ParseAddr(addr)
