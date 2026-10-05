@@ -5881,6 +5881,12 @@ func toPathApiUtil(path *table.Path) *apiutil.Path {
 		p.PeerASN = s.AS
 		p.PeerID = s.ID
 		p.PeerAddress = s.Address
+		// toPathAPI builds NetlinkPathInfo from these, for ListPath and
+		// WatchEvent alike. The v4.9.0 merge took upstream's copy of this
+		// function, which never had them, and every netlink-imported path
+		// was reported as peer-learned until they were restored.
+		p.IsNetlink = s.IsNetlink
+		p.NetlinkIfName = s.NetlinkIfName
 	}
 	return p
 }
