@@ -1,3 +1,19 @@
+// Copyright (C) 2014-2021 Nippon Telegraph and Telephone Corporation.
+// Copyright (C) 2025 Acnodal Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package config
 
 import (
@@ -279,6 +295,7 @@ func updateNeighbors(ctx context.Context, bgpServer *server.BgpServer, updated [
 // pass true for isGracefulRestart. Otherwise, pass false. Any error applying
 // the initial configuration is returned.
 func InitialConfig(ctx context.Context, bgpServer *server.BgpServer, newConfig *oc.BgpConfigSet, isGracefulRestart bool) (*oc.BgpConfigSet, error) {
+	bgpServer.Log().Debug("loaded netlink config", slog.String("Topic", "config"), slog.Any("Netlink", newConfig.Netlink))
 	if err := bgpServer.StartBgp(ctx, &api.StartBgpRequest{
 		Global: oc.NewGlobalFromConfigStruct(&newConfig.Global),
 	}); err != nil {
@@ -754,6 +771,8 @@ func addVrfs(ctx context.Context, bgpServer *server.BgpServer, vrfs []oc.Vrf) {
 	}
 }
 
+// deleteVrfs removes VRFs from the RIB.
+//
 // DeleteVrf also withdraws anything imported into the VRF, flushes what was
 // exported to the kernel, drops the VRF's config entry and rebuilds the RD
 // mapping, so a later VRF reusing the RD is not resolved to this one.
@@ -770,6 +789,13 @@ func deleteVrfs(ctx context.Context, bgpServer *server.BgpServer, vrfs []oc.Vrf)
 	}
 }
 
+// recreateVrfs applies a structural VRF change: identity fields cannot be
+// updated in place, because AddVrf refuses a name that already exists.
+//
+// This moves routes. Every path in the VRF is withdrawn with the old
+// definition and re-learned under the new one, so it is logged at Info: a
+// reload that previously did nothing at all now changes forwarding.
+//
 // A VRF that a neighbour is still using cannot be recreated - DeleteVrf refuses
 // it, and the subsequent add then fails because the name still exists. Both are
 // logged and the VRF keeps its old definition, so the change is ignored rather

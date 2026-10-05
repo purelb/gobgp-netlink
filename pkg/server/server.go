@@ -1,4 +1,5 @@
 // Copyright (C) 2014-2021 Nippon Telegraph and Telephone Corporation.
+// Copyright (C) 2025 Acnodal Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1617,6 +1618,9 @@ func (s *BgpServer) dropAdjRIBIn(peer *peer, families []bgp.Family) {
 }
 
 func (s *BgpServer) propagateUpdate(peer *peer, pathList []*table.Path) {
+	s.logger.Debug("propagate update",
+		slog.String("Topic", "propagate"),
+		slog.Any("Path", pathList))
 	rs := peer != nil && peer.isRouteServerClient()
 	vrf := false
 	var peerVrf string
@@ -6954,6 +6958,13 @@ func (s *BgpServer) EnableVrfNetlinkImport(ctx context.Context, r *api.EnableVrf
 	}, false)
 }
 
+// ensureVrfConfig makes sure a VRF has an entry in bgpConfig.Vrfs, creating one
+// if it was added over gRPC rather than read from a config file.
+//
+// The RD is not optional here: buildVrfMappings resolves an incoming VPN path's
+// RD to a VRF name through it, so an entry without one leaves export dead even
+// though the VRF is otherwise configured.
+//
 // Caller MUST hold shared.mu.
 func (s *BgpServer) ensureVrfConfig(name string, id uint32, rd bgp.RouteDistinguisherInterface) {
 	for i := range s.bgpConfig.Vrfs {
@@ -7378,6 +7389,8 @@ func (s *BgpServer) startNetlink(ctx context.Context) error {
 	return nil
 }
 
+// StartNetlink applies the current netlink configuration.
+//
 // It acquires the server lock, so it must NOT be called from inside a
 // mgmtOperation; internal callers that already hold the lock use startNetlink
 // instead. mgmtOperation is not reentrant - it posts to a size-1 channel and
@@ -7389,6 +7402,9 @@ func (s *BgpServer) StartNetlink(ctx context.Context) error {
 	}, false)
 }
 
+// StartNetlinkWithConfig assigns netlink configuration and applies it as one
+// atomic operation.
+//
 // The config goroutine used to write bgpConfig.Netlink and bgpConfig.Vrfs
 // directly and then call StartNetlink, leaving the writes unsynchronised against
 // the import scan and buildVrfMappings, which read exactly those fields. Passing
@@ -7406,6 +7422,13 @@ func (s *BgpServer) StartNetlinkWithConfig(ctx context.Context, netlinkConf *oc.
 	}, false)
 }
 
+// vrfConfigFor returns the mutable config entry for an existing VRF, creating
+// one on demand for a VRF that lives only in the RIB.
+//
+// Returns nil if the VRF does not exist at all, which is the only case the
+// per-VRF RPCs should reject. They used to reject every gRPC-created VRF,
+// because they searched a slice that only a config file ever populated.
+//
 // Caller MUST hold shared.mu.
 func (s *BgpServer) vrfConfigFor(name string) *oc.Vrf {
 	for i := range s.bgpConfig.Vrfs {
@@ -7424,6 +7447,9 @@ func (s *BgpServer) vrfConfigFor(name string) *oc.Vrf {
 	return &s.bgpConfig.Vrfs[len(s.bgpConfig.Vrfs)-1]
 }
 
+// StaleRouteCleanupOption enables the startup sweep that removes kernel routes
+// left behind by a previous run of this daemon.
+//
 // It is opt-in because the sweep issues host-wide RouteDel calls filtered only by
 // route protocol, and protocol 186 (RTPROT_BGP) is shared with FRR and other BGP
 // daemons. Only a real gobgpd process should ask for it; an embedded or
