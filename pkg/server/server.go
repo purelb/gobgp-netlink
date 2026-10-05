@@ -1,4 +1,5 @@
 // Copyright (C) 2014-2021 Nippon Telegraph and Telephone Corporation.
+// Copyright (C) 2025 Acnodal Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -980,7 +981,8 @@ func (s *BgpServer) notifyBestWatcher(best []*table.Path, multipath [][]*table.P
 }
 
 // setNetlinkNexthops fills in the three nexthop addresses used to advertise a
-// route this daemon imported from the kernel.
+// route this daemon imported from the kernel, and records the session's
+// interface for exporting the routes this peer sends.
 //
 // NewNetlinkPeerInfo says of these fields that they are "populated separately
 // when the session comes up". They were not - nothing assigned them anywhere,
@@ -1037,6 +1039,11 @@ func setNetlinkNexthops(logger *slog.Logger, info *table.PeerInfo, conf *oc.Neig
 		}
 		iface = name
 	}
+	// Paths learned from this peer carry this PeerInfo as their source, and
+	// netlink export reads the interface from it: the kernel rejects a
+	// link-local gateway with no output device. The v4.9.0 merge dropped the
+	// assignment, and every such route was then left out of the FIB.
+	info.NetlinkIfName = iface
 
 	if info.IPv4Nexthop == nil {
 		if v4, err := netutils.GetIPv4Nexthop(iface, logger); err == nil {
@@ -1611,6 +1618,9 @@ func (s *BgpServer) dropAdjRIBIn(peer *peer, families []bgp.Family) {
 }
 
 func (s *BgpServer) propagateUpdate(peer *peer, pathList []*table.Path) {
+	s.logger.Debug("propagate update",
+		slog.String("Topic", "propagate"),
+		slog.Any("Path", pathList))
 	rs := peer != nil && peer.isRouteServerClient()
 	vrf := false
 	var peerVrf string
@@ -4727,35 +4737,43 @@ func (s *BgpServer) deleteNeighbor(c *oc.Neighbor, code, subcode uint8, sendNoti
 		}
 	}
 
-	// Resolve the interface first. This used to run after
-	// ExtractNeighborAddress, which returns "NeighborAddress is not configured"
-	// when a peer was identified only by interface - so the branch below was
-	// unreachable and deleting an interface peer could never work. addNeighbor
-	// does not have the problem because SetDefaultNeighborConfigValues resolves
-	// the interface into State.NeighborAddress before it looks.
-	var addr string
-	if intf := c.Config.NeighborInterface; intf != "" {
-		var err error
-		addr, err = oc.GetIPv6LinkLocalNeighborAddress(intf)
-		if err != nil {
-			return err
+	addr, err := c.ExtractNeighborAddress()
+	if intf := c.Config.NeighborInterface; err != nil && intf != "" {
+		// Identified by interface alone. The peer was configured on it, so
+		// neighborMap answers without asking the kernel, which also works with
+		// the link down, the interface gone or the neighbour entry aged out.
+		// The v4.9.0 merge replaced this lookup with upstream's kernel query,
+		// which fails in exactly those cases and left the peer configured.
+		addr, err = "", nil
+		for k, p := range s.neighborMap {
+			if p.fsm.pConf.ReadOnly().Config.NeighborInterface != intf {
+				continue
+			}
+			if addr != "" {
+				return fmt.Errorf("more than one peer is configured on interface %s", intf)
+			}
+			addr = k.String()
 		}
-		// An interface that exists but carries no IPv6 link-local address
-		// returns ("", nil), not an error. Reporting that as "invalid neighbor
-		// address" blames the wrong thing - the caller gave an interface, not
-		// an address - and it is the difference between a host where the
-		// interface is absent and one where it is present but has no
-		// link-local, which is what made the first version of this pass
-		// locally and fail on CI.
+		// A peer added by its link-local address rather than its interface.
 		if addr == "" {
-			return fmt.Errorf("interface %s has no IPv6 link-local address, so no peer can be identified by it", intf)
+			addr, err = oc.GetIPv6LinkLocalNeighborAddress(intf)
+			if err != nil {
+				return err
+			}
+			// An interface that exists but carries no IPv6 link-local address
+			// returns ("", nil), not an error. Reporting that as "invalid neighbor
+			// address" blames the wrong thing - the caller gave an interface, not
+			// an address - and it is the difference between a host where the
+			// interface is absent and one where it is present but has no
+			// link-local, which is what made the first version of this pass
+			// locally and fail on CI.
+			if addr == "" {
+				return fmt.Errorf("interface %s has no IPv6 link-local address, so no peer can be identified by it", intf)
+			}
 		}
-	} else {
-		var err error
-		addr, err = c.ExtractNeighborAddress()
-		if err != nil {
-			return err
-		}
+	}
+	if err != nil {
+		return err
 	}
 	// MustParseAddr here turned a bad or empty address into a process exit.
 	parsed, err := netip.ParseAddr(addr)
@@ -5093,8 +5111,8 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 				updated.State.PeerAs, updated.Config.LocalAs,
 				updated.State.RemoteRouterId, peer.fsm.gConf.Config.RouterId,
 				updated.Transport.State.RemoteAddress, updated.Transport.State.LocalAddress)
-			// NewPeerInfo does not carry the netlink next hops, so replacing
-			// the snapshot wholesale would blank them until the next flap -
+			// NewPeerInfo does not carry the netlink next hops or interface, so
+			// replacing the snapshot wholesale would blank them until the next flap -
 			// silently reverting netlink-imported routes to the fallback next
 			// hop and emptying PeerState's three fields. The session is the
 			// same one, so the values resolved when it came up still hold and
@@ -5104,6 +5122,7 @@ func (s *BgpServer) updateNeighbor(c *oc.Neighbor) (needsSoftResetIn bool, err e
 				info.IPv4Nexthop = prev.IPv4Nexthop
 				info.IPv6Nexthop = prev.IPv6Nexthop
 				info.IPv6LinkLocalNexthop = prev.IPv6LinkLocalNexthop
+				info.NetlinkIfName = prev.NetlinkIfName
 			}
 			peer.peerInfo.Store(info)
 		}
@@ -5881,6 +5900,12 @@ func toPathApiUtil(path *table.Path) *apiutil.Path {
 		p.PeerASN = s.AS
 		p.PeerID = s.ID
 		p.PeerAddress = s.Address
+		// toPathAPI builds NetlinkPathInfo from these, for ListPath and
+		// WatchEvent alike. The v4.9.0 merge took upstream's copy of this
+		// function, which never had them, and every netlink-imported path
+		// was reported as peer-learned until they were restored.
+		p.IsNetlink = s.IsNetlink
+		p.NetlinkIfName = s.NetlinkIfName
 	}
 	return p
 }
@@ -6933,6 +6958,13 @@ func (s *BgpServer) EnableVrfNetlinkImport(ctx context.Context, r *api.EnableVrf
 	}, false)
 }
 
+// ensureVrfConfig makes sure a VRF has an entry in bgpConfig.Vrfs, creating one
+// if it was added over gRPC rather than read from a config file.
+//
+// The RD is not optional here: buildVrfMappings resolves an incoming VPN path's
+// RD to a VRF name through it, so an entry without one leaves export dead even
+// though the VRF is otherwise configured.
+//
 // Caller MUST hold shared.mu.
 func (s *BgpServer) ensureVrfConfig(name string, id uint32, rd bgp.RouteDistinguisherInterface) {
 	for i := range s.bgpConfig.Vrfs {
@@ -7357,6 +7389,8 @@ func (s *BgpServer) startNetlink(ctx context.Context) error {
 	return nil
 }
 
+// StartNetlink applies the current netlink configuration.
+//
 // It acquires the server lock, so it must NOT be called from inside a
 // mgmtOperation; internal callers that already hold the lock use startNetlink
 // instead. mgmtOperation is not reentrant - it posts to a size-1 channel and
@@ -7368,6 +7402,9 @@ func (s *BgpServer) StartNetlink(ctx context.Context) error {
 	}, false)
 }
 
+// StartNetlinkWithConfig assigns netlink configuration and applies it as one
+// atomic operation.
+//
 // The config goroutine used to write bgpConfig.Netlink and bgpConfig.Vrfs
 // directly and then call StartNetlink, leaving the writes unsynchronised against
 // the import scan and buildVrfMappings, which read exactly those fields. Passing
@@ -7385,6 +7422,13 @@ func (s *BgpServer) StartNetlinkWithConfig(ctx context.Context, netlinkConf *oc.
 	}, false)
 }
 
+// vrfConfigFor returns the mutable config entry for an existing VRF, creating
+// one on demand for a VRF that lives only in the RIB.
+//
+// Returns nil if the VRF does not exist at all, which is the only case the
+// per-VRF RPCs should reject. They used to reject every gRPC-created VRF,
+// because they searched a slice that only a config file ever populated.
+//
 // Caller MUST hold shared.mu.
 func (s *BgpServer) vrfConfigFor(name string) *oc.Vrf {
 	for i := range s.bgpConfig.Vrfs {
@@ -7403,6 +7447,9 @@ func (s *BgpServer) vrfConfigFor(name string) *oc.Vrf {
 	return &s.bgpConfig.Vrfs[len(s.bgpConfig.Vrfs)-1]
 }
 
+// StaleRouteCleanupOption enables the startup sweep that removes kernel routes
+// left behind by a previous run of this daemon.
+//
 // It is opt-in because the sweep issues host-wide RouteDel calls filtered only by
 // route protocol, and protocol 186 (RTPROT_BGP) is shared with FRR and other BGP
 // daemons. Only a real gobgpd process should ask for it; an embedded or

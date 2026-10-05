@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -298,6 +299,92 @@ func TestImportCycleWithdrawsVanishedRoutes(t *testing.T) {
 	topology["eth0"] = []*netutils.ConnectedRoute{connected(t, "10.0.1.1/24")}
 	n.runImportCycle()
 	assert.Equal(t, 1, advertisedCount(n, ""), "the vanished prefix should be withdrawn")
+}
+
+// TestImportedPathIsReportedAsNetlink: ListPath and WatchEvent are how a
+// consumer tells an imported route from one a peer advertised. Both read the
+// flag through toPathApiUtil, and the v4.9.0 merge replaced that with
+// upstream's copy, which never set it: from then on every imported path was
+// reported as peer-learned. The only test of the flag built its apiutil.Path
+// by hand, so it never reached the conversion that lost it. This one starts
+// from a real import cycle.
+func TestImportedPathIsReportedAsNetlink(t *testing.T) {
+	s, n := newTestImportServer(t, []string{"eth0"},
+		map[string][]*netutils.ConnectedRoute{"eth0": {connected(t, "10.0.1.1/24")}})
+
+	// Watch before anything is added, so the best-path events carry both paths.
+	watched := make(chan []*apiutil.Path, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	require.NoError(t, s.WatchEvent(ctx, WatchEventMessageCallbacks{
+		OnBestPath: func(paths []*apiutil.Path, _ time.Time) { watched <- paths },
+	}, WatchBestPath(false)))
+
+	// A path whose source is a peer, not netlink. A nil source would skip the
+	// copy in toPathApiUtil, so it could not catch a flag set unconditionally.
+	peerNlri, err := bgp.NewIPAddrPrefix(netip.MustParsePrefix("10.0.2.0/24"))
+	require.NoError(t, err)
+	nh, err := bgp.NewPathAttributeNextHop(netip.MustParseAddr("192.0.2.2"))
+	require.NoError(t, err)
+	_, err = s.AddPath(apiutil.AddPathRequest{Paths: []*apiutil.Path{{
+		Family:      bgp.RF_IPv4_UC,
+		Nlri:        peerNlri,
+		Attrs:       []bgp.PathAttributeInterface{bgp.NewPathAttributeOrigin(bgp.BGP_ORIGIN_ATTR_TYPE_IGP), nh},
+		PeerASN:     65002,
+		PeerID:      netip.MustParseAddr("192.0.2.2"),
+		PeerAddress: netip.MustParseAddr("192.0.2.2"),
+	}}})
+	require.NoError(t, err)
+
+	n.runImportCycle()
+	require.Equal(t, 1, advertisedCount(n, ""), "the connected route should be imported")
+
+	check := func(t *testing.T, byPrefix map[string]*apiutil.Path) {
+		t.Helper()
+		imported := byPrefix["10.0.1.0/24"]
+		require.NotNil(t, imported, "the imported path is missing")
+		assert.True(t, imported.IsNetlink)
+		assert.Equal(t, "eth0", imported.NetlinkIfName)
+		p := toPathApi(imported, false, false, false)
+		assert.True(t, p.GetNetlink().GetIsNetlink())
+		assert.Equal(t, "eth0", p.GetNetlink().GetIfName())
+		assert.Equal(t, "0.0.0.1", p.NeighborIp, "a netlink path reports the netlink source ID as its neighbor")
+
+		learned := byPrefix["10.0.2.0/24"]
+		require.NotNil(t, learned, "the peer-learned path is missing")
+		assert.False(t, learned.IsNetlink)
+		assert.Empty(t, learned.NetlinkIfName)
+		assert.Nil(t, toPathApi(learned, false, false, false).Netlink)
+	}
+
+	t.Run("ListPath", func(t *testing.T) {
+		byPrefix := map[string]*apiutil.Path{}
+		require.NoError(t, s.ListPath(apiutil.ListPathRequest{
+			TableType: api.TableType_TABLE_TYPE_GLOBAL,
+			Family:    bgp.RF_IPv4_UC,
+		}, func(prefix bgp.NLRI, paths []*apiutil.Path) {
+			for _, p := range paths {
+				byPrefix[prefix.String()] = p
+			}
+		}))
+		check(t, byPrefix)
+	})
+
+	t.Run("WatchEvent", func(t *testing.T) {
+		byPrefix := map[string]*apiutil.Path{}
+		timeout := time.After(10 * time.Second)
+		for len(byPrefix) < 2 {
+			select {
+			case paths := <-watched:
+				for _, p := range paths {
+					byPrefix[p.Nlri.String()] = p
+				}
+			case <-timeout:
+				t.Fatalf("best-path events for both prefixes not seen; got %v", byPrefix)
+			}
+		}
+		check(t, byPrefix)
+	})
 }
 
 // TestImportCycleDiscardsScanInvalidatedMidFlight is the generation counter.

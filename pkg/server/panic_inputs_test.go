@@ -94,6 +94,53 @@ func TestDeletePeerByInterfaceWithoutLinkLocalIsExplicit(t *testing.T) {
 		"the caller supplied an interface, not an address; blaming the address misdirects")
 }
 
+// A peer configured on an interface is deleted by that interface even when the
+// kernel cannot name its address.
+//
+// The lookup asked the kernel's IPv6 neighbour table, which has no answer once
+// the link is down, the interface is gone or the neighbour entry has aged out:
+// DeletePeer failed and the peer stayed configured. The fork found the peer in
+// neighborMap by its configured interface until the v4.9.0 merge replaced that.
+// "lo" never has a link-local neighbour, so it stands in for all three.
+func TestDeletePeerByInterfaceWithoutKernelNeighbour(t *testing.T) {
+	s := newPanicTestServer(t)
+
+	// With no link-local neighbour on lo, AddPeer keeps the configured address.
+	require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+		Conf:      &api.PeerConf{NeighborAddress: "192.0.2.2", NeighborInterface: "lo", PeerAsn: 2},
+		Transport: &api.Transport{PassiveMode: true},
+	}}))
+
+	require.NoError(t, s.DeletePeer(context.Background(), &api.DeletePeerRequest{Interface: "lo"}))
+
+	var peers int
+	require.NoError(t, s.ListPeer(context.Background(), &api.ListPeerRequest{},
+		func(*api.Peer) { peers++ }))
+	assert.Zero(t, peers, "the peer must be gone")
+}
+
+// Two peers on one interface: the interface does not say which to delete, and
+// map iteration order would otherwise pick one at random.
+func TestDeletePeerByAmbiguousInterfaceDeletesNothing(t *testing.T) {
+	s := newPanicTestServer(t)
+
+	for _, addr := range []string{"192.0.2.2", "192.0.2.3"} {
+		require.NoError(t, s.AddPeer(context.Background(), &api.AddPeerRequest{Peer: &api.Peer{
+			Conf:      &api.PeerConf{NeighborAddress: addr, NeighborInterface: "lo", PeerAsn: 2},
+			Transport: &api.Transport{PassiveMode: true},
+		}}))
+	}
+
+	err := s.DeletePeer(context.Background(), &api.DeletePeerRequest{Interface: "lo"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "more than one peer")
+
+	var peers int
+	require.NoError(t, s.ListPeer(context.Background(), &api.ListPeerRequest{},
+		func(*api.Peer) { peers++ }))
+	assert.Equal(t, 2, peers, "neither peer may be deleted")
+}
+
 func TestDeletePeerWithMalformedAddressReturnsError(t *testing.T) {
 	s := newPanicTestServer(t)
 

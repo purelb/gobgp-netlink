@@ -5919,6 +5919,9 @@ func TestSetNetlinkNexthops(t *testing.T) {
 			check("IPv4Nexthop", info.IPv4Nexthop, tt.v4)
 			check("IPv6Nexthop", info.IPv6Nexthop, tt.v6)
 			check("IPv6LinkLocalNexthop", info.IPv6LinkLocalNexthop, tt.linkLocal)
+			// The configured interface is recorded whether or not it resolves:
+			// it is what netlink export installs a link-local nexthop on.
+			assert.Equal(t, noSuchIface, info.NetlinkIfName)
 		})
 	}
 
@@ -5938,6 +5941,7 @@ func TestSetNetlinkNexthops(t *testing.T) {
 		// and in that form an IPv4 route over an IPv6 session was sent with a
 		// 16-byte NEXT_HOP that FRR discards.
 		assert.Len(t, info.IPv4Nexthop, net.IPv4len, "the IPv4 next hop must be in 4-byte form")
+		assert.Equal(t, iface, info.NetlinkIfName)
 	})
 }
 
