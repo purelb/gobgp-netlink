@@ -831,7 +831,8 @@ func Test_BfdServerLoopSurvivesResetPeerInFlight(t *testing.T) {
 	}()
 
 	select {
-	case <-done:
+	case err := <-done:
+		assert.NoError(err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("bfdServer.loop wedged: AddPeer blocked while a peer sat in ResetPeer. " +
 			"In the daemon the caller holds s.shared.mu, so this stalls all BGP sessions")

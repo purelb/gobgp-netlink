@@ -383,8 +383,25 @@ func (p *bfdPeer) rxPacket(h *bfd.BFDHeader) {
 		// Discriminator still has to come from that same remote system, or
 		// it can tear the session down without ever having seen it.
 		if yd := p.yourDiscriminator.Load(); yd != 0 && h.MyDiscriminator != yd {
-			p.stats.invalidDiscriminator.Add(1)
-			return
+			// Before Up the binding is only provisional: the remote has not
+			// answered us, so there is no session to protect, and a Down
+			// cannot take this end anywhere from Init. Follow the new remote
+			// session. FRR replaces a dynamic neighbor's session about 1 ms
+			// after creating it, with a new discriminator, once it learns its
+			// local address; the first session still gets one Down packet out.
+			// Keeping that binding means sending Your Discriminator for a
+			// session that no longer exists until this end expires.
+			if p.sessionState() != api.BfdSessionState_BFD_SESSION_STATE_INIT {
+				p.stats.invalidDiscriminator.Add(1)
+				return
+			}
+			p.logger.Debug("Remote BFD session replaced during bring-up",
+				slog.String("Topic", "bfd"),
+				slog.String("Peer", p.peerAddress.String()),
+				slog.Uint64("Old", uint64(yd)),
+				slog.Uint64("New", uint64(h.MyDiscriminator)),
+			)
+			p.yourDiscriminator.Store(h.MyDiscriminator)
 		}
 	}
 
@@ -407,15 +424,25 @@ func (p *bfdPeer) rxPacket(h *bfd.BFDHeader) {
 
 	switch h.State {
 	case bfd.StateAdminDown:
+		// RFC 5882 3.2 and 4.2: AdminDown is not a path failure, and BGP has its
+		// own liveness detection.
 		if p.sessionState() != api.BfdSessionState_BFD_SESSION_STATE_DOWN {
-			p.remoteDown()
+			p.remoteDownKeepBgp("Remote peer signaled BFD admin down")
 		}
 	case bfd.StateDown:
 		switch p.sessionState() {
 		case api.BfdSessionState_BFD_SESSION_STATE_DOWN:
 			p.setStateInit(h.MyDiscriminator)
 		case api.BfdSessionState_BFD_SESSION_STATE_UP:
-			p.remoteDown()
+			// RFC 5880 6.8.6: a system sets diagnostic 3 when the neighbor told
+			// it the session is down, and we are Up, so this is not the remote
+			// reporting a failure of the path. FRR sends it when it deletes a
+			// session, which it does to re-key one as BGP comes up.
+			if h.Diagnostic == bfd.DiagnosticNeighborSignaledSessionDown {
+				p.remoteDownKeepBgp("Remote peer closed its BFD session")
+			} else {
+				p.remoteDown()
+			}
 		}
 	case bfd.StateInit:
 		switch p.sessionState() {
@@ -505,7 +532,18 @@ func (p *bfdPeer) expiry() {
 	// RFC 5880 4.1: this is why we are declaring the session down.
 	p.localDiag.Store(int32(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_DETECTION_TIMEOUT))
 
-	p.resetPeer()
+	// Only an Up session that expires is a path failure. An Init session never
+	// came up, so there is no connectivity for BGP to lose. RFC 5882 3.3: "The
+	// BFD state machine transitions that occur in the process of bringing up a
+	// BFD session in such situations SHOULD NOT cause a connectivity failure
+	// notification to the clients."
+	//
+	// Resetting BGP here also stopped BFD from ever recovering. Against FRR a
+	// dynamic neighbor's BFD session only lives as long as its BGP session, so
+	// each reset deleted the session this one was trying to reach.
+	if p.sessionState() == api.BfdSessionState_BFD_SESSION_STATE_UP {
+		p.resetPeer()
+	}
 	p.setStateDown()
 }
 
@@ -523,6 +561,19 @@ func (p *bfdPeer) remoteDown() {
 	)
 
 	p.resetPeer()
+	p.setStateDown()
+}
+
+// remoteDownKeepBgp follows the remote system down when what it signaled is not
+// a path failure, so the BGP session stays up. RFC 5880 6.8.6 sets LocalDiag to 3
+// for this transition.
+func (p *bfdPeer) remoteDownKeepBgp(reason string) {
+	p.logger.Info(reason,
+		slog.String("Topic", "bfd"),
+		slog.String("Peer", p.peerAddress.String()),
+	)
+
+	p.localDiag.Store(int32(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_NEIGHBOR_SIGNALED_SESSION_DOWN))
 	p.setStateDown()
 }
 
