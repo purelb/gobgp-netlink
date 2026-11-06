@@ -48,8 +48,8 @@ Upstream tags reach this repository. `v1.30` through `v1.33` are old
 merges. Reusing upstream's own numbering - tagging `v4.9.1` on top of their
 `v4.9.0` - would collide the day upstream releases that version.
 
-Upstream is at `4.9.0`. They will not reach `4.900`, so the series is ours
-alone and can never clash.
+Upstream's newest release is `4.11.0`. They will not reach `4.900`, so the
+series is ours alone and can never clash.
 
 The patch component increments once per fork release:
 
@@ -64,7 +64,8 @@ The patch component increments once per fork release:
 | v1.3.7 | v4.900.7 |
 | v1.3.8 | v4.900.8 |
 | v1.3.9 | v4.900.9 |
-| next | v4.900.10 |
+| v1.3.10 | v4.900.10 |
+| next | v4.900.11 |
 
 Never reuse a number. `v4.900.1` was tagged, withdrawn, and is permanently
 spent: `sum.golang.org` had already notarised it against the v1.3.1 commit, and
@@ -113,6 +114,18 @@ a `v4.900.2` release and the other failed uploading assets that already
 existed, and the `v1.3.2` release shipped with no binaries at all.
 
 ## Steps
+
+First decide what ships in the release. Tags cannot be withdrawn, so do this
+before the release commit, not after:
+
+```sh
+gh pr list --author app/dependabot --state open
+GOTOOLCHAIN=go1.26.10 govulncheck -show verbose ./...  # a current Go toolchain
+```
+
+Review each open dependency PR, then merge it or record why it waits. Read the
+whole `govulncheck` output, including advisories in modules the code does not
+call, and fix them or say so in the release notes.
 
 Before tagging, merge a commit to `main` that sets `FORK_MAJOR`, `FORK_MINOR`
 and `FORK_PATCH` in `internal/pkg/version/version.go` to the release, and adds
