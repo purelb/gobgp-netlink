@@ -28,8 +28,9 @@ Supported behavior:
 - outgoing BFD packets sent with TTL/Hop Limit `255`;
 - BFD states `DOWN`, `INIT`, `UP`, and `ADMIN_DOWN`;
 - Poll/Final handling in control packets;
-- hard BGP peer reset when the BFD session expires or the remote peer signals
-  `DOWN`;
+- hard BGP peer reset when an `UP` BFD session expires or the remote peer reports
+  a failure by signaling `DOWN`, as described under
+  [Runtime Behavior](#runtime-behavior);
 - BFD configuration through the GoBGP config file and gRPC API;
 - BFD state in peer state returned by the API.
 
@@ -37,9 +38,10 @@ Current scope and limitations:
 
 - BFD authentication, echo mode, demand mode, and other advanced BFD features
   are out of scope for this implementation;
-- remote interval negotiation is limited: GoBGP sends the configured intervals,
-  but currently does not adjust local timers from the peer's advertised
-  `DesiredMinTxInterval` or `RequiredMinRxInterval`.
+- remote interval negotiation is limited: GoBGP takes its detection time from
+  the peer's advertised `DetectMult` and `DesiredMinTxInterval`, but always
+  transmits at its configured interval, ignoring the peer's
+  `RequiredMinRxInterval`.
 
 ## Configuration
 
@@ -65,13 +67,21 @@ Intervals are configured in microseconds.
 ```
 
 With this example, GoBGP sends BFD control packets roughly every `300 ms`.
-The local detection time is:
+Until the first packet arrives, the local detection time is:
 
 ```text
 required-minimum-receive * detection-multiplier
 ```
 
-So `300000 * 3` gives about `900 ms`.
+So `300000 * 3` gives about `900 ms`. After that it follows RFC 5880 6.8.4, using
+the values in each packet accepted from the peer:
+
+```text
+peer's detect multiplier * max(required-minimum-receive, peer's desired tx interval)
+```
+
+A peer that is not yet `UP` commonly advertises a transmit interval of 1 second,
+so detection takes about 3 seconds during bring-up.
 
 If BFD timer values are omitted, GoBGP uses these defaults:
 
@@ -237,9 +247,47 @@ timers. Enabling BFD only on one side is not enough to bring the BFD session up.
 ## Runtime Behavior
 
 When BFD is enabled for a neighbor, GoBGP creates a BFD peer for the neighbor
-address. If the BFD session expires, or if the remote side signals `DOWN`,
-GoBGP performs a hard reset of the corresponding BGP peer with the communication
-string `BFD is down`.
+address. GoBGP performs a hard reset of the corresponding BGP peer, with the
+communication string `BFD is down`, when the BFD session goes from `UP` to `DOWN`
+because of a path failure:
+
+- the detection time expires while the session is `UP`;
+- the remote side signals `DOWN` with any diagnostic other than the one below.
+
+These events take the BFD session down but leave the BGP session alone:
+
+- the detection time expires while the session is `INIT`. The session never came
+  up, so there is no connectivity to lose (RFC 5882 section 3.3), and a BFD session
+  that cannot come up does not cost you BGP. The BGP hold timer is what protects
+  the peer while BFD is not `UP`.
+- the remote side signals `ADMIN_DOWN`, which is not a path failure (RFC 5882
+  sections 3.2 and 4.2).
+- the remote side signals `DOWN` with diagnostic 3, `Neighbor Signaled Session
+  Down`, while this side is `UP`. RFC 5880 has a system set that code when its
+  neighbor told it the session is down, which this side has not done, so it says
+  nothing about the path. A peer that uses this code to report a real failure
+  falls back to the BGP hold timer.
+
+Each of those last two still counts in `failure_transitions` when it takes the
+session out of `UP`.
+
+### FRR replaces its BFD sessions
+
+FRR deletes a BFD session and creates a replacement with a new discriminator when
+`bgpd` learns the session's local address or interface. GoBGP handles both forms
+of this without a BGP reset:
+
+- On a dynamic neighbor (`bgp listen range`), the first session sends one `DOWN`
+  packet and is replaced about 1 ms later, on every establishment. GoBGP may
+  already be `INIT` on it, so while `INIT` it follows a `DOWN` from a new
+  discriminator. BFD is `UP` about a second after BGP.
+- On a configured neighbor's first establishment after `bgpd` starts, the session
+  may already be `UP`. FRR closes it with diagnostic 3, and BFD is `UP` again on
+  the replacement about a second later. During that second, only the BGP hold
+  timer protects the peer.
+
+Once a session is `UP`, a `DOWN` from a different discriminator is still discarded,
+so a stray packet cannot tear down a working session.
 
 Changing BFD configuration through `UpdatePeer` is applied at runtime:
 
@@ -257,7 +305,7 @@ explicit answer rather than a missing section.
 ```bash
 $ gobgp neighbor 192.0.2.2
 ...
-  BFD: enabled, session UP
+  BFD: enabled, session UP (remote UP), diagnostic: no diagnostic
     Intervals: tx 300ms, rx 300ms, multiplier 3 (detect 900ms), port 3784
     Packets: tx 4133, rx 4722, failure transitions 0
 ```
@@ -267,10 +315,10 @@ counters:
 
 ```bash
 $ gobgp bfd
-Peer                             State  Tx         Rx         Transitions
-192.0.2.2                        UP     4133       4722       0
+Peer                             State  Remote Tx        Rx        Transitions
+192.0.2.2                        UP     UP     4133      4722      0
 
-Server: rx 8859  drop 0  error 0  invalid 0  unknown-peer 0
+Server: LISTENING  rx 8859  drop 0  error 0  invalid 0  unknown-peer 0
 ```
 
 Two of those server counters diagnose failures that are otherwise silent:
@@ -281,8 +329,8 @@ Two of those server counters diagnose failures that are otherwise silent:
   and the receive lookup cannot match. If the peer also sets a bind interface,
   transmission still succeeds, so BGP stays up and only the BFD session is dead.
 - `drop` counts packets discarded because a peer's receive queue was full. That
-  queue holds one packet, so any advance means an event loop stalled for longer
-  than one transmit interval.
+  queue holds eight packets, so any advance means an event loop stalled for
+  several transmit intervals.
 
 Intervals are printed as durations because they are configured in
 **microseconds**: `300` means 300 microseconds, not 300 milliseconds.
