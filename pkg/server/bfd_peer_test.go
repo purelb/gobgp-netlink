@@ -613,6 +613,63 @@ func Test_RxPacketAdminDownKeepsBgp(t *testing.T) {
 	}
 }
 
+// Test_RxPacketDownInUpResetsBgpByDiagnostic pins the line between a remote
+// session being closed and the remote reporting a failure. Every other code has
+// to keep resetting BGP, or a real failure signaled by the peer goes unnoticed
+// until the hold timer.
+func Test_RxPacketDownInUpResetsBgpByDiagnostic(t *testing.T) {
+	for _, diag := range []bfd.DiagnosticType{
+		bfd.DiagnosticNoDiagnostic,
+		bfd.DiagnosticControlDetectionTimeExpired,
+		bfd.DiagnosticEchoFunctionFailed,
+		bfd.DiagnosticNeighborSignaledSessionDown,
+		bfd.DiagnosticForwardingPlaneReset,
+		bfd.DiagnosticPathDown,
+		bfd.DiagnosticConcatenatedPathDown,
+		bfd.DiagnosticAdministrativelyDown,
+		bfd.DiagnosticReverseConcatenatedPathDown,
+	} {
+		t.Run(diag.String(), func(t *testing.T) {
+			assert := assert.New(t)
+			p := newBareBfdPeer(t, api.BfdSessionState_BFD_SESSION_STATE_UP, time.Second)
+			p.myDiscriminator = 7
+			p.yourDiscriminator.Store(111)
+
+			p.rxPacket(&bfd.BFDHeader{State: bfd.StateDown, Diagnostic: diag, MyDiscriminator: 111, YourDiscriminator: 7, DetectTimeMultiplier: 3})
+
+			assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
+			ps := p.peerState.(*mockPeerState)
+			if diag == bfd.DiagnosticNeighborSignaledSessionDown {
+				assertNoResetPeer(t, ps, "the remote closed its session; the path is fine")
+			} else {
+				waitResetPeerCount(t, ps, 1)
+			}
+		})
+	}
+}
+
+// Test_RxPacketRekeyWhileUpKeepsBgp replays the sequence captured against FRR
+// 10.5.2 on a configured neighbor's first establishment: BFD is Up, FRR deletes
+// that session with diagnostic 3, and its replacement comes up with a new
+// discriminator. BGP stays up across all of it.
+func Test_RxPacketRekeyWhileUpKeepsBgp(t *testing.T) {
+	assert := assert.New(t)
+
+	p := newBareBfdPeer(t, api.BfdSessionState_BFD_SESSION_STATE_UP, time.Second)
+	p.myDiscriminator = 7
+	const old, replacement = uint32(0x3a4f26d0), uint32(0xf191c703)
+	p.yourDiscriminator.Store(old)
+
+	p.rxPacket(&bfd.BFDHeader{State: bfd.StateDown, Diagnostic: bfd.DiagnosticNeighborSignaledSessionDown, MyDiscriminator: old, YourDiscriminator: 7, DetectTimeMultiplier: 3})
+	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
+	assert.Equal(uint32(0), p.yourDiscriminator.Load())
+
+	p.rxPacket(&bfd.BFDHeader{State: bfd.StateInit, MyDiscriminator: replacement, YourDiscriminator: 7, DetectTimeMultiplier: 3})
+	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_UP, p.sessionState())
+	assert.Equal(replacement, p.yourDiscriminator.Load())
+	assertNoResetPeer(t, p.peerState.(*mockPeerState))
+}
+
 // Test_BfdTxIntervalIsJittered covers RFC 5880 §6.8.7. Without jitter every
 // peer transmits on a fixed period, which across a DaemonSet synchronises every
 // node's transmit phase and lines up every node's BGP reset on a fabric event.

@@ -434,7 +434,15 @@ func (p *bfdPeer) rxPacket(h *bfd.BFDHeader) {
 		case api.BfdSessionState_BFD_SESSION_STATE_DOWN:
 			p.setStateInit(h.MyDiscriminator)
 		case api.BfdSessionState_BFD_SESSION_STATE_UP:
-			p.remoteDown()
+			// RFC 5880 6.8.6: a system sets diagnostic 3 when the neighbor told
+			// it the session is down, and we are Up, so this is not the remote
+			// reporting a failure of the path. FRR sends it when it deletes a
+			// session, which it does to re-key one as BGP comes up.
+			if h.Diagnostic == bfd.DiagnosticNeighborSignaledSessionDown {
+				p.remoteDownKeepBgp("Remote peer closed its BFD session")
+			} else {
+				p.remoteDown()
+			}
 		}
 	case bfd.StateInit:
 		switch p.sessionState() {
