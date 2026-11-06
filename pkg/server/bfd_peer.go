@@ -424,8 +424,10 @@ func (p *bfdPeer) rxPacket(h *bfd.BFDHeader) {
 
 	switch h.State {
 	case bfd.StateAdminDown:
+		// RFC 5882 3.2 and 4.2: AdminDown is not a path failure, and BGP has its
+		// own liveness detection.
 		if p.sessionState() != api.BfdSessionState_BFD_SESSION_STATE_DOWN {
-			p.remoteDown()
+			p.remoteDownKeepBgp("Remote peer signaled BFD admin down")
 		}
 	case bfd.StateDown:
 		switch p.sessionState() {
@@ -551,6 +553,19 @@ func (p *bfdPeer) remoteDown() {
 	)
 
 	p.resetPeer()
+	p.setStateDown()
+}
+
+// remoteDownKeepBgp follows the remote system down when what it signaled is not
+// a path failure, so the BGP session stays up. RFC 5880 6.8.6 sets LocalDiag to 3
+// for this transition.
+func (p *bfdPeer) remoteDownKeepBgp(reason string) {
+	p.logger.Info(reason,
+		slog.String("Topic", "bfd"),
+		slog.String("Peer", p.peerAddress.String()),
+	)
+
+	p.localDiag.Store(int32(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_NEIGHBOR_SIGNALED_SESSION_DOWN))
 	p.setStateDown()
 }
 

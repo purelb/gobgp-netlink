@@ -589,6 +589,30 @@ func Test_RxPacketInitDoesNotFollowOtherStates(t *testing.T) {
 	}
 }
 
+// Test_RxPacketAdminDownKeepsBgp: a remote system disabling BFD for maintenance
+// takes the BFD session down but says nothing about the path (RFC 5882 3.2, 4.2).
+func Test_RxPacketAdminDownKeepsBgp(t *testing.T) {
+	for _, state := range []api.BfdSessionState{
+		api.BfdSessionState_BFD_SESSION_STATE_INIT,
+		api.BfdSessionState_BFD_SESSION_STATE_UP,
+	} {
+		t.Run(state.String(), func(t *testing.T) {
+			assert := assert.New(t)
+			p := newBareBfdPeer(t, state, time.Second)
+			p.myDiscriminator = 7
+			p.yourDiscriminator.Store(111)
+
+			p.rxPacket(&bfd.BFDHeader{State: bfd.StateAdminDown, MyDiscriminator: 111, YourDiscriminator: 7, DetectTimeMultiplier: 3})
+
+			assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
+			assert.Equal(uint32(0), p.yourDiscriminator.Load())
+			assert.Equal(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_NEIGHBOR_SIGNALED_SESSION_DOWN,
+				api.BfdDiagnosticCode(p.localDiag.Load()))
+			assertNoResetPeer(t, p.peerState.(*mockPeerState))
+		})
+	}
+}
+
 // Test_BfdTxIntervalIsJittered covers RFC 5880 §6.8.7. Without jitter every
 // peer transmits on a fixed period, which across a DaemonSet synchronises every
 // node's transmit phase and lines up every node's BGP reset on a fabric event.
