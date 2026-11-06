@@ -835,7 +835,11 @@ jobs:
         run: |
           docker load < artifact/gobgp.tar
           sudo apt-get update
-          sudo apt-get install -y linux-modules-extra-$(uname -r)
+          # Ubuntu's 7.0 Azure kernels have no -extra package, and vrf.ko is in
+          # their base modules package. modprobe below fails if it is missing.
+          if apt-cache show linux-modules-extra-$(uname -r) >/dev/null 2>&1; then
+            sudo apt-get install -y linux-modules-extra-$(uname -r)
+          fi
           sudo modprobe vrf
           sudo pip3 install -r test/pip-requires.txt
           PYTHONPATH=test python3 -m pytest test/scenario_test/tcp_md5_test.py --gobgp-image gobgp -x -s
