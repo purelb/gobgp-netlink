@@ -455,6 +455,7 @@ func newBareBfdPeer(t *testing.T, state api.BfdSessionState, expiry time.Duratio
 		logger:         slog.Default(),
 		peerAddress:    netip.MustParseAddr("127.0.0.1"),
 		expiryInterval: expiry,
+		rxInterval:     expiry,
 		eventExpiry:    time.NewTicker(time.Hour),
 	}
 	p.state.Store(int32(state))
@@ -540,6 +541,52 @@ func Test_BfdExpiryResetsBgpOnlyFromUp(t *testing.T) {
 		assert.Equal(uint64(1), p.stats.downTransitions.Load())
 		waitResetPeerCount(t, p.peerState.(*mockPeerState), 1)
 	})
+}
+
+// Test_RxPacketInitFollowsReplacedRemoteSession replays the sequence captured
+// against FRR 10.5.2 on a dynamic neighbor. The first session sends one Down and
+// is gone about 1 ms later; its replacement sends Down with a new discriminator.
+// Staying bound to the first one is what stopped BFD from coming up.
+func Test_RxPacketInitFollowsReplacedRemoteSession(t *testing.T) {
+	assert := assert.New(t)
+
+	p := newBareBfdPeer(t, api.BfdSessionState_BFD_SESSION_STATE_DOWN, time.Second)
+	p.myDiscriminator = 7
+	const first, replacement = uint32(0xc32a22cc), uint32(0xbfc21c02)
+
+	p.rxPacket(&bfd.BFDHeader{State: bfd.StateDown, MyDiscriminator: first, DetectTimeMultiplier: 3})
+	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_INIT, p.sessionState())
+	assert.Equal(first, p.yourDiscriminator.Load())
+
+	p.rxPacket(&bfd.BFDHeader{State: bfd.StateDown, MyDiscriminator: replacement, DetectTimeMultiplier: 3})
+	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_INIT, p.sessionState())
+	assert.Equal(replacement, p.yourDiscriminator.Load(),
+		"our next packet has to name the session that still exists")
+	assert.Equal(uint64(0), p.stats.invalidDiscriminator.Load())
+
+	// The replacement hears us and answers, which completes the handshake.
+	p.rxPacket(&bfd.BFDHeader{State: bfd.StateUp, MyDiscriminator: replacement, YourDiscriminator: 7, DetectTimeMultiplier: 3})
+	assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_UP, p.sessionState())
+	assert.Equal(replacement, p.yourDiscriminator.Load())
+	assertNoResetPeer(t, p.peerState.(*mockPeerState))
+}
+
+// Test_RxPacketInitDoesNotFollowOtherStates: only a Down or AdminDown may omit
+// Your Discriminator, so following a replacement must not widen what Init accepts.
+func Test_RxPacketInitDoesNotFollowOtherStates(t *testing.T) {
+	assert := assert.New(t)
+
+	for _, state := range []bfd.StateType{bfd.StateInit, bfd.StateUp} {
+		p := newBareBfdPeer(t, api.BfdSessionState_BFD_SESSION_STATE_INIT, time.Second)
+		p.myDiscriminator = 7
+		p.yourDiscriminator.Store(111)
+
+		p.rxPacket(&bfd.BFDHeader{State: state, MyDiscriminator: 222, DetectTimeMultiplier: 3})
+
+		assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_INIT, p.sessionState())
+		assert.Equal(uint32(111), p.yourDiscriminator.Load())
+		assert.Equal(uint64(1), p.stats.invalidDiscriminator.Load())
+	}
 }
 
 // Test_BfdTxIntervalIsJittered covers RFC 5880 §6.8.7. Without jitter every

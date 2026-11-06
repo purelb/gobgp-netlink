@@ -383,8 +383,25 @@ func (p *bfdPeer) rxPacket(h *bfd.BFDHeader) {
 		// Discriminator still has to come from that same remote system, or
 		// it can tear the session down without ever having seen it.
 		if yd := p.yourDiscriminator.Load(); yd != 0 && h.MyDiscriminator != yd {
-			p.stats.invalidDiscriminator.Add(1)
-			return
+			// Before Up the binding is only provisional: the remote has not
+			// answered us, so there is no session to protect, and a Down
+			// cannot take this end anywhere from Init. Follow the new remote
+			// session. FRR replaces a dynamic neighbor's session about 1 ms
+			// after creating it, with a new discriminator, once it learns its
+			// local address; the first session still gets one Down packet out.
+			// Keeping that binding means sending Your Discriminator for a
+			// session that no longer exists until this end expires.
+			if p.sessionState() != api.BfdSessionState_BFD_SESSION_STATE_INIT {
+				p.stats.invalidDiscriminator.Add(1)
+				return
+			}
+			p.logger.Debug("Remote BFD session replaced during bring-up",
+				slog.String("Topic", "bfd"),
+				slog.String("Peer", p.peerAddress.String()),
+				slog.Uint64("Old", uint64(yd)),
+				slog.Uint64("New", uint64(h.MyDiscriminator)),
+			)
+			p.yourDiscriminator.Store(h.MyDiscriminator)
 		}
 	}
 
