@@ -507,6 +507,41 @@ func Test_BfdExpiryHonoursTheDetectDeadline(t *testing.T) {
 	})
 }
 
+// Test_BfdExpiryResetsBgpOnlyFromUp: a session that expires before reaching Up
+// is a bring-up that has not finished, not a path failure, so it must not take
+// BGP down. Up is the case that still has to reset, or BFD detects nothing.
+func Test_BfdExpiryResetsBgpOnlyFromUp(t *testing.T) {
+	const expiry = 900 * time.Millisecond
+
+	t.Run("expiring in Init leaves BGP alone and clears the binding", func(t *testing.T) {
+		assert := assert.New(t)
+		p := newBareBfdPeer(t, api.BfdSessionState_BFD_SESSION_STATE_INIT, expiry)
+		p.yourDiscriminator.Store(111)
+
+		p.expiry()
+
+		assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
+		assert.Equal(uint32(0), p.yourDiscriminator.Load(),
+			"a stale binding left behind would keep rejecting the remote session")
+		assert.Equal(uint64(1), p.stats.expired.Load())
+		assert.Equal(uint64(0), p.stats.downTransitions.Load())
+		assertNoResetPeer(t, p.peerState.(*mockPeerState),
+			"a session that never came up must not reset BGP")
+	})
+
+	t.Run("expiring in Up resets BGP", func(t *testing.T) {
+		assert := assert.New(t)
+		p := newBareBfdPeer(t, api.BfdSessionState_BFD_SESSION_STATE_UP, expiry)
+		p.yourDiscriminator.Store(111)
+
+		p.expiry()
+
+		assert.Equal(api.BfdSessionState_BFD_SESSION_STATE_DOWN, p.sessionState())
+		assert.Equal(uint64(1), p.stats.downTransitions.Load())
+		waitResetPeerCount(t, p.peerState.(*mockPeerState), 1)
+	})
+}
+
 // Test_BfdTxIntervalIsJittered covers RFC 5880 §6.8.7. Without jitter every
 // peer transmits on a fixed period, which across a DaemonSet synchronises every
 // node's transmit phase and lines up every node's BGP reset on a fabric event.

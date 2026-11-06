@@ -505,7 +505,18 @@ func (p *bfdPeer) expiry() {
 	// RFC 5880 4.1: this is why we are declaring the session down.
 	p.localDiag.Store(int32(api.BfdDiagnosticCode_BFD_DIAGNOSTIC_CODE_DETECTION_TIMEOUT))
 
-	p.resetPeer()
+	// Only an Up session that expires is a path failure. An Init session never
+	// came up, so there is no connectivity for BGP to lose. RFC 5882 3.3: "The
+	// BFD state machine transitions that occur in the process of bringing up a
+	// BFD session in such situations SHOULD NOT cause a connectivity failure
+	// notification to the clients."
+	//
+	// Resetting BGP here also stopped BFD from ever recovering. Against FRR a
+	// dynamic neighbor's BFD session only lives as long as its BGP session, so
+	// each reset deleted the session this one was trying to reach.
+	if p.sessionState() == api.BfdSessionState_BFD_SESSION_STATE_UP {
+		p.resetPeer()
+	}
 	p.setStateDown()
 }
 
