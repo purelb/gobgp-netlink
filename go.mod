@@ -10,7 +10,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gaissmai/bart v0.30.0
 	github.com/getsentry/sentry-go v0.49.0
-	github.com/go-test/deep v1.1.1
+	github.com/go-test/deep v1.1.2
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
